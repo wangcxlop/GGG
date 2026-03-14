@@ -1,4 +1,4 @@
-using MixedGWR, SpatRasters, ArchGDAL
+using MixedGWR, SpatialRasterLite, ArchGDAL
 using Ipaper, RTableTools, Distances
 
 # load data
