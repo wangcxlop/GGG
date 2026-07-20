@@ -31,8 +31,38 @@ function ST_GWR(X::AbstractMatrix{T}, Y::AbstractMatrix{T},
   return Ypred
 end
 
+function _nearest_weights(wMat::AbstractMatrix{T}, n_max::Int) where {T<:Real}
+  _, n_target = size(wMat)
+  inds = Matrix{Int}(undef, n_max, n_target)
+  ws = Matrix{T}(undef, n_max, n_target)
+
+  @inbounds for i in 1:n_target
+    w = @view wMat[:, i]
+    idx = partialsortperm(w, 1:n_max; rev=true)
+    for r in 1:n_max
+      inds[r, i] = idx[r]
+      ws[r, i] = w[idx[r]]
+    end
+  end
+  return inds, ws
+end
+
+"""Fast ST-GWR using the `n_max` largest spatial weights per target."""
 function ST_GWR_fast(X::AbstractMatrix{T}, Y::AbstractMatrix{T},
-  wMat::AbstractMatrix{T}; Xpred::AbstractMatrix{T}) where {T<:Real}
+  wMat::AbstractMatrix{T}; Xpred::AbstractMatrix{T},
+  n_max::Int=8) where {T<:Real}
+  n_control, n_target = size(wMat)
 
+  inds, ws = _nearest_weights(wMat, n_max)
+  solvers = map(_ -> GWRSolver(X, Y; n_max), 1:get_nthread())
+  Ypred = zeros(T, n_target, size(Y, 2))
 
+  @inbounds @threads for i in 1:n_target
+    solver = solvers[Threads.threadid()]
+    idx = @view inds[:, i]
+    w = @view ws[:, i]
+    β = _solve_chol_fast!(solver, X, Y, idx, w)
+    fitted!(@view(Ypred[i, :]), @view(Xpred[i, :]), β)
+  end
+  return Ypred
 end

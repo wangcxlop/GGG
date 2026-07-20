@@ -10,7 +10,7 @@ import Base.summary
 
 export MGWR, update_weight!
 export GWR
-export ST_GWR
+export ST_GWR, ST_GWR_fast
 export GWR_mixed, GWR_mixed_trace, gwr_q, gw_weight_vec, solver_reg, fitted
 export fitted, fitted!, predict, summary
 
