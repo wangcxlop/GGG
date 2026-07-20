@@ -62,7 +62,7 @@ for bw in bandwidths
   wMat_rp = gw_weight(dMat_rp, bw; kernel, adaptive)
 
   np = 3 # lon + lat + alt
-  @time Ypred = ST_GWR(X[:, 1:np], Y, wMat_rp; Xpred=Xpred[:, 1:np])
+  @time Ypred = ST_GWR_fast(X[:, 1:np], Y, wMat_rp; Xpred=Xpred[:, 1:np], n_max=8)
 
   nlon, nlat = size(dem)[1:2]
   R = zeros(Float32, nlon, nlat, length(dates))

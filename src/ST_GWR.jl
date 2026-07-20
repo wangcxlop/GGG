@@ -31,7 +31,8 @@ function ST_GWR(X::AbstractMatrix{T}, Y::AbstractMatrix{T},
   return Ypred
 end
 
-function _nearest_weights(wMat::AbstractMatrix{T}, n_max::Int) where {T<:Real}
+function gwr_neighbors(wMat::AbstractMatrix{T}, n_max::Int) where {T<:Real}
+  1 <= n_max <= size(wMat, 1) || throw(ArgumentError("invalid n_max"))
   _, n_target = size(wMat)
   inds = Matrix{Int}(undef, n_max, n_target)
   ws = Matrix{T}(undef, n_max, n_target)
@@ -47,22 +48,35 @@ function _nearest_weights(wMat::AbstractMatrix{T}, n_max::Int) where {T<:Real}
   return inds, ws
 end
 
-"""Fast ST-GWR using the `n_max` largest spatial weights per target."""
-function ST_GWR_fast(X::AbstractMatrix{T}, Y::AbstractMatrix{T},
-  wMat::AbstractMatrix{T}; Xpred::AbstractMatrix{T},
-  n_max::Int=8) where {T<:Real}
-  n_control, n_target = size(wMat)
+function ST_GWR_fast!(Ypred::AbstractMatrix{T}, X::AbstractMatrix{T},
+  Y::AbstractMatrix{T}, inds::Matrix{Int}, ws::Matrix{T};
+  Xpred::AbstractMatrix{T}) where {T<:Real}
+  size(inds) == size(ws) || throw(DimensionMismatch("inds and ws differ"))
 
-  inds, ws = _nearest_weights(wMat, n_max)
-  solvers = map(_ -> GWRSolver(X, Y; n_max), 1:get_nthread())
-  Ypred = zeros(T, n_target, size(Y, 2))
+  n_max, n_target = size(inds)
+  solvers = map(_ -> _fast_solver(X, Y, n_max), 1:Threads.nthreads(:default))
+  thread_offset = Threads.nthreads(:interactive)
 
-  @inbounds @threads for i in 1:n_target
-    solver = solvers[Threads.threadid()]
-    idx = @view inds[:, i]
-    w = @view ws[:, i]
-    β = _solve_chol_fast!(solver, X, Y, idx, w)
+  @inbounds @threads :static for i in 1:n_target
+    solver = solvers[Threads.threadid() - thread_offset]
+    β = _solve_chol_fast!(solver, X, Y, @view(inds[:, i]), @view(ws[:, i]))
     fitted!(@view(Ypred[i, :]), @view(Xpred[i, :]), β)
   end
   return Ypred
+end
+
+"""Fast ST-GWR using the `n_max` largest spatial weights per target."""
+function ST_GWR_fast(X::AbstractMatrix{T}, Y::AbstractMatrix{T},
+  inds::Matrix{Int}, ws::Matrix{T};
+  Xpred::AbstractMatrix{T}) where {T<:Real}
+
+  Ypred = zeros(T, size(inds, 2), size(Y, 2))
+  ST_GWR_fast!(Ypred, X, Y, inds, ws; Xpred)
+end
+
+function ST_GWR_fast(X::AbstractMatrix{T}, Y::AbstractMatrix{T},
+  wMat::AbstractMatrix{T}; Xpred::AbstractMatrix{T}, n_max::Int=8) where {T<:Real}
+
+  inds, ws = gwr_neighbors(wMat, n_max)
+  ST_GWR_fast(X, Y, inds, ws; Xpred)
 end

@@ -20,14 +20,21 @@
   ## Run
   np = 2 # lon + lat
   Xlocal = X[:, 1:np]
-  @time Ypred2 = ST_GWR(Xlocal, Y, wMat; Xpred=Xlocal)
-  @time Ypred_fast = ST_GWR_fast(Xlocal, Y, wMat; Xpred=Xlocal, n_max=Int(bw))
+  @time Ypred2 = ST_GWR(Xlocal, Y, wMat; Xpred=Xlocal);
+
+  Ypred_fast = similar(Ypred2)
+  inds, ws = gwr_neighbors(wMat, Int(bw))
+  @time ST_GWR_fast!(Ypred_fast, Xlocal, Y, inds, ws; Xpred=Xlocal);
+
   @test Ypred2[:, 1] == Ypred2[:, 2]
   @test Ypred_fast ≈ Ypred2
 end
 
+# 3.080392 seconds (1.96 k allocations: 3.976 GiB, 10.74% gc time, 27 lock conflicts)
+# 0.462219 seconds (1.73 k allocations: 664.364 MiB, 13.87% gc time)
+
 ## 
 # using BenchmarkTools
 # @btime Ypred2 = ST_GWR(Xlocal, Y, wMat; Xpred=Xlocal);
-# @btime Ypred_fast = ST_GWR_fast(Xlocal, Y, wMat; 
-#   Xpred=Xlocal, n_max=Int(bw));
+# @btime ST_GWR_fast!($Ypred_fast, $Xlocal, $Y, $inds, $ws;
+#   Xpred=$Xlocal);

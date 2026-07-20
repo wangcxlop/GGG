@@ -1,5 +1,5 @@
 using MixedGWR, RTableTools, Distances, Test
-include("main_pkgs.jl")
+include("main_pkgs.jl");
 
 @testset "GWR" begin
   for adaptive in [true, false]

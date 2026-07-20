@@ -9,12 +9,14 @@ export solve_chol!, solve_chol
 @with_kw mutable struct GWRSolver{T}
   n_control::Int = 100
   n_max::Int = 8
+
   p::Int = 2
   n_time::Int = 10
   # X::Matrix{T} = zeros(T, n_control, p)           # k×p
   # Y::Matrix{T} = zeros(T, n_control, n_time)
   # w::Vector{T} = zeros(T, n_control)              # k, 
-  WY::Matrix{T} = zeros(T, n_max, n_time)
+  WY::Matrix{T} = zeros(T, n_control, n_time)
+  XW::Matrix{T} = zeros(T, p, n_max)
   XtWX::Matrix{T} = zeros(T, p, p)
   XtWY::Matrix{T} = zeros(T, p, n_time)
   β::Matrix{T} = zeros(T, p, n_time)
@@ -25,6 +27,16 @@ function GWRSolver(X::AbstractMatrix{T}, Y::AbstractMatrix{T};
   n_control, p = size(X)
   n_time = size(Y, 2)
   GWRSolver{T}(; n_control, n_max, p, n_time)
+end
+
+function _fast_solver(X::AbstractMatrix{T}, Y::AbstractMatrix{T},
+  n_max::Int) where {T<:Real}
+  n_control, p = size(X)
+  n_time = size(Y, 2)
+  R = zeros(T, p, n_time)
+  GWRSolver{T}(;
+    n_control, n_max, p, n_time,
+    WY=zeros(T, 0, 0), XW=zeros(T, p, n_max), XtWY=R, β=R)
 end
 
 
@@ -40,7 +52,8 @@ function _chol_solve!(β::AbstractMatrix{T}, XtWX::AbstractMatrix{T},
     XtWX[i, i] += λ
   end
   F = cholesky!(Symmetric(XtWX, :L); check=false)
-  ldiv!(β, F, XtWY)
+  β === XtWY || copyto!(β, XtWY)
+  ldiv!(F, β)
   return β
 end
 
@@ -74,27 +87,36 @@ end
 function _solve_chol_fast!(solver::GWRSolver{T},
   X::AbstractMatrix{T}, Y::AbstractMatrix{T}, inds::AbstractVector{Int},
   w::AbstractVector{T}; λ::T=T(1e-8)) where {T<:Real}
-  (; β, XtWX, XtWY) = solver
+  (; β, XW, XtWX, XtWY) = solver
   p = size(X, 2)
   ntime = size(Y, 2)
-  fill!(XtWX, zero(T))
-  fill!(XtWY, zero(T))
+  n = length(inds)
 
-  @inbounds for r in eachindex(inds, w)
+  @inbounds for r in 1:n
     i = inds[r]
-    wi = w[r]
-    for b in 1:p
-      xwb = wi * X[i, b]
-      for a in b:p
-        XtWX[a, b] += X[i, a] * xwb
-      end
+    for a in 1:p
+      XW[a, r] = X[i, a] * w[r]
     end
+  end
 
-    for t in 1:ntime
-      ywi = wi * Y[i, t]
-      for a in 1:p
-        XtWY[a, t] += X[i, a] * ywi
+  # XtWX是对称矩阵，只计算下三角（a ≥ b), Symmetric(XtWX, :L)补齐
+  @inbounds for b in 1:p
+    for a in b:p
+      s = zero(T)
+      for r in 1:n
+        s += X[inds[r], a] * XW[b, r]
       end
+      XtWX[a, b] = s
+    end
+  end
+
+  @turbo for t in 1:ntime
+    for a in 1:p
+      s = zero(T)
+      for r in 1:n
+        s += XW[a, r] * Y[inds[r], t]
+      end
+      XtWY[a, t] = s
     end
   end
   _chol_solve!(β, XtWX, XtWY; λ)
