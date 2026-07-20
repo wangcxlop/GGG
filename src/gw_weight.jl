@@ -6,7 +6,7 @@ function gw_weight!(wv::AbstractVector{T}, vdist::AbstractVector{T}, bw::T;
   
   n = length(vdist)
   if adaptive
-    dn = bw / n
+    dn = bw / n # bw此时理解为n个点
     if dn <= 1
       svdist = sort(vdist)
       bw = svdist[Int(bw)]  # Julia is 1-indexed

@@ -33,4 +33,6 @@ include("ST_GWR.jl")
 include("GWR_mixed.jl")
 include("GWR_mixed_trace.jl")
 
+get_nthread() = Threads.nthreads(:interactive) + Threads.nthreads(:default)
+
 end # module MGWR

@@ -8,6 +8,7 @@ export solve_chol!, solve_chol
 # 这里存储的是临时变量
 @with_kw mutable struct GWRSolver{T}
   n_control::Int = 100
+  n_max::Int = 8
   p::Int = 2
   n_time::Int = 10
   # X::Matrix{T} = zeros(T, n_control, p)           # k×p

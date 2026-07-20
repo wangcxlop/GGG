@@ -7,18 +7,19 @@ fun_dist = Haversine(6378.388)
 
 # 目标网格
 begin
-  ra = rast("data/dem_ShiYan_2km.tif", FT=Float64)
-  X1 = st_coords(ra)
+  dem = rast("data/dem_ShiYan_2km.tif", FT=Float64)
+  X1 = st_coords(dem)
   Points = map(x -> x, eachrow(X1))
 
-  X2 = (ra.A[:] * 1.0)
-  Xpred = cbind(X1, X2)
+  X2 = (dem.A[:] * 1.0)
+  Xpred = cbind(X1, X2) # [lon, lat, alt]
 end
 
-f = "/mnt/z/GitHub/jl-pkgs/SpatialRasterLite.jl/Project_十堰/data/ShiYan_Pobs_interpolated_by_IDW.jld2" |> path_mnt
+f = "/mnt/z/GitHub/jl-pkgs/SpatInterp.jl/Project_十堰/data/ShiYan_Pobs_interpolated_by_IDW.jld2"
 l = jldopen(f)
 @unpack st, dates, P = l
 
+## 
 # INPUT
 begin
   coords = Matrix(st[:, [:lon, :lat]])
@@ -27,7 +28,7 @@ begin
   dMat_rp = pairwise(fun_dist, points, Points)
 
   x1 = st[:, [:lon, :lat]] |> Matrix
-  x2 = st_extract(ra, points).value' |> Matrix
+  x2 = st_extract(dem, points).value' |> Matrix
   X = cbind(x1, x2)
 
   ## 只对有降水的日期进行插值
@@ -51,7 +52,7 @@ adaptive = false
 bandwidths = [10.0, 20, 30, 50] # in km
 
 ## 考虑高程效果更好一些
-outdir = "/mnt/z/GitHub/jl-pkgs/SpatialRasterLite.jl/Project_十堰/OUTPUT" |> path_mnt
+outdir = "OUTPUT" |> path_mnt
 
 for bw in bandwidths
   fout = "$outdir/ShiYan_Prcp_Gauged237_201404-202501_2km_GWR3(adaptive=$adaptive,bw=$bw).nc"
@@ -63,11 +64,11 @@ for bw in bandwidths
   np = 3 # lon + lat + alt
   @time Ypred = ST_GWR(X[:, 1:np], Y, wMat_rp; Xpred=Xpred[:, 1:np])
 
-  nlon, nlat = size(ra)[1:2]
+  nlon, nlat = size(dem)[1:2]
   R = zeros(Float32, nlon, nlat, length(dates))
   R[:, :, inds] .= reshape(Ypred, nlon, nlat, length(inds))
 
-  lon, lat = st_dims(ra)
+  lon, lat = st_dims(dem)
   dims = (; lon, lat, time=dates)
   ncsave(fout, true, (; units="mm h-1"); dims, P=R)
 end
