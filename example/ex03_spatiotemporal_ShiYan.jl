@@ -1,7 +1,10 @@
 # ~3 minutes
 using MixedGWR, SpatialRasterLite, ArchGDAL, Distances
 using Ipaper, RTableTools, NetCDFTools
-using JLD2, UnPack, NaNStatistics, DataFrames
+using JLD2, UnPack, NaNStatistics
+
+include(joinpath(@__DIR__, "kfold.jl"))
+using .KfoldGWR
 
 fun_dist = Haversine(6378.388)
 
@@ -11,8 +14,7 @@ begin
   X1 = st_coords(dem)
   Points = map(x -> x, eachrow(X1))
 
-  X2 = (dem.A[:] * 1.0)
-  Xpred = cbind(X1, X2) # [lon, lat, alt]
+  Xpred = cbind(X1, dem.A[:]) # [lon, lat, alt]
 end
 
 f = "/mnt/z/GitHub/jl-pkgs/SpatInterp.jl/Project_十堰/data/ShiYan_Pobs_interpolated_by_IDW.jld2"
@@ -34,24 +36,49 @@ begin
   ## 只对有降水的日期进行插值
   _prcp = NaNStatistics.nansum(P, dims=1)[:]
   inds = findall(_prcp .>= 1.0) # 所有站点总降水大于1mm日期，才进行插值, ~1/3
-  info = DataFrame(; time=dates[inds], inds, prcp=_prcp[inds])
   Y = P[:, inds]
 end
 
-bw = 10 # 3.7
-bw = 20 # 11.4
-bw = 30 # 22.8
-map(x -> sum(x .<= bw), eachrow(dMat)) |> mean
+# 站点空间5折交叉验证：每个站点恰好作为验证样本一次
+spatial_params = [
+  (; adaptive, bw, n_max)
+  for (adaptive, bandwidths) in (
+    (true, (6.0, 10.0, 20.0)),
+    (false, (10.0, 20.0, 30.0, 50.0)),
+  )
+  for bw in bandwidths
+  for n_max in (8, 12)
+]
+param_grid = [merge((; np), p) for np in (2, 3) for p in spatial_params]
+
+# V1：原始版本，不标准化、无截距
+scores_raw = st_gwr_kfold(
+  :gwr, X, Y, dMat, param_grid; k=5, seed=42, standardize=false,
+)
+fwrite(scores_raw, "OUTPUT/ShiYan_ST_GWR_kfold.csv")
+
+# V2：所有解释变量标准化，并加入截距
+scores = st_gwr_kfold(
+  :gwr, X, Y, dMat, param_grid; k=5, seed=42, standardize=true,
+)
+fwrite(scores, "OUTPUT/ShiYan_ST_GWR_kfold_zscore.csv")
+
+# V3：加入截距，仅保留标准化后的经、纬度
+scores_noalt = scores[scores.np .== 2, :]
+fwrite(scores_noalt, "OUTPUT/ShiYan_ST_GWR_kfold_intercept_noalt.csv")
+show(scores_noalt; allrows=true, allcols=true)
+
+# V4：经、纬度为局部变量，高程为全局变量
+mixed_scores = st_gwr_kfold(
+  :mixed, X, Y, dMat, spatial_params; k=5, seed=42,
+)
+fwrite(mixed_scores, "OUTPUT/ShiYan_ST_GWR_mixed_kfold.csv")
+show(mixed_scores; allrows=true, allcols=true)
 
 ## 5 second, (69696, 1000) [n_target, n_time]
-
-adaptive = true
-bandwidths = [6.0, 10.0, 20.0]
-
 adaptive = false
-bandwidths = [10.0, 20, 30, 50] # in km
+bandwidths = (10.0, 20.0, 30.0, 50.0) # km
 
-## 考虑高程效果更好一些
 outdir = "OUTPUT" |> path_mnt
 
 for bw in bandwidths
