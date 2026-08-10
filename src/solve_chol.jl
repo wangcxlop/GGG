@@ -1,3 +1,5 @@
+# 实现的是基于 Choleshy 分解的加权最小二乘求解器， 主要用于GWR或ST-GWR中重复计算局部加权回归系数
+
 # https://chatgpt.com/c/68aadc51-a978-8326-8880-9df82cecb413
 using LinearAlgebra
 

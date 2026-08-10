@@ -5,6 +5,19 @@ const BISQUARE = 2
 const TRICUBE = 3
 const BOXCAR = 4
 
+const GWR_KERNEL_NAMES = (
+  "gaussian",
+  "exponential",
+  "bisquare",
+  "tricube",
+  "boxcar",
+)
+
+function kernel_name(kernel::Integer)
+  0 <= kernel <= 4 || throw(ArgumentError("kernel must be one of 0:4, got $kernel"))
+  return GWR_KERNEL_NAMES[kernel + 1]
+end
+
 
 """
 Calculate the GW weights using different kernel functions
@@ -40,4 +53,4 @@ const GWR_KERNELS = [
 ]
 
 
-export GAUSSIAN, EXPONENTIAL, BISQUARE, TRICUBE, BOXCAR
+export GAUSSIAN, EXPONENTIAL, BISQUARE, TRICUBE, BOXCAR, kernel_name

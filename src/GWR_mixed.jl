@@ -1,3 +1,5 @@
+#拟合 Mixed GWR(混合地理加权回归) 的主函数
+
 """
 Mixed GWR implementation
 

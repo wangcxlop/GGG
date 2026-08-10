@@ -80,3 +80,16 @@ function ST_GWR_fast(X::AbstractMatrix{T}, Y::AbstractMatrix{T},
   inds, ws = gwr_neighbors(wMat, n_max)
   ST_GWR_fast(X, Y, inds, ws; Xpred)
 end
+
+
+
+
+
+
+"这段代码实现的是一种批量时序 GWR：
+
+对每个空间目标点单独建立一个局部加权回归；
+Y 的每一列代表一个时间点；
+同一目标点的所有时间点共用同一个空间权重向量；
+一次矩阵求解同时得到该目标点所有时间的局部系数；
+最终输出每个目标点、每个时间点的预测值"

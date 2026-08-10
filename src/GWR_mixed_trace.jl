@@ -1,3 +1,5 @@
+# 计算混合地理加权回归模型帽子矩阵迹的函数
+
 "Create unit vector (equivalent to e_vec in C++)"
 function e_vec(m::Int, n::Int)::Vector{Float64}
   ret = zeros(Float64, n)

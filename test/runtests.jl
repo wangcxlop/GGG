@@ -14,3 +14,5 @@ end
 include("test-solver.jl")
 include("test-ST_GWR.jl")
 include("test-GWR_mixed.jl")
+include("test-mger-five-kernels.jl")
+include("test-interpolation-benchmark.jl")

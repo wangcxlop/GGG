@@ -1,3 +1,10 @@
+
+
+
+" 整个项目的模块入口文件。 把依赖包、导出函数和各个源代码文件组织到一个名为 MixedGWR 的模块中
+可以被理解为整个项目的“总目录”或“主入口”"
+
+
 module MixedGWR
 
 using LoopVectorization
@@ -22,6 +29,7 @@ Base.Matrix(x::Vector) = reshape(x, length(x), 1)
 include("MGWR.jl")
 include("kernel.jl")
 include("gw_weight.jl")
+include("PrecipitationCorrection.jl")
 include("solve_chol.jl")
 include("solve_reg.jl")
 include("GWR.jl")
