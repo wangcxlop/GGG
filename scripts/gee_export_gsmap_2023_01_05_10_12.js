@@ -7,7 +7,7 @@ var START = ee.Date.fromYMD(YEAR, 1, 1);
 var END = START.advance(1, 'year'); // 右开区间
 
 var AOI = ee.Geometry.Rectangle(
-  [108.672, 29.232, 116.029, 33.200], null, false);
+  [109.4, 31.2, 111.6, 33.4], null, false);
 
 var stationsRaw = ee.FeatureCollection(
   'projects/booming-list-489917-p4/assets/Hubei-STATIONS');
@@ -47,11 +47,15 @@ function normalizeStation(feature) {
     });
 }
 
-// 不按 AOI 执行 filterBounds，避免浮点误差漏掉边界站点。
+// 使用经纬度数值闭区间筛选，避免几何边界浮点误差。
 // 不对 station_id 去重，以保持项目原有月文件的记录结构。
 var stations = stationsRaw
   .map(normalizeStation)
-  .filter(ee.Filter.notNull(['station_id', 'lon', 'lat']));
+  .filter(ee.Filter.notNull(['station_id', 'lon', 'lat']))
+  .filter(ee.Filter.gte('lon', 109.4))
+  .filter(ee.Filter.lte('lon', 111.6))
+  .filter(ee.Filter.gte('lat', 31.2))
+  .filter(ee.Filter.lte('lat', 33.4));
 
 // GSMaP V8 逐小时非雨量站订正版，hourlyPrecipRate 单位为 mm/hr。
 var gsmap = ee.ImageCollection('JAXA/GPM_L3/GSMaP/v8/operational')

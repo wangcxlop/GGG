@@ -4,5 +4,9 @@ Manifest.toml
 docs
 # *.png
 *.nc
+data/raw/copernicus_glo30/
 
 *.csv
+
+data/
+output/

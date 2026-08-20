@@ -117,6 +117,8 @@ function audit_mger_inputs(;
     output_dir::AbstractString,
     analysis_start::DateTime=DateTime(2022, 6, 1, 9),
     analysis_end::DateTime=DateTime(2024, 10, 1, 8),
+    raw_station_meta_path::Union{Nothing, AbstractString}=nothing,
+    study_bounds::Union{Nothing, NTuple{4, Float64}}=nothing,
 )
     mkpath(output_dir)
     metadata = CSV.read(station_meta_path, DataFrame)
@@ -126,6 +128,22 @@ function audit_mger_inputs(;
     metadata.station_id = string.(metadata.station_id)
     nrow(unique(metadata, :station_id)) == nrow(metadata) ||
         error("Station metadata contains duplicate station_id values")
+    any(ismissing, metadata.lon) && error("Station metadata contains missing longitude values")
+    any(ismissing, metadata.lat) && error("Station metadata contains missing latitude values")
+    all(isfinite, metadata.lon) || error("Station metadata contains non-finite longitude values")
+    all(isfinite, metadata.lat) || error("Station metadata contains non-finite latitude values")
+
+    raw_station_count = if raw_station_meta_path === nothing
+        nrow(metadata)
+    else
+        raw_metadata = CSV.read(raw_station_meta_path, DataFrame; select=["station_id"])
+        length(unique(string.(raw_metadata.station_id)))
+    end
+    if study_bounds !== nothing
+        west, east, south, north = study_bounds
+        all((west .<= metadata.lon .<= east) .& (south .<= metadata.lat .<= north)) ||
+            error("Filtered station metadata contains coordinates outside the study area")
+    end
 
     observation = read_wide_signature(observation_path)
     metadata_ids = Set(metadata.station_id)
@@ -173,6 +191,16 @@ function audit_mger_inputs(;
     summary[!, :analysis_end] = fill(string(analysis_end), nrow(summary))
     summary[!, :global_common_station_count] = fill(length(common_ids), nrow(summary))
     summary[!, :global_common_timestamp_count] = fill(length(common_times), nrow(summary))
+    summary[!, :raw_station_count] = fill(raw_station_count, nrow(summary))
+    summary[!, :study_area_station_count] = fill(nrow(metadata), nrow(summary))
+    summary[!, :study_west] = fill(study_bounds === nothing ? missing : study_bounds[1], nrow(summary))
+    summary[!, :study_east] = fill(study_bounds === nothing ? missing : study_bounds[2], nrow(summary))
+    summary[!, :study_south] = fill(study_bounds === nothing ? missing : study_bounds[3], nrow(summary))
+    summary[!, :study_north] = fill(study_bounds === nothing ? missing : study_bounds[4], nrow(summary))
+    summary[!, :actual_lon_min] = fill(minimum(metadata.lon), nrow(summary))
+    summary[!, :actual_lon_max] = fill(maximum(metadata.lon), nrow(summary))
+    summary[!, :actual_lat_min] = fill(minimum(metadata.lat), nrow(summary))
+    summary[!, :actual_lat_max] = fill(maximum(metadata.lat), nrow(summary))
     write_csv_atomic(joinpath(output_dir, "input_audit.csv"), summary)
     write_csv_atomic(joinpath(output_dir, "station_id_differences.csv"), DataFrame(station_rows))
     write_csv_atomic(

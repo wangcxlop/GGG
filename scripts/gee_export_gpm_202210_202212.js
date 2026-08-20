@@ -7,7 +7,7 @@ var END = ee.Date('2023-01-01T00:00:00'); // 右开区间
 
 // 沿用项目中已确认的站点经纬度范围。
 var AOI = ee.Geometry.Rectangle(
-  [108.672, 29.232, 116.029, 33.200], null, false);
+  [109.4, 31.2, 111.6, 33.4], null, false);
 
 // 现有 Hubei GPM 脚本使用的站点资产。
 var stationsRaw = ee.FeatureCollection(
@@ -49,12 +49,16 @@ function normalizeStation(feature) {
 }
 
 // Hubei-STATIONS 已经是目标站点集合，因此不再按 AOI 过滤站点。
-// 若按与站点极值完全相同的边界 filterBounds，浮点坐标误差会漏掉边界站点。
+// 使用经纬度数值闭区间筛选，避免几何边界浮点误差。
 // 不对 station_id 做 distinct，保留现有 GPM 导出中站点资产的重复记录行为；
 // 项目内 prepare_satellite_inputs.jl 会对相同 station_id/time 的相同值取均值。
 var stations = stationsRaw
   .map(normalizeStation)
-  .filter(ee.Filter.notNull(['station_id', 'lon', 'lat']));
+  .filter(ee.Filter.notNull(['station_id', 'lon', 'lat']))
+  .filter(ee.Filter.gte('lon', 109.4))
+  .filter(ee.Filter.lte('lon', 111.6))
+  .filter(ee.Filter.gte('lat', 31.2))
+  .filter(ee.Filter.lte('lat', 33.4));
 
 // 2022 年 10--12 月均属于 IMERG V07 的半小时产品；precipitation 单位为 mm/hr。
 var gpm = ee.ImageCollection('NASA/GPM_L3/IMERG_V07')

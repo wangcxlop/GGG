@@ -1,0 +1,214 @@
+using Test
+using DataFrames
+using Random
+using Statistics
+
+if !isdefined(@__MODULE__, :DEMTerrainExperiment)
+    include(joinpath(@__DIR__, "..", "src", "DEMTerrainExperiment.jl"))
+end
+using .DEMTerrainExperiment
+
+@testset "DEM terrain screening helpers" begin
+    @test bh_adjust([0.01, 0.04, 0.03]) ≈ [0.03, 0.04, 0.04]
+
+    rng = MersenneTwister(42)
+    n = 80
+    elevation = collect(range(100.0, 1800.0; length=n))
+    slope = rand(rng, n) .* 40
+    aspect = collect(range(1.0, 359.0; length=n))
+    terrain = DataFrame(
+        station_id=string.(1:n), elevation_m=elevation, slope_deg=slope,
+        aspect_deg=aspect, aspect_sin=sind.(aspect), aspect_cos=cosd.(aspect),
+    )
+    response = 0.01 .* elevation .+ 0.05 .* randn(rng, n)
+    screen, vif, selected = terrain_screen(
+        terrain, response; product="synthetic", permutations=99, seed=7,
+    )
+    @test "elevation" in selected
+    @test screen.selected[screen.variable_group .== "elevation"] == [true]
+    @test all(isfinite, vif.VIF)
+
+    constant_screen, _, constant_selected = terrain_screen(
+        terrain, ones(n); product="constant", permutations=19, seed=8,
+    )
+    @test isempty(constant_selected)
+    @test !any(constant_screen.selected)
+
+    collinear = copy(terrain)
+    collinear.slope_deg = collinear.elevation_m ./ 50
+    _, collinear_vif, collinear_selected = terrain_screen(
+        collinear, response; product="collinear", permutations=49, seed=9,
+    )
+    @test length(intersect(collinear_selected, ["elevation", "slope"])) <= 1
+    @test any(collinear_vif.VIF .>= 5)
+
+    near_north = [359.0, 1.0]
+    @test maximum(abs.(sind.(near_north))) < 0.02
+    @test maximum(abs.(cosd.(near_north) .- 1.0)) < 0.001
+
+    target = terrain[1:5, :]
+    target_lonlat = hcat(fill(110.0, 5), collect(range(30.0, 31.0; length=5)))
+    train_lonlat = hcat(
+        collect(range(109.0, 112.0; length=n)),
+        collect(range(29.0, 33.0; length=n)),
+    )
+    mixed_roles = Dict("elevation" => "global", "slope" => "local", "aspect" => "local")
+    designs = terrain_model_designs(
+        terrain, target, train_lonlat, target_lonlat, mixed_roles,
+    )
+    @test size(designs.mixed_local_train, 2) == 3 + 1 + 2
+    @test size(designs.global_train, 2) == 1
+    @test designs.local_group_names ==
+        ["intercept", "longitude", "latitude", "slope", "aspect"]
+    @test size(designs.multiscale_train[end], 2) == 2
+
+    all_local_roles = Dict(group => "local" for group in keys(mixed_roles))
+    all_local = terrain_model_designs(
+        terrain, target, train_lonlat, target_lonlat, all_local_roles,
+    )
+    @test size(all_local.mixed_local_train, 2) == 3 + 1 + 1 + 2
+    @test size(all_local.global_train, 2) == 0
+
+    changed_target = copy(target)
+    changed_target.elevation_m .+= 10_000
+    changed_designs = terrain_model_designs(
+        terrain, changed_target, train_lonlat, target_lonlat, mixed_roles,
+    )
+    @test changed_designs.mixed_local_train == designs.mixed_local_train
+    @test changed_designs.global_train == designs.global_train
+end
+
+@testset "DEM spatial variability and standalone models" begin
+    rng = MersenneTwister(123)
+    side = 8
+    lon = repeat(collect(range(109.7, 111.2; length=side)), side)
+    lat = repeat(collect(range(31.4, 33.0; length=side)), inner=side)
+    lonlat = hcat(lon, lat)
+    n = length(lon)
+    elevation = 500 .+ 200 .* randn(rng, n)
+    slope = 15 .+ 5 .* randn(rng, n)
+    aspect = rand(rng, n) .* 360
+    terrain = DataFrame(
+        station_id=string.(1:n), elevation_m=elevation, slope_deg=slope,
+        aspect_deg=aspect, aspect_sin=sind.(aspect), aspect_cos=cosd.(aspect),
+    )
+
+    global_response = 2 .* ((elevation .- mean(elevation)) ./ std(elevation))
+    global_roles, _ = spatial_variability_test(
+        terrain, lonlat, global_response, ["elevation"];
+        bandwidth_candidates=[20, 30], permutations=49, seed=11,
+    )
+    @test global_roles.role == ["global"]
+
+    elevation_z = (elevation .- mean(elevation)) ./ std(elevation)
+    longitude_z = (lon .- mean(lon)) ./ std(lon)
+    local_response = elevation_z .* (1 .+ 3 .* longitude_z)
+    local_roles, _ = spatial_variability_test(
+        terrain, lonlat, local_response, ["elevation"];
+        bandwidth_candidates=[16, 24], permutations=99, seed=12,
+    )
+    @test local_roles.role == ["local"]
+
+    spatial_z = hcat(
+        (lon .- mean(lon)) ./ std(lon),
+        (lat .- mean(lat)) ./ std(lat),
+    )
+    Xlocal = hcat(ones(n), spatial_z)
+    Xglobal = reshape(elevation_z, :, 1)
+    y = 1.5 .* elevation_z .+ 0.3 .* longitude_z
+    Y = reshape(y, :, 1)
+    mixed_prediction, mixed_converged = mixed_gwr_predict(
+        Xlocal, Xglobal, Y, lonlat, Xlocal, Xglobal, lonlat, 24;
+        max_iterations=100,
+    )
+    @test all(mixed_converged)
+    @test all(isfinite, mixed_prediction)
+    @test sqrt(mean(abs2, vec(mixed_prediction) - y)) < 0.2
+
+    empty_global = zeros(Float64, n, 0)
+    Y_missing = hcat(Y, Y)
+    Y_missing[1, 2] = NaN
+    loo_prediction, loo_converged = mixed_gwr_predict(
+        Xlocal, empty_global, Y_missing, lonlat,
+        Xlocal, empty_global, lonlat, 24; exclude_self=true,
+    )
+    @test all(loo_converged)
+    @test all(isfinite, loo_prediction[:, 1])
+    @test isnan(loo_prediction[1, 2])
+    @test all(isfinite, loo_prediction[2:end, 2])
+
+    manual_prediction, manual_converged = mixed_gwr_predict(
+        Xlocal[2:end, :], zeros(Float64, n - 1, 0), Y[2:end, :], lonlat[2:end, :],
+        Xlocal[1:1, :], zeros(Float64, 1, 0), lonlat[1:1, :], 24,
+    )
+    @test all(manual_converged)
+    @test loo_prediction[1, 1] ≈ manual_prediction[1, 1]
+
+    local_groups = Matrix{Float64}[ones(n, 1), spatial_z[:, 1:1], spatial_z[:, 2:2]]
+    multiscale_prediction, multiscale_converged = multiscale_gwr_predict(
+        local_groups, Xglobal, Y, lonlat, local_groups, Xglobal, lonlat,
+        [24, 24, 24]; max_iterations=200,
+    )
+    @test all(multiscale_converged)
+    @test all(isfinite, multiscale_prediction)
+    @test sqrt(mean(abs2, vec(multiscale_prediction) - y)) < 0.2
+
+    multiscale_missing = hcat(Y, Y)
+    multiscale_missing[1, 2] = NaN
+    multiscale_loo, multiscale_loo_converged = multiscale_gwr_predict(
+        local_groups, empty_global, multiscale_missing, lonlat,
+        local_groups, empty_global, lonlat, [24, 24, 24];
+        exclude_self=true,
+    )
+    @test all(multiscale_loo_converged)
+    @test all(isfinite, multiscale_loo[:, 1])
+    @test isnan(multiscale_loo[1, 2])
+    @test all(isfinite, multiscale_loo[2:end, 2])
+
+    single_group = Matrix{Float64}[ones(n, 1)]
+    changed_Y = copy(Y)
+    changed_Y[1] += 1000
+    single_loo, _ = multiscale_gwr_predict(
+        single_group, empty_global, Y, lonlat,
+        single_group, empty_global, lonlat, [24]; exclude_self=true,
+    )
+    changed_loo, _ = multiscale_gwr_predict(
+        single_group, empty_global, changed_Y, lonlat,
+        single_group, empty_global, lonlat, [24]; exclude_self=true,
+    )
+    @test single_loo[1] ≈ changed_loo[1]
+    @test_throws ArgumentError multiscale_gwr_predict(
+        local_groups, empty_global, Y, lonlat,
+        local_groups, empty_global, reverse(lonlat; dims=1), [24, 24, 24];
+        exclude_self=true,
+    )
+
+    scale_rng = MersenneTwister(3)
+    scale_side = 10
+    scale_lon = repeat(collect(range(0.0, 1.0; length=scale_side)), scale_side)
+    scale_lat = repeat(collect(range(0.0, 1.0; length=scale_side)), inner=scale_side)
+    scale_lonlat = hcat(109.7 .+ scale_lon, 31.4 .+ scale_lat)
+    scale_n = length(scale_lon)
+    broad_x = randn(scale_rng, scale_n)
+    narrow_x = randn(scale_rng, scale_n)
+    broad_beta = 1 .+ 0.5 .* scale_lon
+    narrow_beta = 2 .* exp.(-((scale_lon .- 0.5) .^ 2 + (scale_lat .- 0.5) .^ 2) ./ 0.01)
+    scale_response = broad_beta .* broad_x + narrow_beta .* narrow_x +
+        0.8 .* randn(scale_rng, scale_n)
+    scale_groups = Matrix{Float64}[
+        ones(scale_n, 1), reshape(broad_x, :, 1), reshape(narrow_x, :, 1),
+    ]
+    recovered_bandwidths, _, bandwidth_converged = select_multiscale_bandwidths(
+        scale_groups, zeros(scale_n, 0), scale_response, scale_lonlat,
+        [12, 24, 48, 80]; max_iterations=100,
+    )
+    @test bandwidth_converged
+    @test recovered_bandwidths[2] > recovered_bandwidths[3]
+
+    failed_prediction, failed_convergence = multiscale_gwr_predict(
+        local_groups, Xglobal, Y, lonlat, local_groups, Xglobal, lonlat,
+        [24, 24, 24]; max_iterations=0,
+    )
+    @test !all(failed_convergence)
+    @test all(isnan, failed_prediction)
+end

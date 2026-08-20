@@ -4,7 +4,7 @@
 var START = ee.Date('2022-01-01T00:00:00');
 var END = ee.Date('2022-06-01T00:00:00'); // 右开区间
 var AOI = ee.Geometry.Rectangle(
-  [108.672, 29.232, 116.029, 33.200], null, false);
+  [109.4, 31.2, 111.6, 33.4], null, false);
 
 var stationsRaw = ee.FeatureCollection(
   'projects/booming-list-489917-p4/assets/Hubei-STATIONS');
@@ -43,10 +43,14 @@ function normalizeStation(feature) {
     });
 }
 
-// 不按 AOI 执行 filterBounds，避免浮点误差漏掉边界站点。
+// 使用经纬度数值闭区间筛选，避免几何边界浮点误差。
 var stations = stationsRaw
   .map(normalizeStation)
-  .filter(ee.Filter.notNull(['station_id', 'lon', 'lat']));
+  .filter(ee.Filter.notNull(['station_id', 'lon', 'lat']))
+  .filter(ee.Filter.gte('lon', 109.4))
+  .filter(ee.Filter.lte('lon', 111.6))
+  .filter(ee.Filter.gte('lat', 31.2))
+  .filter(ee.Filter.lte('lat', 33.4));
 
 var gpm = ee.ImageCollection('NASA/GPM_L3/IMERG_V07')
   .filterDate(START, END)

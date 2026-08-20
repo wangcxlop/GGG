@@ -425,60 +425,74 @@ function find_native_hourly_times(data_dir)
     return native_hours
 end
 
-"""Build one auditable row for every expected hour in June--September 2022--2025."""
+function normalize_month_selection(months, start_month::Int, stop_month::Int)
+    selected = months === nothing ?
+        collect(start_month:(stop_month - 1)) :
+        sort(unique(Int.(collect(months))))
+    isempty(selected) && error("At least one month must be selected")
+    all(month_value -> 1 <= month_value <= 12, selected) ||
+        error("Months must be between 1 and 12: $selected")
+    return selected
+end
+
+"""Build one auditable row for every expected hour in the selected year-months."""
 function build_hourly_qc(
     file_groups, native_hours;
     unreadable_files=Dict{String, String}(), years=2022:2025,
-    start_month::Int=6, stop_month::Int=10,
+    start_month::Int=6, stop_month::Int=10, months=nothing,
 )
     rows = NamedTuple[]
     complete_groups = Dict{DateTime, Vector{String}}()
     expected_minutes = [0, 15, 30, 45]
+    selected_months = normalize_month_selection(months, start_month, stop_month)
 
     for year_value in years
-        hour_start = DateTime(year_value, start_month, 1)
-        stop = DateTime(year_value, stop_month, 1)
-        while hour_start < stop
-            files = sort(get(file_groups, hour_start, String[]))
-            readable_files = [file for file in files if !haskey(unreadable_files, file)]
-            unreadable_hour_files = [file for file in files if haskey(unreadable_files, file)]
-            starts = DateTime[]
-            all_starts = DateTime[]
-            for file in readable_files
-                info = parse_nc_filename(basename(file))
-                info === nothing || push!(starts, info[1])
-            end
-            for file in files
-                info = parse_nc_filename(basename(file))
-                info === nothing || push!(all_starts, info[1])
-            end
-            present_minutes = sort(unique(minute.(starts)))
-            missing_minutes = setdiff(expected_minutes, present_minutes)
-            duplicate_count = length(all_starts) - length(unique(minute.(all_starts)))
-            complete = length(readable_files) == 4 && present_minutes == expected_minutes && duplicate_count == 0
-            if complete
-                complete_groups[hour_start] = readable_files
-            end
+        for month_value in selected_months
+            hour_start = DateTime(year_value, month_value, 1)
+            stop = hour_start + Month(1)
+            while hour_start < stop
+                files = sort(get(file_groups, hour_start, String[]))
+                readable_files = [file for file in files if !haskey(unreadable_files, file)]
+                unreadable_hour_files = [file for file in files if haskey(unreadable_files, file)]
+                starts = DateTime[]
+                all_starts = DateTime[]
+                for file in readable_files
+                    info = parse_nc_filename(basename(file))
+                    info === nothing || push!(starts, info[1])
+                end
+                for file in files
+                    info = parse_nc_filename(basename(file))
+                    info === nothing || push!(all_starts, info[1])
+                end
+                present_minutes = sort(unique(minute.(starts)))
+                missing_minutes = setdiff(expected_minutes, present_minutes)
+                duplicate_count = length(all_starts) - length(unique(minute.(all_starts)))
+                complete = length(readable_files) == 4 &&
+                    present_minutes == expected_minutes && duplicate_count == 0
+                if complete
+                    complete_groups[hour_start] = readable_files
+                end
 
-            present_text = join([lpad(string(value), 2, '0') for value in present_minutes], ";")
-            missing_text = join([lpad(string(value), 2, '0') for value in missing_minutes], ";")
-            source_text = join(basename.(files), ";")
-            push!(rows, (
-                hour_start = Dates.format(hour_start, dateformat"yyyy-mm-ddTHH:MM:SS") * "Z",
-                hour_end = Dates.format(hour_start + Hour(1), dateformat"yyyy-mm-ddTHH:MM:SS") * "Z",
-                status = complete ? "complete" : "incomplete",
-                file_count = length(files),
-                segment_count = length(readable_files),
-                present_minutes = present_text,
-                missing_minutes = missing_text,
-                missing_count = length(missing_minutes),
-                duplicate_count = duplicate_count,
-                unreadable_count = length(unreadable_hour_files),
-                unreadable_files = join(basename.(unreadable_hour_files), ";"),
-                native_hourly_available = hour_start in native_hours,
-                source_files = source_text,
-            ))
-            hour_start += Hour(1)
+                present_text = join([lpad(string(value), 2, '0') for value in present_minutes], ";")
+                missing_text = join([lpad(string(value), 2, '0') for value in missing_minutes], ";")
+                source_text = join(basename.(files), ";")
+                push!(rows, (
+                    hour_start = Dates.format(hour_start, dateformat"yyyy-mm-ddTHH:MM:SS") * "Z",
+                    hour_end = Dates.format(hour_start + Hour(1), dateformat"yyyy-mm-ddTHH:MM:SS") * "Z",
+                    status = complete ? "complete" : "incomplete",
+                    file_count = length(files),
+                    segment_count = length(readable_files),
+                    present_minutes = present_text,
+                    missing_minutes = missing_text,
+                    missing_count = length(missing_minutes),
+                    duplicate_count = duplicate_count,
+                    unreadable_count = length(unreadable_hour_files),
+                    unreadable_files = join(basename.(unreadable_hour_files), ";"),
+                    native_hourly_available = hour_start in native_hours,
+                    source_files = source_text,
+                ))
+                hour_start += Hour(1)
+            end
         end
     end
 
@@ -517,6 +531,7 @@ function aggregate_fy4b_hourly(;
     years=2022:2025,
     start_month::Int=6,
     stop_month::Int=10,
+    months=nothing,
 )
     println("="^60)
     println("FY4B 15min -> Hourly Aggregation Pipeline")
@@ -533,7 +548,7 @@ function aggregate_fy4b_hourly(;
 
     # Step 2: Find and group NC files
     println("\n[2/5] Finding 15min NC files...")
-    selected_months = start_month:(stop_month - 1)
+    selected_months = normalize_month_selection(months, start_month, stop_month)
     file_groups = find_nc_files(data_dir; years, months=selected_months)
     println("  Validating selected NetCDF structures...")
     unreadable_files = find_unreadable_files(file_groups)
@@ -543,7 +558,7 @@ function aggregate_fy4b_hourly(;
     native_hours = find_native_hourly_times(data_dir)
     qc_df, complete_groups = build_hourly_qc(
         file_groups, native_hours;
-        unreadable_files, years, start_month, stop_month,
+        unreadable_files, years, start_month, stop_month, months=selected_months,
     )
     total_hours = length(file_groups)
     total_files = sum(length.(values(file_groups)))
@@ -562,6 +577,9 @@ function aggregate_fy4b_hourly(;
     sat_lons = sort(unique(parse_satellite_lon(basename(file)) for files in values(file_groups) for file in files))
     sat_lon_text = join(string.(sat_lons), ", ")
     println("  Satellite subpoints in selected files: $sat_lon_text E")
+    complete_count > 0 || error(
+        "No strict complete FY4B hours were found; QC was written to $qc_file",
+    )
 
     # Step 3: Aggregate to hourly
     println("\n[3/5] Aggregating precipitation to hourly...")

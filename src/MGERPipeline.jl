@@ -5,8 +5,9 @@ using Distances
 
 """
 配置参数
-- 使用 lon/lat 作为预测变量
+- 残差模型使用目标中心的局部东西/南北公里坐标
 - 同时扫描 adaptive=true/false 两类带宽
+- 同时扫描局部空间斜率的岭正则强度
 """
 Base.@kwdef struct MGERConfig
 	station_meta_path::String
@@ -22,6 +23,8 @@ Base.@kwdef struct MGERConfig
 	kernels::Vector{Int} = [GAUSSIAN, EXPONENTIAL, BISQUARE, TRICUBE, BOXCAR]
 	bw_adaptive::Vector{Float64} = [30.0, 50.0, 80.0, 120.0]
 	bw_fixed_km::Vector{Float64} = [10.0, 20.0, 30.0, 50.0]
+	slope_ridge_candidates::Vector{Float64} = [1e-8, 1e-6, 1e-4, 1e-2]
+	min_scan_coverage::Float64 = 0.95
 	rain_threshold::Float64 = 0.1
 
 	use_loocv_eval::Bool = true
@@ -44,6 +47,8 @@ function config_for_kernel(cfg::MGERConfig, kernel::Int, outdir::AbstractString)
 		kernels=[kernel],
 		bw_adaptive=copy(cfg.bw_adaptive),
 		bw_fixed_km=copy(cfg.bw_fixed_km),
+		slope_ridge_candidates=copy(cfg.slope_ridge_candidates),
+		min_scan_coverage=cfg.min_scan_coverage,
 		rain_threshold=cfg.rain_threshold,
 		use_loocv_eval=cfg.use_loocv_eval,
 		analysis_start=cfg.analysis_start,
@@ -414,18 +419,179 @@ function st_gwr_predict_nanaware(
 end
 
 
+"""Return target-centred east/north offsets in kilometres for training stations."""
+function target_centered_offsets_km(
+	train_lonlat::Matrix{Float64}, target_lon::Float64, target_lat::Float64;
+	earth_radius_km::Float64=6378.388,
+)
+	size(train_lonlat, 2) == 2 ||
+		throw(DimensionMismatch("train_lonlat must have columns [lon, lat]"))
+	isfinite(target_lon) && isfinite(target_lat) ||
+		throw(ArgumentError("target longitude and latitude must be finite"))
+
+	n = size(train_lonlat, 1)
+	east = Vector{Float64}(undef, n)
+	north = Vector{Float64}(undef, n)
+	cos_lat = cosd(target_lat)
+	@inbounds for i in 1:n
+		lon = train_lonlat[i, 1]
+		lat = train_lonlat[i, 2]
+		if isfinite(lon) && isfinite(lat)
+			dlon = mod(lon - target_lon + 180.0, 360.0) - 180.0
+			east[i] = earth_radius_km * cos_lat * deg2rad(dlon)
+			north[i] = earth_radius_km * deg2rad(lat - target_lat)
+		else
+			east[i] = NaN
+			north[i] = NaN
+		end
+	end
+	return east, north
+end
+
+
+"""
+Predict a time-varying residual at each target with target-centred local linear GWR.
+
+For each target and time, weights are normalised over valid training residuals and
+east/north offsets are scaled by their weighted RMS distance. Ridge regularisation
+is applied only to the two spatial slopes, so the target prediction is the local
+intercept. Invalid or underdetermined fits remain `NaN`.
+"""
+function local_linear_residual_predict(
+	train_lonlat::Matrix{Float64}, residuals::Matrix{Float64},
+	target_lonlat::Matrix{Float64}, wMat::Matrix{Float64};
+	slope_ridge::Float64, min_obs::Int=3,
+)
+	n_control = size(train_lonlat, 1)
+	size(train_lonlat, 2) == 2 ||
+		throw(DimensionMismatch("train_lonlat must have columns [lon, lat]"))
+	size(target_lonlat, 2) == 2 ||
+		throw(DimensionMismatch("target_lonlat must have columns [lon, lat]"))
+	size(residuals, 1) == n_control ||
+		throw(DimensionMismatch("residual rows must match training stations"))
+	size(wMat, 1) == n_control ||
+		throw(DimensionMismatch("weight matrix rows must match training stations"))
+	size(wMat, 2) == size(target_lonlat, 1) ||
+		throw(DimensionMismatch("weight matrix columns must match target stations"))
+	min_obs >= 3 || throw(ArgumentError("min_obs must be at least 3"))
+	isfinite(slope_ridge) && slope_ridge >= 0 ||
+		throw(ArgumentError("slope_ridge must be finite and non-negative"))
+
+	n_target = size(target_lonlat, 1)
+	ntime = size(residuals, 2)
+	prediction = fill(NaN, n_target, ntime)
+
+	@inbounds Threads.@threads for j in 1:n_target
+		target_lon = target_lonlat[j, 1]
+		target_lat = target_lonlat[j, 2]
+		if !isfinite(target_lon) || !isfinite(target_lat)
+			continue
+		end
+		east, north = target_centered_offsets_km(
+			train_lonlat, target_lon, target_lat,
+		)
+
+		for t in 1:ntime
+			n_eff = 0
+			sum_w = 0.0
+			for i in 1:n_control
+				y = residuals[i, t]
+				w = wMat[i, j]
+				if isfinite(y) && isfinite(w) && w > 0 &&
+					isfinite(east[i]) && isfinite(north[i])
+					n_eff += 1
+					sum_w += w
+				end
+			end
+			n_eff >= min_obs && isfinite(sum_w) && sum_w > 0 || continue
+
+			scale2 = 0.0
+			for i in 1:n_control
+				y = residuals[i, t]
+				w = wMat[i, j]
+				if isfinite(y) && isfinite(w) && w > 0 &&
+					isfinite(east[i]) && isfinite(north[i])
+					wn = w / sum_w
+					scale2 += wn * (east[i]^2 + north[i]^2)
+				end
+			end
+			isfinite(scale2) && scale2 > eps(Float64) || continue
+			scale = sqrt(scale2)
+
+			a11 = 0.0
+			a12 = 0.0
+			a13 = 0.0
+			a22 = slope_ridge
+			a23 = 0.0
+			a33 = slope_ridge
+			b1 = 0.0
+			b2 = 0.0
+			b3 = 0.0
+			for i in 1:n_control
+				y = residuals[i, t]
+				w = wMat[i, j]
+				if isfinite(y) && isfinite(w) && w > 0 &&
+					isfinite(east[i]) && isfinite(north[i])
+					wn = w / sum_w
+					x2 = east[i] / scale
+					x3 = north[i] / scale
+					a11 += wn
+					a12 += wn * x2
+					a13 += wn * x3
+					a22 += wn * x2 * x2
+					a23 += wn * x2 * x3
+					a33 += wn * x3 * x3
+					wy = wn * y
+					b1 += wy
+					b2 += wy * x2
+					b3 += wy * x3
+				end
+			end
+
+			det = a11 * (a22 * a33 - a23 * a23) -
+				a12 * (a12 * a33 - a13 * a23) +
+				a13 * (a12 * a23 - a13 * a22)
+			if isfinite(det) && abs(det) > eps(Float64)
+				beta0 = (b1 * (a22 * a33 - a23 * a23) -
+					a12 * (b2 * a33 - a23 * b3) +
+					a13 * (b2 * a23 - a22 * b3)) / det
+				isfinite(beta0) && (prediction[j, t] = beta0)
+			end
+		end
+	end
+	return prediction
+end
+
+
+function negative_output_stats(values::AbstractArray{<:Real})
+	finite_mask = isfinite.(values)
+	n_finite = count(finite_mask)
+	if n_finite == 0
+		return (; negative_n=0, negative_fraction=NaN, min_corrected=NaN)
+	end
+	negative_n = count(finite_mask .& (values .< 0))
+	return (;
+		negative_n,
+		negative_fraction=negative_n / n_finite,
+		min_corrected=minimum(values[finite_mask]),
+	)
+end
+
+
 # 核心矫正步骤
 
 function bias_correct_stgwr(
-	X::Matrix{Float64}, Y_obs::Matrix{Float64}, Y_sat::Matrix{Float64},
+	lonlat::Matrix{Float64}, Y_obs::Matrix{Float64}, Y_sat::Matrix{Float64},
 	dMat::Matrix{Float64}; kernel::Int=BISQUARE, adaptive::Bool=true, bw::Float64=50.0,
-	use_loocv::Bool=true,
+	use_loocv::Bool=true, slope_ridge::Float64=1e-6,
 )
 	dist = use_loocv ? make_loocv_dist(dMat) : dMat
 	wMat = gw_weight(dist, bw; kernel, adaptive)
 	R = Y_obs .- Y_sat
-	Rhat = st_gwr_predict_nanaware(X, R, wMat; Xpred=X)
-	Y_corr = max.(Y_sat .+ Rhat, 0.0)
+	Rhat = local_linear_residual_predict(
+		lonlat, R, lonlat, wMat; slope_ridge,
+	)
+	Y_corr = Y_sat .+ Rhat
 	return Y_corr, Rhat, wMat
 end
 
@@ -479,35 +645,49 @@ end
 
 
 function scan_params(
-	X::Matrix{Float64}, Y_obs::Matrix{Float64}, Y_sat::Matrix{Float64}, dMat::Matrix{Float64};
+	lonlat::Matrix{Float64}, Y_obs::Matrix{Float64}, Y_sat::Matrix{Float64}, dMat::Matrix{Float64};
 	kernels::Vector{Int}, bw_adaptive::Vector{Float64}, bw_fixed_km::Vector{Float64},
+	slope_ridge_candidates::Vector{Float64},
+	min_scan_coverage::Float64=0.95,
 	rain_threshold::Float64=0.1, use_loocv::Bool=true, fail_path::Union{Nothing,String}=nothing,
 )
+	isempty(slope_ridge_candidates) &&
+		throw(ArgumentError("slope_ridge_candidates must not be empty"))
+	all(isfinite(ridge) && ridge >= 0 for ridge in slope_ridge_candidates) ||
+		throw(ArgumentError("slope_ridge_candidates must be finite and non-negative"))
+	isfinite(min_scan_coverage) && 0.0 <= min_scan_coverage <= 1.0 ||
+		throw(ArgumentError("min_scan_coverage must be between 0 and 1"))
 	rows = NamedTuple[]
-	fail_df = DataFrame(kernel=Int[], adaptive=Bool[], bw=Float64[], error=String[])
+	fail_df = DataFrame(
+		kernel=Int[], adaptive=Bool[], bw=Float64[], slope_ridge=Float64[], error=String[],
+	)
 	for k in kernels
-		for bw in bw_adaptive
-			try
-				Yc, _, wMat = bias_correct_stgwr(X, Y_obs, Y_sat, dMat; kernel=k, adaptive=true, bw=bw, use_loocv=use_loocv)
-				eval_mask = common_valid_mask(Y_obs, Y_sat, Yc)
-				mc = metric_continuous(Y_obs, Yc; mask=eval_mask)
-				me = metric_event(Y_obs, Yc; thr=rain_threshold, mask=eval_mask)
-				aicc_val, criterion = calc_aicc_or_gcv(X, Y_obs, Yc, wMat)
-				push!(rows, (kernel=k, adaptive=true, bw=bw, n=mc.n, coverage=mc.n / length(eval_mask), RMSE=mc.RMSE, AICc=aicc_val, criterion=string(criterion), MAE=mc.MAE, Bias=mc.Bias, r=mc.r, POD=me.POD, FAR=me.FAR, CSI=me.CSI))
-			catch e
-				push!(fail_df, (kernel=k, adaptive=true, bw=bw, error=sprint(showerror, e)))
-			end
-		end
-		for bw in bw_fixed_km
-			try
-				Yc, _, wMat = bias_correct_stgwr(X, Y_obs, Y_sat, dMat; kernel=k, adaptive=false, bw=bw, use_loocv=use_loocv)
-				eval_mask = common_valid_mask(Y_obs, Y_sat, Yc)
-				mc = metric_continuous(Y_obs, Yc; mask=eval_mask)
-				me = metric_event(Y_obs, Yc; thr=rain_threshold, mask=eval_mask)
-				aicc_val, criterion = calc_aicc_or_gcv(X, Y_obs, Yc, wMat)
-				push!(rows, (kernel=k, adaptive=false, bw=bw, n=mc.n, coverage=mc.n / length(eval_mask), RMSE=mc.RMSE, AICc=aicc_val, criterion=string(criterion), MAE=mc.MAE, Bias=mc.Bias, r=mc.r, POD=me.POD, FAR=me.FAR, CSI=me.CSI))
-			catch e
-				push!(fail_df, (kernel=k, adaptive=false, bw=bw, error=sprint(showerror, e)))
+		for adaptive in (true, false)
+			bandwidths = adaptive ? bw_adaptive : bw_fixed_km
+			for bw in bandwidths, slope_ridge in slope_ridge_candidates
+				try
+					Yc, _, _ = bias_correct_stgwr(
+						lonlat, Y_obs, Y_sat, dMat;
+						kernel=k, adaptive, bw, use_loocv, slope_ridge,
+					)
+					eval_mask = common_valid_mask(Y_obs, Y_sat, Yc)
+					mc = metric_continuous(Y_obs, Yc; mask=eval_mask)
+					me = metric_event(Y_obs, Yc; thr=rain_threshold, mask=eval_mask)
+					neg = negative_output_stats(Yc)
+					push!(rows, (;
+						kernel=k, adaptive, bw, slope_ridge,
+						n=mc.n, coverage=mc.n / length(eval_mask),
+						RMSE=mc.RMSE, AICc=NaN, criterion="LOOCV_RMSE",
+						MAE=mc.MAE, Bias=mc.Bias, r=mc.r,
+						POD=me.POD, FAR=me.FAR, CSI=me.CSI,
+						neg...,
+					))
+				catch e
+					push!(fail_df, (;
+						kernel=k, adaptive, bw, slope_ridge,
+						error=sprint(showerror, e),
+					))
+				end
 			end
 		end
 	end
@@ -519,8 +699,17 @@ function scan_params(
 	if nrow(fail_df) > 0
 		println("[scan_params] 跳过失败组合数: ", nrow(fail_df))
 	end
-	sort!(df, [:RMSE, :AICc])
-	best = df[1, :]
+	eligible = df[df.coverage .>= min_scan_coverage, :]
+	if isempty(eligible)
+		max_coverage = maximum(df.coverage)
+		throw(ArgumentError(
+			"no parameter candidate reached min_scan_coverage=$min_scan_coverage; " *
+			"maximum coverage was $max_coverage",
+		))
+	end
+	sort!(df, [:RMSE, :MAE, :slope_ridge, :bw, :adaptive])
+	sort!(eligible, [:RMSE, :MAE, :slope_ridge, :bw, :adaptive])
+	best = eligible[1, :]
 	return df, best
 end
 
@@ -549,12 +738,14 @@ end
 
 function write_fullfit_product(
         outdir::AbstractString, product::AbstractString, times::Vector{DateTime}, ids::Vector{String},
-        X::Matrix{Float64}, Y_obs::Matrix{Float64}, Y_sat::Matrix{Float64}, dMat::Matrix{Float64}, best,
+		lonlat::Matrix{Float64}, Y_obs::Matrix{Float64}, Y_sat::Matrix{Float64}, dMat::Matrix{Float64}, best,
 )
 	wMat = gw_weight(dMat, Float64(best.bw); kernel=Int(best.kernel), adaptive=Bool(best.adaptive))
-        R = Y_obs .- Y_sat
-        Rhat = st_gwr_predict_nanaware(X, R, wMat; Xpred=X)
-        Y_corr = max.(Y_sat .+ Rhat, 0.0)
+	R = Y_obs .- Y_sat
+	Rhat = local_linear_residual_predict(
+		lonlat, R, lonlat, wMat; slope_ridge=Float64(best.slope_ridge),
+	)
+	Y_corr = Y_sat .+ Rhat
         path = joinpath(outdir, "corr_$(product)_fullfit_insample.csv")
         try
                 write_wide(path, times, ids, Y_corr)
@@ -572,10 +763,23 @@ end
 function write_validation_scope(
 	outdir::AbstractString; cv_scheme::AbstractString, use_loocv_eval::Bool,
 	fold_scheme::Union{Nothing,Symbol}=nothing,
+	slope_ridge_candidates::Vector{Float64},
+	min_scan_coverage::Float64,
+	kernel_candidates::Vector{Int}=Int[],
 )
 	rows = [
 		(key="validation_target", value="held-out station locations at matched observation/satellite timestamps"),
 		(key="training_signal", value="same-timestamp observed-minus-satellite residuals from training stations"),
+		(key="residual_definition", value="R = P_obs - P_sat; P_corr = P_sat + R_hat"),
+		(key="local_model", value="target-centred local linear weighted ridge regression"),
+		(key="local_coordinates", value="east/north offsets in kilometres, scaled by weighted RMS distance"),
+		(key="slope_ridge_candidates", value=join(slope_ridge_candidates, ",")),
+		(key="min_scan_coverage", value=string(min_scan_coverage)),
+		(key="kernel_selection", value=length(kernel_candidates) > 1 ?
+			"selected jointly with bandwidth/ridge via training-fold LOOCV, candidates=$(join(kernel_candidates, ","))" :
+			"fixed by caller, not selected (kernel_candidates=$(join(kernel_candidates, ",")))"),
+		(key="parameter_selection", value="coverage threshold, then LOOCV RMSE, MAE, slope_ridge, bandwidth, fixed before adaptive"),
+		(key="negative_precipitation_policy", value="retain raw negative corrected values without clipping"),
 		(key="validation_station_observations_used_for_fit", value="false"),
 		(key="same_timestamp_training_station_observations_required", value="true"),
 		(key="temporal_holdout", value="false"),
@@ -672,9 +876,6 @@ function evaluate_spatial_holdout(
 
 	lonlat_train = lonlat[train_idx, :]
 	lonlat_val = lonlat[val_idx, :]
-	train_center = (mean(lonlat_train[:, 1]), mean(lonlat_train[:, 2]))
-	X_train = build_X_intercept_centered(lonlat_train; center=train_center)
-	X_val = build_X_intercept_centered(lonlat_val; center=train_center)
 	Y_obs_train = Y_obs[train_idx, :]
 	Y_sat_train = Y_sat[train_idx, :]
 	Y_obs_val = Y_obs[val_idx, :]
@@ -688,10 +889,12 @@ function evaluate_spatial_holdout(
 	end
 
 	scan_df, best = scan_params(
-		X_train, Y_obs_train, Y_sat_train, dMat_train;
+		lonlat_train, Y_obs_train, Y_sat_train, dMat_train;
 		kernels=cfg.kernels,
 		bw_adaptive=cfg.bw_adaptive,
 		bw_fixed_km=cfg.bw_fixed_km,
+		slope_ridge_candidates=cfg.slope_ridge_candidates,
+		min_scan_coverage=cfg.min_scan_coverage,
 		rain_threshold=cfg.rain_threshold,
 		use_loocv=cfg.use_loocv_eval,
 		fail_path=fail_path,
@@ -700,8 +903,12 @@ function evaluate_spatial_holdout(
 
 	wMat_train_val = gw_weight(dMat_train_val, Float64(best.bw); kernel=Int(best.kernel), adaptive=Bool(best.adaptive))
 	R_train = Y_obs_train .- Y_sat_train
-	Rhat_val = st_gwr_predict_nanaware(X_train, R_train, wMat_train_val; Xpred=X_val)
-	Y_corr_val = max.(Y_sat_val .+ Rhat_val, 0.0)
+	Rhat_val = local_linear_residual_predict(
+		lonlat_train, R_train, lonlat_val, wMat_train_val;
+		slope_ridge=Float64(best.slope_ridge),
+	)
+	Y_corr_val = Y_sat_val .+ Rhat_val
+	negative = negative_output_stats(Y_corr_val)
 
 	pre_mask = common_valid_mask(Y_obs_val, Y_sat_val)
 	post_mask = common_valid_mask(Y_obs_val, Y_corr_val)
@@ -728,6 +935,7 @@ function evaluate_spatial_holdout(
 		kernel=Int(best.kernel),
 		adaptive=Bool(best.adaptive),
 		bw=Float64(best.bw),
+		slope_ridge=Float64(best.slope_ridge),
 		RMSE_pre=pre_c.RMSE, RMSE_post=post_c.RMSE,
 		MAE_pre=pre_c.MAE, MAE_post=post_c.MAE,
 		Bias_pre=pre_c.Bias, Bias_post=post_c.Bias,
@@ -735,6 +943,7 @@ function evaluate_spatial_holdout(
 		POD_pre=pre_e.POD, POD_post=post_e.POD,
 		FAR_pre=pre_e.FAR, FAR_post=post_e.FAR,
 		CSI_pre=pre_e.CSI, CSI_post=post_e.CSI,
+		negative...,
 	)
 end
 
@@ -781,7 +990,15 @@ function run_spatial_kfold_pipeline(
 		throw(ArgumentError("fold_scheme must be :random or :spatial_block"))
 	end
 	cv_scheme = fold_scheme == :spatial_block ? "station_spatial_block_$(k)fold" : "station_$(k)fold"
-	write_validation_scope(cfg.outdir; cv_scheme="$(cv_scheme)_pooled", use_loocv_eval=cfg.use_loocv_eval, fold_scheme=fold_scheme)
+	write_validation_scope(
+		cfg.outdir;
+		cv_scheme="$(cv_scheme)_pooled",
+		use_loocv_eval=cfg.use_loocv_eval,
+		fold_scheme,
+		slope_ridge_candidates=cfg.slope_ridge_candidates,
+		min_scan_coverage=cfg.min_scan_coverage,
+		kernel_candidates=cfg.kernels,
+	)
 
 	common_split = DataFrame(station_id=String[], fold=Int[], fold_scheme=String[])
 	for (fold_idx, fold_ids) in enumerate(folds)
@@ -803,6 +1020,7 @@ function run_spatial_kfold_pipeline(
 		Y_sat = data.Y_sat[use_idx, :]
 		lonlat = build_X_lonlat(st, ids; station_id_col=cfg.station_id_col, lon_col=cfg.lon_col, lat_col=cfg.lat_col)
 		Y_corr_pooled = fill(NaN, size(Y_obs))
+		selected_slope_ridges = Float64[]
 
 		product_split = DataFrame(station_id=String[], fold=Int[], fold_scheme=String[])
 		for (fold_idx, fold_ids) in enumerate(folds)
@@ -837,6 +1055,7 @@ function run_spatial_kfold_pipeline(
 				fail_path=joinpath(fold_dir, "scan_$(product)_spatialcv_failures.csv"),
 			)
 			Y_corr_pooled[result.val_idx, :] = result.Y_corr_val
+			push!(selected_slope_ridges, result.slope_ridge)
 			write_wide(joinpath(fold_dir, "corr_$(product)_spatialcv_val.csv"), times, val_ids, result.Y_corr_val)
 
 			push!(fold_summary_rows, (
@@ -857,6 +1076,7 @@ function run_spatial_kfold_pipeline(
 				kernel=result.kernel,
 				adaptive=result.adaptive,
 				bw=result.bw,
+				slope_ridge=result.slope_ridge,
 				RMSE_pre=result.RMSE_pre, RMSE_post=result.RMSE_post,
 				MAE_pre=result.MAE_pre, MAE_post=result.MAE_post,
 				Bias_pre=result.Bias_pre, Bias_post=result.Bias_post,
@@ -864,6 +1084,9 @@ function run_spatial_kfold_pipeline(
 				POD_pre=result.POD_pre, POD_post=result.POD_post,
 				FAR_pre=result.FAR_pre, FAR_post=result.FAR_post,
 				CSI_pre=result.CSI_pre, CSI_post=result.CSI_post,
+				negative_n=result.negative_n,
+				negative_fraction=result.negative_fraction,
+				min_corrected=result.min_corrected,
 			))
 		end
 
@@ -877,6 +1100,7 @@ function run_spatial_kfold_pipeline(
 		pre_e = metric_event(Y_obs, Y_sat; thr=cfg.rain_threshold, mask=eval_mask)
 		post_c = metric_continuous(Y_obs, Y_corr_pooled; mask=eval_mask)
 		post_e = metric_event(Y_obs, Y_corr_pooled; thr=cfg.rain_threshold, mask=eval_mask)
+		negative = negative_output_stats(Y_corr_pooled)
 		push!(pooled_summary_rows, (
 			product=product,
 			spatial_cv=true,
@@ -889,6 +1113,7 @@ function run_spatial_kfold_pipeline(
 			common_n=count(eval_mask),
 			total_n=length(eval_mask),
 			coverage=count(eval_mask) / length(eval_mask),
+			slope_ridge_by_fold=join(selected_slope_ridges, ","),
 			RMSE_pre=pre_c.RMSE, RMSE_post=post_c.RMSE,
 			MAE_pre=pre_c.MAE, MAE_post=post_c.MAE,
 			Bias_pre=pre_c.Bias, Bias_post=post_c.Bias,
@@ -896,6 +1121,7 @@ function run_spatial_kfold_pipeline(
 			POD_pre=pre_e.POD, POD_post=post_e.POD,
 			FAR_pre=pre_e.FAR, FAR_post=post_e.FAR,
 			CSI_pre=pre_e.CSI, CSI_post=post_e.CSI,
+			negative...,
 		))
 	end
 
@@ -941,6 +1167,12 @@ function run_multikernel_spatial_kfold_pipeline(
 		throw(ArgumentError("cfg.kernels contains duplicate kernel values"))
 	isempty(cfg.bw_adaptive) && isempty(cfg.bw_fixed_km) &&
 		throw(ArgumentError("at least one adaptive or fixed bandwidth is required"))
+	isempty(cfg.slope_ridge_candidates) &&
+		throw(ArgumentError("cfg.slope_ridge_candidates must not be empty"))
+	all(isfinite(ridge) && ridge >= 0 for ridge in cfg.slope_ridge_candidates) ||
+		throw(ArgumentError("cfg.slope_ridge_candidates must be finite and non-negative"))
+	isfinite(cfg.min_scan_coverage) && 0.0 <= cfg.min_scan_coverage <= 1.0 ||
+		throw(ArgumentError("cfg.min_scan_coverage must be between 0 and 1"))
 	for kernel in cfg.kernels
 		kernel_name(kernel) # Validate before creating any output.
 	end
@@ -1004,6 +1236,56 @@ function run_multikernel_spatial_kfold_pipeline(
 	return vcat(pooled_tables...; cols=:union)
 end
 
+"""
+Per-product count of how many of the k folds picked each kernel, from a
+`summary_three_products_folds.csv`-shaped table (must carry `product`, `fold`, `kernel` columns).
+A kernel winning every fold means the choice is stable; a split vote means it is fold-dependent.
+"""
+function _kernel_selection_stability(folds::DataFrame)
+	nrow(folds) == 0 && return DataFrame()
+	rows = NamedTuple[]
+	for group in groupby(folds, [:product, :kernel])
+		push!(rows, (;
+			product=String(group.product[1]), kernel=Int(group.kernel[1]),
+			kernel_name=kernel_name(Int(group.kernel[1])), win_count=nrow(group),
+		))
+	end
+	stability = DataFrame(rows)
+	fold_counts = combine(groupby(stability, :product), :win_count => sum => :fold_count)
+	stability = leftjoin(stability, fold_counts; on=:product)
+	stability.selection_frequency = stability.win_count ./ stability.fold_count
+	return sort!(stability, [:product, order(:win_count; rev=true)])
+end
+
+"""
+    run_nested_kernel_spatial_kfold_pipeline(
+        cfg::MGERConfig; k::Int=5, seed::Integer, fold_scheme::Symbol=:random,
+    )
+
+Select the kernel via nested cross-validation: every training fold picks its own best
+`(kernel, bw, adaptive, slope_ridge)` by that fold's own LOOCV, using only training-fold data,
+and the held-out fold stations validate the winning combination — reusing `scan_params`'s
+existing joint scan over `cfg.kernels` unrestricted, rather than forcing one kernel per run.
+
+Contrast with `run_multikernel_spatial_kfold_pipeline`, which forces one kernel per run (via
+`config_for_kernel`) to give each kernel its own paired head-to-head comparison on the same
+fold split; its pooled output answers "how does each kernel perform," not "which kernel should
+be used," and reading it as a selection recommendation is exactly the leak this function closes.
+"""
+function run_nested_kernel_spatial_kfold_pipeline(
+	cfg::MGERConfig; k::Int=5, seed::Integer, fold_scheme::Symbol=:random,
+)
+	length(cfg.kernels) > 1 || throw(ArgumentError(
+		"run_nested_kernel_spatial_kfold_pipeline needs more than one kernel in cfg.kernels; " *
+		"for a single fixed kernel use run_spatial_kfold_pipeline directly",
+	))
+	pooled = run_spatial_kfold_pipeline(cfg; k, rng=MersenneTwister(seed), fold_scheme)
+	folds = CSV.read(joinpath(cfg.outdir, "summary_three_products_folds.csv"), DataFrame)
+	stability = _kernel_selection_stability(folds)
+	CSV.write(joinpath(cfg.outdir, "kernel_selection_stability.csv"), stability)
+	return pooled
+end
+
 
 """
     run_pipeline(cfg::MGERConfig; spatial_cv::Bool=true, train_frac::Float64=0.8, rng::AbstractRNG=Random.GLOBAL_RNG)
@@ -1030,6 +1312,9 @@ function run_pipeline(cfg::MGERConfig; spatial_cv::Bool=true, train_frac::Float6
 		cv_scheme=spatial_cv ? "single_station_holdout" : "loocv_eval_all_stations",
 		use_loocv_eval=cfg.use_loocv_eval,
 		fold_scheme=nothing,
+		slope_ridge_candidates=cfg.slope_ridge_candidates,
+		min_scan_coverage=cfg.min_scan_coverage,
+		kernel_candidates=cfg.kernels,
 	)
 
 	st = load_station_meta(cfg.station_meta_path;
@@ -1076,9 +1361,6 @@ function run_pipeline(cfg::MGERConfig; spatial_cv::Bool=true, train_frac::Float6
 			# Build train/val matrices
 			lonlat_train = lonlat[train_idx, :]
 			lonlat_val = lonlat[val_idx, :]
-			train_center = (mean(lonlat_train[:, 1]), mean(lonlat_train[:, 2]))
-			X_train = build_X_intercept_centered(lonlat_train; center=train_center)
-			X_val = build_X_intercept_centered(lonlat_val; center=train_center)
 			Y_obs_train = Y_obs[train_idx, :]
 			Y_sat_train = Y_sat[train_idx, :]
 			Y_obs_val = Y_obs[val_idx, :]
@@ -1097,23 +1379,29 @@ function run_pipeline(cfg::MGERConfig; spatial_cv::Bool=true, train_frac::Float6
 
 			# Parameter scan on training data only
 			scan_df, best = scan_params(
-				X_train, Y_obs_train, Y_sat_train, dMat_train;
+				lonlat_train, Y_obs_train, Y_sat_train, dMat_train;
 				kernels=cfg.kernels,
 				bw_adaptive=cfg.bw_adaptive,
 				bw_fixed_km=cfg.bw_fixed_km,
+				slope_ridge_candidates=cfg.slope_ridge_candidates,
+				min_scan_coverage=cfg.min_scan_coverage,
 				rain_threshold=cfg.rain_threshold,
 				use_loocv=cfg.use_loocv_eval,
 				fail_path=joinpath(cfg.outdir, "scan_$(product)_spatialcv_failures.csv"),
 			)
 			CSV.write(joinpath(cfg.outdir, "scan_$(product)_spatialcv.csv"), scan_df)
 
-			# Train on train sites, predict on val sites
-			# Use ST_GWR with Xpred for prediction at validation locations
+			# Train on train sites and predict validation residuals with the
+			# target-centred local linear model.
 			wMat_train_val = gw_weight(dMat_train_val, Float64(best.bw); kernel=Int(best.kernel), adaptive=Bool(best.adaptive))
 
 			R_train = Y_obs_train .- Y_sat_train
-			Rhat_val = st_gwr_predict_nanaware(X_train, R_train, wMat_train_val; Xpred=X_val)
-			Y_corr_val = max.(Y_sat_val .+ Rhat_val, 0.0)
+			Rhat_val = local_linear_residual_predict(
+				lonlat_train, R_train, lonlat_val, wMat_train_val;
+				slope_ridge=Float64(best.slope_ridge),
+			)
+			Y_corr_val = Y_sat_val .+ Rhat_val
+			negative = negative_output_stats(Y_corr_val)
 
 			pre_mask = common_valid_mask(Y_obs_val, Y_sat_val)
 			post_mask = common_valid_mask(Y_obs_val, Y_corr_val)
@@ -1130,10 +1418,9 @@ function run_pipeline(cfg::MGERConfig; spatial_cv::Bool=true, train_frac::Float6
 
 			# Product output: fit on all common stations and write a clearly labeled
 			# in-sample file. This file is not used for validation metrics.
-			X_full = build_X_intercept_centered(lonlat)
 			dMat_full = pairwise_haversine_km(lonlat)
 			fullfit_path = write_fullfit_product(
-				cfg.outdir, product, times, ids, X_full, Y_obs, Y_sat, dMat_full, best,
+				cfg.outdir, product, times, ids, lonlat, Y_obs, Y_sat, dMat_full, best,
 			)
 			println("[$product] Full-fit product saved for product use only: $fullfit_path")
 
@@ -1153,6 +1440,7 @@ function run_pipeline(cfg::MGERConfig; spatial_cv::Bool=true, train_frac::Float6
 				kernel=Int(best.kernel),
 				adaptive=Bool(best.adaptive),
 				bw=Float64(best.bw),
+				slope_ridge=Float64(best.slope_ridge),
 				RMSE_pre=pre_c.RMSE, RMSE_post=post_c.RMSE,
 				MAE_pre=pre_c.MAE, MAE_post=post_c.MAE,
 				Bias_pre=pre_c.Bias, Bias_post=post_c.Bias,
@@ -1160,17 +1448,19 @@ function run_pipeline(cfg::MGERConfig; spatial_cv::Bool=true, train_frac::Float6
 				POD_pre=pre_e.POD, POD_post=post_e.POD,
 				FAR_pre=pre_e.FAR, FAR_post=post_e.FAR,
 				CSI_pre=pre_e.CSI, CSI_post=post_e.CSI,
+				negative...,
 			))
 		else
 			# Standard pipeline: all sites
-			X = build_X_intercept_centered(lonlat)
 			dMat = pairwise_haversine_km(lonlat)
 
 			scan_df, best = scan_params(
-				X, Y_obs, Y_sat, dMat;
+				lonlat, Y_obs, Y_sat, dMat;
 				kernels=cfg.kernels,
 				bw_adaptive=cfg.bw_adaptive,
 				bw_fixed_km=cfg.bw_fixed_km,
+				slope_ridge_candidates=cfg.slope_ridge_candidates,
+				min_scan_coverage=cfg.min_scan_coverage,
 				rain_threshold=cfg.rain_threshold,
 				use_loocv=cfg.use_loocv_eval,
 				fail_path=joinpath(cfg.outdir, "scan_$(product)_failures.csv"),
@@ -1180,8 +1470,11 @@ function run_pipeline(cfg::MGERConfig; spatial_cv::Bool=true, train_frac::Float6
 			dist = cfg.use_loocv_eval ? make_loocv_dist(dMat) : dMat
 			wMat = gw_weight(dist, Float64(best.bw); kernel=Int(best.kernel), adaptive=Bool(best.adaptive))
 			R = Y_obs .- Y_sat
-			Rhat = st_gwr_predict_nanaware(X, R, wMat; Xpred=X)
-			Y_corr = max.(Y_sat .+ Rhat, 0.0)
+			Rhat = local_linear_residual_predict(
+				lonlat, R, lonlat, wMat; slope_ridge=Float64(best.slope_ridge),
+			)
+			Y_corr = Y_sat .+ Rhat
+			negative = negative_output_stats(Y_corr)
 
 			pre_mask = common_valid_mask(Y_obs, Y_sat)
 			post_mask = common_valid_mask(Y_obs, Y_corr)
@@ -1211,6 +1504,7 @@ function run_pipeline(cfg::MGERConfig; spatial_cv::Bool=true, train_frac::Float6
 				kernel=Int(best.kernel),
 				adaptive=Bool(best.adaptive),
 				bw=Float64(best.bw),
+				slope_ridge=Float64(best.slope_ridge),
 				RMSE_pre=pre_c.RMSE, RMSE_post=post_c.RMSE,
 				MAE_pre=pre_c.MAE, MAE_post=post_c.MAE,
 				Bias_pre=pre_c.Bias, Bias_post=post_c.Bias,
@@ -1218,6 +1512,7 @@ function run_pipeline(cfg::MGERConfig; spatial_cv::Bool=true, train_frac::Float6
 				POD_pre=pre_e.POD, POD_post=post_e.POD,
 				FAR_pre=pre_e.FAR, FAR_post=post_e.FAR,
 				CSI_pre=pre_e.CSI, CSI_post=post_e.CSI,
+				negative...,
 			))
 		end
 	end

@@ -1,0 +1,126 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project Description
+
+This is a satellite precipitation correction project written in Julia, mainly involving:
+
+- GWR / MGWR (Geographically Weighted Regression / Mixed GWR)
+- FY4B, GPM, GSMaP satellite precipitation
+- Rain gauge observation data
+
+The Julia package itself is named `MixedGWR` (see `Project.toml`) — `using MixedGWR` is the correct import, not the repo directory name.
+
+## Commands
+
+```sh
+# Install/resolve dependencies
+julia --project=. -e 'using Pkg; Pkg.instantiate()'
+
+# Run the full test suite (test/runtests.jl)
+julia --project=. -e 'using Pkg; Pkg.test()'
+
+# Run a single test file directly (most test files are self-contained:
+# they `include` the src file they test and can run standalone)
+julia --project=. test/test-study-area.jl
+julia --project=. test/test-mger-five-kernels.jl
+```
+
+The first `@testset "GWR"` block in `test/runtests.jl` validates results against the R `GWmodel` package via `RCall`, so a working R installation with `GWmodel` installed is required to run the full suite (`test = ["Test", "Distances", "RCall", "RTableTools"]` in `Project.toml`). Individual test files that don't touch `RCall`/`RTableTools` (e.g. `test-study-area.jl`, `test-era5-*.jl`) can be run without R.
+
+Scripts under `scripts/run_*.jl` and `scripts/verify_*.jl` are the actual entry points for producing results (e.g. `scripts/run_mger_smoke_202206.jl`, `scripts/run_interpolation_benchmark.jl`). They set `LOAD_PATH` to `src/` and are run as plain Julia scripts:
+
+```sh
+julia --project=. scripts/run_mger_smoke_202206.jl
+```
+
+## Architecture
+
+### Two tiers of `src/`
+
+1. **Core `MixedGWR` module** — algorithms included inside `module MixedGWR ... end` in `src/MixedGWR.jl` (the package entry point): `MGWR.jl`, `kernel.jl`, `gw_weight.jl`, `PrecipitationCorrection.jl`, `solve_chol.jl`, `solve_reg.jl`, `GWR.jl`, `GWR_calib.jl`, `ST_GWR.jl`, `GWR_mixed.jl`, `GWR_mixed_trace.jl`, `deprecated.jl`. These are reached normally via `using MixedGWR` and export the regression/kernel primitives (`GWR`, `MGWR`, `ST_GWR`, `ST_GWR_fast`, `GWR_mixed`, kernel constants `GAUSSIAN`/`EXPONENTIAL`/`BISQUARE`/`TRICUBE`/`BOXCAR`, etc).
+
+2. **Standalone data-pipeline modules** — each of these files defines its *own* `module X ... end` and is loaded ad hoc via `include(joinpath(ROOT, "src", "X.jl")); using .X`, not through the `MixedGWR` module: `StudyArea.jl`, `ERA5LandStations.jl`, `ERA5LandProcessing.jl`, `ERA5LandCovariates.jl`, `ERA5VariableSelection.jl`, `MOD13A2NDVIProcessing.jl`, `NDVIVariableSelection.jl`, `AppEEARSNDVI.jl`, `FY4BPreprocessing.jl`, `TerrainFeatures.jl`, `TraditionalInterpolation.jl`, `DEMTerrainExperiment.jl`, `JointCovariateModels.jl`, `JointVariableSelection.jl`, `MGERDataPrep.jl`. Each handles one data source or processing stage (ERA5-Land, MOD13A2 NDVI, FY4B, terrain/DEM, variable selection, etc).
+
+3. `MGERPipeline.jl` and `InterpolationBenchmark.jl` are *not* modules — they are top-level scripts (`using MixedGWR` + struct/function definitions) meant to be `include`d directly by a script or test after `using MixedGWR` is already active. They tie the core GWR algorithms and the data-pipeline modules together into full run/evaluate pipelines (e.g. `MGERConfig`, `run_multikernel_spatial_kfold_pipeline`).
+
+When adding a new file to `src/`, follow the existing pattern: if it's a reusable regression/kernel primitive it belongs inside the `MixedGWR` module (add an `include(...)` line in `src/MixedGWR.jl`); if it's a data-source-specific processing step it should be its own standalone module following convention (2) above.
+
+### Calling convention
+
+`scripts/` calls into `src/` — algorithms and reusable logic live in `src/`, not in scripts. A script typically: sets `LOAD_PATH`, does `using MixedGWR`, `include`s any standalone modules/pipeline files it needs, then builds a config struct and calls a pipeline function.
+
+## Coding Requirements
+
+- Use Julia.
+- Avoid irrelevant refactoring.
+- Do not change existing function names or parameters unless necessary for the current task.
+
+## Modification Principles
+
+- Only modify code relevant to the current task.
+- If you find other problems, point them out first, do not modify them directly.
+- Do not delete existing functionality.
+- Prioritize simple and easy-to-understand implementation methods.
+
+## Code Style
+
+- Strive for conciseness and clarity; refer to existing code.
+
+## Project Directory and File Conventions
+
+When creating, modifying, or moving files, the following directory structure must be followed. Do not create temporary scripts, data files, images, or output results arbitrarily in the project root directory.
+
+### `assets/` Stores static resources for the project
+
+- Images and illustrations
+- Project diagrams
+
+### `data/` Stores research data
+
+```
+data/
+├── raw/
+└── processed/
+```
+
+Where:
+
+- `data/raw/`: Raw data, modification is generally prohibited
+- `data/processed/`: Data that has been cleaned, transformed, matched, or preprocessed
+
+### `output/` Stores all results generated by the program; writing the results back to `data` is prohibited
+
+### `scripts/` Stores executable task scripts
+
+- `scripts/` is responsible for "calling" the core code
+- Core algorithms should not be written directly in the scripts
+
+### `src/` Stores the core Julia source code of the project
+
+For example:
+
+- Distance calculation
+- Spatial weights
+- Bandwidth selection
+- Weighted regression solution
+- GWR / MGWR
+- Accuracy evaluation tools
+
+Rules:
+
+- Reusable core functions must be placed in `src` first
+- Do not write one-off experimental workflows in src/.
+- Avoid reading fixed local absolute paths in `src/`
+- Core functions should receive data and configuration via parameters whenever possible
+
+## New File Placement Rules
+
+When creating a new file, first determine its purpose
+
+- Program output → `output/`
+- Core algorithm → `src/`
+- Directly runnable experiments or processing procedures → `scripts/`
+
+`scripts/` handles the process flow, `src/` handles reusable core algorithms
