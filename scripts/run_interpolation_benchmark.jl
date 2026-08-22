@@ -16,6 +16,7 @@ repeat_seeds(repeats::Int) = repeats <= 1 ? Int[] : [20260627 + 1000 * i for i i
 function benchmark_config(
     mode::Symbol; with_random::Bool=false, legacy_dem::Bool=false, repeats::Int=1,
     nested_covariates::Bool=false, local_grid::Bool=false,
+    stratified_tuning_weights::Bool=false, legacy_tuning_geometry::Bool=false,
 )
     mode in (:smoke, :full) || throw(ArgumentError("mode must be :smoke or :full"))
     nested_covariates && legacy_dem && throw(ArgumentError(
@@ -31,6 +32,8 @@ function benchmark_config(
                 "interpolation_benchmark_full_joint_covariates")) *
             (nested_covariates ? "_nested" : "") *
             (local_grid ? "_localgrid" : "") *
+            (stratified_tuning_weights ? "_strattuning" : "") *
+            (legacy_tuning_geometry ? "_loocvtuning" : "") *
             (repeats > 1 ? "_repeats$(repeats)" : ""),
     )
     mkpath(outdir)
@@ -159,6 +162,8 @@ function benchmark_config(
             [1e-4, 1e-3, 1e-2, 1e-1, 1.0],
         min_tuning_coverage=0.95,
         tuning_max_times=smoke ? 72 : 336,
+        tuning_time_weighting=stratified_tuning_weights ? :stratified : :uniform,
+        tuning_geometry=legacy_tuning_geometry ? :loocv : :inner_spatial,
         event_thresholds=[0.1, 2.5, 8.0, 16.0],
         bootstrap_reps=legacy_dem ? (smoke ? 200 : 2000) : joint_bootstrap_reps,
     )
@@ -192,7 +197,19 @@ function main(args=ARGS)
     end
     repeats = parse_repeats(args)
     local_grid = "--local-grid" in args
-    cfg = benchmark_config(mode; with_random, legacy_dem, repeats, nested_covariates, local_grid)
+    # Hyperparameters are tuned on a wet-oversampled subsample but scored on every hour, so the
+    # tuning RMSE runs ~3x the metric it estimates. --stratified-tuning-weights reweights the
+    # subsample to remove that. It is opt-in, not the default: the level error turned out to be
+    # nearly a constant multiplier that cancels in the ranking, so correcting it changes
+    # published numbers without improving selection. See scripts/verify_tuning_time_weighting.jl.
+    stratified_tuning_weights = "--stratified-tuning-weights" in args
+    # Candidates are now scored by predicting onto an inner spatial split of the training
+    # stations, matching the geometry the results table reports. The old leave-one-out criterion
+    # measured interpolation next to a retained gauge and picked bandwidths 19-101% worse on the
+    # reported metric; --legacy-tuning-geometry restores it for reproducing pre-fix numbers.
+    legacy_tuning_geometry = "--legacy-tuning-geometry" in args
+    cfg = benchmark_config(mode; with_random, legacy_dem, repeats, nested_covariates,
+        local_grid, stratified_tuning_weights, legacy_tuning_geometry)
     !legacy_dem && Threads.nthreads() == 1 && @warn(
         "Joint dynamic models are compute intensive; use julia -t auto for parallel hourly fits",
     )
@@ -203,6 +220,8 @@ function main(args=ARGS)
     )
     println("Running interpolation benchmark: mode=$mode, repeats=$repeats, " *
         "nested_covariates=$nested_covariates, local_grid=$local_grid, " *
+        "tuning_time_weighting=$(cfg.tuning_time_weighting), " *
+        "tuning_geometry=$(cfg.tuning_geometry), " *
         "output=$(cfg.mger.outdir)")
     result = run_interpolation_benchmark(cfg)
     println("Finished: $(nrow(result.metrics)) metric rows, $(nrow(result.scans)) scan rows")

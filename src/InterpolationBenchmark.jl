@@ -80,6 +80,28 @@ Base.@kwdef struct InterpolationBenchmarkConfig
     tps_smooth_candidates::Vector{Float64} = [1e-4, 1e-3, 1e-2, 1e-1, 1.0]
     min_tuning_coverage::Float64 = 0.95
     tuning_max_times::Int = 336
+    # `:stratified` weights the tuning subsample so its RMSE estimates the pooled RMSE the
+    # benchmark reports, instead of the wet-hour RMSE the unweighted subsample scores.
+    #
+    # It is NOT the default, despite being the more correct estimator, because measurement says
+    # the level error it removes was very nearly a constant multiplier and therefore cancelled
+    # in the ranking: over 30 product/fold/method cells it costs 0.586% mean regret against the
+    # exact full-record curve where `:uniform` costs 0.096%, and on the joint-covariate path the
+    # two are a wash (63.4% vs 63.7%). Switching the default would move published numbers for no
+    # measured gain. See `scripts/verify_tuning_time_weighting.jl`, and the header of
+    # `_tuning_time_sample` for what actually dominates selection error.
+    tuning_time_weighting::Symbol = :uniform
+    # How candidates are scored during selection. `:inner_spatial` predicts out-of-fold onto an
+    # inner split of the training stations, built by the same splitter and scheme as the outer
+    # partition, so the selection criterion is the same estimand the benchmark reports.
+    # `:loocv` is the historical leave-one-out-at-training-stations criterion, which scores
+    # interpolation skill (median 5.5 km to the nearest remaining gauge) while the results table
+    # reports extrapolation skill (median 23.9 km under `balanced_spatial`). See
+    # `selection_folds` for the measurements.
+    tuning_geometry::Symbol = :inner_spatial
+    # Groups in the inner selection split; 0 means "use `cfg.k`", which is what reproduces the
+    # outer fold geometry. Ignored when `tuning_geometry === :loocv`.
+    tuning_inner_k::Int = 0
     mgwr_max_tuning_iterations::Int = 5
     event_thresholds::Vector{Float64} = [0.1, 2.5, 8.0, 16.0]
     bootstrap_reps::Int = 2000
@@ -108,6 +130,12 @@ function _validate_benchmark_config(cfg::InterpolationBenchmarkConfig, n_station
         throw(ArgumentError("min_tuning_coverage must be in (0, 1]"))
     cfg.bootstrap_reps >= 0 || throw(ArgumentError("bootstrap_reps must be non-negative"))
     cfg.tuning_max_times >= 0 || throw(ArgumentError("tuning_max_times must be non-negative"))
+    cfg.tuning_time_weighting in (:stratified, :uniform) ||
+        throw(ArgumentError("tuning_time_weighting must be :stratified or :uniform"))
+    cfg.tuning_geometry in (:inner_spatial, :loocv) ||
+        throw(ArgumentError("tuning_geometry must be :inner_spatial or :loocv"))
+    cfg.tuning_inner_k == 0 || cfg.tuning_inner_k >= 2 ||
+        throw(ArgumentError("tuning_inner_k must be 0 (use cfg.k) or at least 2"))
     cfg.mgwr_max_tuning_iterations > 0 ||
         throw(ArgumentError("mgwr_max_tuning_iterations must be positive"))
     xor(cfg.terrain_path === nothing, cfg.dem === nothing) && throw(ArgumentError(
@@ -469,6 +497,72 @@ function benchmark_folds(
     throw(ArgumentError("unsupported CV scheme: $scheme"))
 end
 
+"""
+Inner split of one fold's training stations, as positions within that training set.
+
+Hyperparameters have to be chosen by the same kind of prediction the benchmark reports. The
+historical criterion was leave-one-out at training stations, which leaves the held-out station
+sitting inside its own neighbourhood: median 5.5 km to the nearest remaining gauge, against
+23.9 km from an outer `balanced_spatial` fold station to its nearest training gauge. The two are
+not the same estimand, and on the joint-covariate path the reported RMSE curve falls
+monotonically across the whole bandwidth grid while the leave-one-out curve is U-shaped with a
+minimum at 12-30 — over most of the grid they are anti-correlated, and the leave-one-out pick
+costs +19% to +101% of reported RMSE.
+
+Splitting the training stations with the same splitter, the same scheme and `k_inner = cfg.k`
+reproduces the outer geometry closely (inner-val nearest-train km p10/median/p90 = 8.1/22.7/45.6
+against the outer 8.6/23.9/48.9); `k_inner=3` overshoots to a 32.2 km median and `k_inner=8`
+undershoots to 17.5, so matching `cfg.k` is both the knob-free and the accurate choice.
+
+Using `scheme` rather than always splitting spatially is deliberate: under `:random` the
+reporting geometry (median 6.3 km) already matches leave-one-out, so a random inner split
+correctly leaves that scheme's numbers essentially where they were.
+
+Returns `nothing` when the fold is too small to split — holding out a whole group would leave
+too few stations to fit the widest design (`mixed_gwr`/`mgwr` need three local columns plus a
+global block). The caller falls back to leave-one-out and records that in `benchmark_scope.csv`,
+so a degenerate run never silently reports one criterion while having used the other. At the real
+station count this never triggers: 189 training stations split five ways leave 151.
+"""
+const MIN_SELECTION_TRAIN_STATIONS = 10
+
+function selection_folds(
+    cfg::InterpolationBenchmarkConfig, scheme::Symbol, train_ids::Vector{String},
+    train_lonlat::Matrix{Float64}, fold::Int, repeat_seed::Int,
+)
+    k_inner = cfg.tuning_inner_k == 0 ? cfg.k : cfg.tuning_inner_k
+    n_train = length(train_ids)
+    k_inner = min(k_inner, n_train)
+    k_inner >= 2 || return nothing
+    n_train - cld(n_train, k_inner) >= MIN_SELECTION_TRAIN_STATIONS || return nothing
+    # Vary by outer fold and repeat so the inner partition is not the same one every time. Not by
+    # product: the station geometry is identical across products, and holding the split fixed
+    # keeps the per-product comparison clean.
+    groups = benchmark_folds(scheme, train_ids, train_lonlat;
+        k=k_inner, seed=repeat_seed + 7919 * fold, center_init=cfg.fold_center_init)
+    position = Dict(id => index for (index, id) in enumerate(train_ids))
+    return [[position[id] for id in group] for group in groups if !isempty(group)]
+end
+
+"""
+Assemble out-of-fold predictions over the training stations.
+
+`predict(inner_train_rows, inner_val_rows)` returns a `length(inner_val_rows) × n_time` matrix.
+The result has the same shape leave-one-out produced, so `_candidate_metrics` and every scan row
+downstream are unchanged.
+"""
+function _selection_oof(
+    groups::Vector{Vector{Int}}, n_train::Int, n_time::Int, predict,
+)
+    out_of_fold = fill(NaN, n_train, n_time)
+    for group in groups
+        inner_train = setdiff(1:n_train, group)
+        isempty(inner_train) && continue
+        out_of_fold[group, :] = predict(inner_train, group)
+    end
+    return out_of_fold
+end
+
 function _gwr_predict(
     train_lonlat::Matrix{Float64}, values::Matrix{Float64}, target_lonlat::Matrix{Float64};
     kernel::Int, adaptive::Bool, bw::Float64, exclude_self::Bool=false,
@@ -708,17 +802,47 @@ function _mgwr_predict(
     return prediction
 end
 
+"""
+Score one tuning candidate.
+
+`time_weights`, when given, holds one weight per column of `y_obs` and makes RMSE/MAE weighted
+means, so a stratified tuning subsample (see [`_tuning_time_sample`](@ref)) estimates the metric
+over the full hour set rather than over the subsample's own wet-heavy mixture. `n` and
+`coverage` stay raw cell counts either way: they only gate whether the candidate produced
+predictions at all (`min_tuning_coverage`), which reweighting would silently redefine.
+"""
 function _candidate_metrics(
     y_obs::Matrix{Float64}, y_sat::Matrix{Float64}, prediction::Matrix{Float64};
-    require_satellite::Bool=true,
+    require_satellite::Bool=true, time_weights::Union{Nothing,Vector{Float64}}=nothing,
 )
     base_mask = require_satellite ? (.!isnan.(y_obs) .& .!isnan.(y_sat)) : .!isnan.(y_obs)
     mask = base_mask .& .!isnan.(prediction)
     base_n = count(base_mask)
     n = count(mask)
     n == 0 && return (; n=0, coverage=0.0, RMSE=Inf, MAE=Inf)
-    metric = metric_continuous(y_obs, prediction; mask=mask)
-    return (; n, coverage=n / base_n, RMSE=metric.RMSE, MAE=metric.MAE)
+    if time_weights === nothing
+        metric = metric_continuous(y_obs, prediction; mask=mask)
+        return (; n, coverage=n / base_n, RMSE=metric.RMSE, MAE=metric.MAE)
+    end
+    length(time_weights) == size(y_obs, 2) || throw(ArgumentError(
+        "time_weights must have one entry per tuning hour",
+    ))
+    weighted_square = 0.0
+    weighted_absolute = 0.0
+    weight_total = 0.0
+    for time in axes(y_obs, 2)
+        weight = time_weights[time]
+        for station in axes(y_obs, 1)
+            mask[station, time] || continue
+            error = prediction[station, time] - y_obs[station, time]
+            weighted_square += weight * error^2
+            weighted_absolute += weight * abs(error)
+            weight_total += weight
+        end
+    end
+    weight_total > 0 || return (; n, coverage=n / base_n, RMSE=Inf, MAE=Inf)
+    return (; n, coverage=n / base_n,
+        RMSE=sqrt(weighted_square / weight_total), MAE=weighted_absolute / weight_total)
 end
 
 function _scan_row(; scheme, product, fold, mode, method, group="all", iteration=0,
@@ -750,8 +874,10 @@ end
 function select_mgwr_bandwidths!(
     scan_rows::Vector{NamedTuple}, cfg::InterpolationBenchmarkConfig,
     scheme::Symbol, product::String, fold::Int, train_lonlat::Matrix{Float64},
-    residuals::Matrix{Float64}, y_obs::Matrix{Float64}, y_sat::Matrix{Float64},
+    residuals::Matrix{Float64}, y_obs::Matrix{Float64}, y_sat::Matrix{Float64};
+    time_weights::Union{Nothing,Vector{Float64}}=nothing, selection_groups=nothing,
 )
+    n_train, n_time = size(residuals)
     candidates = sort(unique(Int(round(bw)) for bw in cfg.mger.bw_adaptive))
     isempty(candidates) && throw(ArgumentError("MGWR requires adaptive bandwidth candidates"))
     designs = build_mgwr_designs(train_lonlat, train_lonlat)
@@ -768,12 +894,18 @@ function select_mgwr_bandwidths!(
                 trial = copy(bandwidths)
                 trial[group_index] = bw
                 try
-                    interpolated = _mgwr_predict(
-                        train_lonlat, residuals, train_lonlat;
-                        bandwidths=trial, exclude_self=true,
-                    )
+                    interpolated = selection_groups === nothing ?
+                        _mgwr_predict(
+                            train_lonlat, residuals, train_lonlat;
+                            bandwidths=trial, exclude_self=true,
+                        ) :
+                        _selection_oof(selection_groups, n_train, n_time, (tr, va) ->
+                            _mgwr_predict(
+                                train_lonlat[tr, :], residuals[tr, :], train_lonlat[va, :];
+                                bandwidths=trial,
+                            ))
                     prediction = max.(y_sat .+ interpolated, 0.0)
-                    metrics = _candidate_metrics(y_obs, y_sat, prediction)
+                    metrics = _candidate_metrics(y_obs, y_sat, prediction; time_weights)
                     push!(scan_rows, _scan_row(;
                         scheme, product, fold, mode="residual", method="mgwr",
                         group, iteration, kernel=BISQUARE, adaptive=true, bw, metrics...,
@@ -887,32 +1019,129 @@ function select_dem_parameter!(
     throw(ArgumentError("unsupported DEM residual method: $method"))
 end
 
-function _tuning_time_indices(y_obs::Matrix{Float64}, maximum_times::Int)
-    maximum_times <= 0 && return collect(axes(y_obs, 2))
-    size(y_obs, 2) <= maximum_times && return collect(axes(y_obs, 2))
+"""
+Two-stratum tuning-hour sample and its Horvitz-Thompson weights.
+
+Hyperparameters are chosen on this subsample but the benchmark reports pooled RMSE over every
+hour, and the two populations are nothing alike: on the 11426 common hours the wettest half of
+the subsample drives the tuning set to 40% wet cells against 7% in the reported population, and
+13x its mean squared observation. An unweighted RMSE over the subsample therefore scores
+wet-hour skill while the results table scores mostly-dry-hour skill.
+
+So the wettest `maximum_times ÷ 8` hours are taken with certainty and the rest of the hours are
+systematically subsampled and up-weighted by the inverse of their inclusion probability. The
+weighted MSE is then an unbiased estimator of the pooled MSE over all `size(y_obs, 2)` hours.
+
+The certainty stratum is an eighth of the budget rather than the historical half because under
+weighting it only carries its true population share of the weight (~1.5%); its job is to cover
+the extreme-error tail, and every hour beyond that is budget taken away from the weighted
+remainder, which is where almost all of the weight — and therefore the estimator's variance —
+actually sits. Measured over 12 product/fold/method cells against the exact full-record curve,
+an eighth reproduces the legacy objective's candidate choice in 12/12 cells at 0.0% regret while
+cutting the estimator's bias from +197% to -2.5%; a half costs 0.7-0.9% mean regret, and
+dropping the certainty stratum entirely costs 0.4%. See
+`scripts/verify_tuning_time_weighting.jl`.
+
+`weighting=:uniform` returns the historical wet-heavy index set with no weights, and is the
+default. What this sampler corrects is real but second-order:
+
+!!! note "The temporal mismatch is not what dominates selection error"
+    Scored against the exact full-record curve, the unweighted subsample's RMSE is +201% too
+    high — yet that error is nearly a constant multiplier, so it cancels in the *ranking* and
+    costs only ~0.1% regret. Correcting the level trades that harmless bias for real variance
+    at a fixed hour budget and costs ~0.6%.
+
+    What dominates is a different mismatch entirely, and it is spatial. Candidates are scored by
+    leave-one-out at *training* stations, where the held-out station sits inside its own
+    neighbourhood, but the benchmark reports RMSE at *fold* stations 20+ km from any training
+    gauge. On the joint-covariate path the held-out RMSE curve falls monotonically from bw=8 to
+    bw=160 while both tuning curves are U-shaped with a minimum at 12-30: over most of the grid
+    the two criteria are anti-correlated, and the tuner's pick costs +19% to +101%. This is why
+    widening the grid (`--local-grid`, floor 30 -> 8) made `residual_gwr`/`mixed_gwr` worse — the
+    old floor was accidentally shielding the tuner from its own preference. Fixing that needs an
+    inner *spatial* split of the training fold, not a reweighted hour sample.
+"""
+function _tuning_time_sample(
+    y_obs::Matrix{Float64}, maximum_times::Int, weighting::Symbol=:stratified,
+)
+    total = size(y_obs, 2)
+    (maximum_times <= 0 || total <= maximum_times) && return collect(1:total), nothing
     wetness = [let values = filter(isfinite, @view(y_obs[:, time]))
         isempty(values) ? -Inf : mean(values)
-    end for time in axes(y_obs, 2)]
-    wet_count = div(maximum_times, 2)
+    end for time in 1:total]
+    if weighting === :uniform
+        wet_count = div(maximum_times, 2)
+        wet = partialsortperm(wetness, 1:wet_count; rev=true)
+        spaced = unique(round.(Int, range(1, total; length=maximum_times - wet_count)))
+        return sort(unique(vcat(wet, spaced))), nothing
+    end
+    wet_count = max(1, div(maximum_times, 8))
     wet = partialsortperm(wetness, 1:wet_count; rev=true)
-    spaced = unique(round.(Int, range(
-        1, size(y_obs, 2); length=maximum_times - wet_count,
-    )))
-    return sort(unique(vcat(wet, spaced)))
+    # `rest` excludes the certainty stratum, so the two strata are disjoint and the sample size
+    # is exactly `maximum_times` (the historical union could collapse to fewer hours).
+    rest = setdiff(1:total, wet)
+    dry_count = min(maximum_times - wet_count, length(rest))
+    # Sample the remainder systematically along the wetness ordering rather than the calendar
+    # ordering. Inclusion probability is uniform either way, so the weights stay valid, but
+    # spanning the wetness distribution stops the estimate from swinging on how many wet hours
+    # that fell outside the certainty stratum happen to be picked up at ~67x weight. Measured
+    # over 40 synthetic replicates this cuts the mean error against the full-sample RMSE from
+    # 6.3% to 2.2%, and the worst case from 19.8% to 2.2%.
+    frame = rest[sortperm(wetness[rest])]
+    dry = frame[unique(round.(Int, range(1, length(frame); length=dry_count)))]
+    indices = vcat(wet, dry)
+    weights = vcat(ones(Float64, length(wet)), fill(length(rest) / length(dry), length(dry)))
+    order = sortperm(indices)
+    return indices[order], weights[order]
 end
 
+_tuning_time_indices(y_obs::Matrix{Float64}, maximum_times::Int) =
+    first(_tuning_time_sample(y_obs, maximum_times, :uniform))
+
+"""
+Score one joint-covariate candidate over the training stations.
+
+`selection_contexts`, when given, is one `(context, target_positions)` pair per inner selection
+group: a `JointFoldContext` built with that group's stations as its *target* and the rest of the
+fold's training stations as its *train*. Scoring then walks those with `leave_one_out=false`,
+which predicts at `context.target_lonlat`, and stitches the results back into one out-of-fold
+matrix over all training stations — the same shape and meaning the leave-one-out path produced.
+
+`build_joint_fold_context` fits every scaled quantity on its `train_indices` alone, so each inner
+context is leak-free by construction. The `roles` map is the one selected on the whole outer
+training fold and so did see the inner-target stations; that cannot bias the *bandwidth*
+comparison, since the covariate set is held fixed across every candidate, and re-running role
+selection per inner group would multiply the permutation cost for no effect on the ranking.
+"""
 function _joint_candidate_metrics(
     context, residuals::Matrix{Float64}, y_obs::Matrix{Float64},
     y_sat::Matrix{Float64}, method::String, bandwidths::Vector{Int},
-    time_indices::Vector{Int},
+    time_indices::Vector{Int}, time_weights::Union{Nothing,Vector{Float64}}=nothing,
+    selection_contexts=nothing,
 )
-    residual_prediction, converged = dynamic_covariate_predict(
-        context, residuals, method, bandwidths;
-        time_indices, leave_one_out=true,
-    )
+    residual_prediction, converged = if selection_contexts === nothing
+        dynamic_covariate_predict(
+            context, residuals, method, bandwidths; time_indices, leave_one_out=true,
+        )
+    else
+        out_of_fold = fill(NaN, size(residuals, 1), length(time_indices))
+        any_converged = falses(length(time_indices))
+        for entry in selection_contexts
+            # `train_residuals` is the inner-training row slice, materialised once per group by
+            # `select_joint_parameter!` rather than re-sliced for every candidate — at full size
+            # that copy is ~14 MB and the scan walks dozens of candidates.
+            group_prediction, group_converged = dynamic_covariate_predict(
+                entry.context, entry.train_residuals, method, bandwidths;
+                time_indices, leave_one_out=false,
+            )
+            out_of_fold[entry.target_positions, :] = group_prediction
+            any_converged .|= group_converged
+        end
+        (out_of_fold, any_converged)
+    end
     corrected = max.(y_sat[:, time_indices] .+ residual_prediction, 0.0)
     metrics = _candidate_metrics(
-        y_obs[:, time_indices], y_sat[:, time_indices], corrected,
+        y_obs[:, time_indices], y_sat[:, time_indices], corrected; time_weights,
     )
     return merge(metrics, (;
         converged_times=count(converged), total_times=length(converged),
@@ -922,12 +1151,21 @@ end
 function select_joint_parameter!(
     scan_rows::Vector{NamedTuple}, cfg::InterpolationBenchmarkConfig,
     method::String, mode::String, scheme::Symbol, product::String, fold::Int,
-    joint_context, y_obs::Matrix{Float64}, y_sat::Matrix{Float64},
+    joint_context, y_obs::Matrix{Float64}, y_sat::Matrix{Float64};
+    joint_selection_contexts=nothing,
 )
     mode == "residual" || throw(ArgumentError("joint covariates only support residual mode"))
     joint_method = method == "gwr" ? "residual_gwr" : method
     residuals = y_obs .- y_sat
-    times = _tuning_time_indices(y_obs, cfg.tuning_max_times)
+    # Materialise each inner group's training rows once, not once per candidate.
+    selection_entries = joint_selection_contexts === nothing ? nothing : [(
+        context=entry.context, target_positions=entry.target_positions,
+        train_residuals=residuals[
+            setdiff(1:size(residuals, 1), entry.target_positions), :],
+    ) for entry in joint_selection_contexts]
+    times, time_weights = _tuning_time_sample(
+        y_obs, cfg.tuning_max_times, cfg.tuning_time_weighting,
+    )
     candidates = joint_context.bandwidth_candidates
     isempty(candidates) && throw(ArgumentError("no joint bandwidth candidate is usable"))
     group_names = joint_group_names(joint_context, joint_method)
@@ -937,7 +1175,7 @@ function select_joint_parameter!(
             try
                 metrics = _joint_candidate_metrics(
                     joint_context, residuals, y_obs, y_sat, joint_method,
-                    [bandwidth], times,
+                    [bandwidth], times, time_weights, selection_entries,
                 )
                 push!(scan_rows, _scan_row(;
                     scheme, product, fold, mode, method,
@@ -974,7 +1212,7 @@ function select_joint_parameter!(
                 try
                     metrics = _joint_candidate_metrics(
                         joint_context, residuals, y_obs, y_sat, joint_method,
-                        trial, times,
+                        trial, times, time_weights, selection_entries,
                     )
                     push!(scan_rows, _scan_row(;
                         scheme, product, fold, mode, method, iteration,
@@ -1034,6 +1272,7 @@ function select_interpolation_parameter!(
     method::String, mode::String, scheme::Symbol, product::String, fold::Int,
     train_lonlat::Matrix{Float64}, y_obs::Matrix{Float64}, y_sat::Matrix{Float64};
     dem_context=nothing, joint_context=nothing, hurdle_context=nothing,
+    selection_groups=nothing, joint_selection_contexts=nothing, repeat_seed::Int=cfg.seed,
 )
     (mode, method) in BENCHMARK_RUNS ||
         throw(ArgumentError("unsupported benchmark method/mode pair: $method/$mode"))
@@ -1042,33 +1281,60 @@ function select_interpolation_parameter!(
             scan_rows, cfg, method, mode, scheme, product, fold, dem_context,
         )
     end
+    # One inner split per fold, shared by every method, so candidates from different methods are
+    # scored against the same held-out stations. The caller normally supplies it (it also needs
+    # it to build the joint inner contexts); computing it here keeps direct callers working.
+    if selection_groups === nothing && cfg.tuning_geometry === :inner_spatial
+        selection_groups = selection_folds(
+            cfg, scheme, string.(1:size(train_lonlat, 1)), train_lonlat, fold, repeat_seed,
+        )
+    end
     if joint_context !== nothing && mode == "residual" && method in ("gwr", "mixed_gwr", "mgwr")
         return select_joint_parameter!(
             scan_rows, cfg, method, mode, scheme, product, fold,
-            joint_context, y_obs, y_sat,
+            joint_context, y_obs, y_sat; joint_selection_contexts,
         )
     end
     # `hurdle_gwr` is the one method that needs the timestamps themselves, so the tuning subset
     # has to be applied to them as well as to the data matrices.
     tuning_times = hurdle_context === nothing ? nothing : hurdle_context.times
+    time_weights = nothing
     if cfg.tuning_max_times > 0 && size(y_obs, 2) > cfg.tuning_max_times
-        time_idx = _tuning_time_indices(y_obs, cfg.tuning_max_times)
+        time_idx, time_weights = _tuning_time_sample(
+            y_obs, cfg.tuning_max_times, cfg.tuning_time_weighting,
+        )
         y_obs = y_obs[:, time_idx]
         y_sat = y_sat[:, time_idx]
         tuning_times = tuning_times === nothing ? nothing : tuning_times[time_idx]
     end
     target_values = mode == "direct" ? y_obs : y_obs .- y_sat
+    n_train, n_time = size(target_values)
+    # `:loocv` keeps the historical criterion — predict at every training station with only that
+    # station excluded. `:inner_spatial` predicts out-of-fold onto whole spatial groups instead,
+    # which is the geometry the benchmark reports. Both produce an `n_train × n_time` matrix, so
+    # everything downstream is identical.
+    scored(predict_pair, predict_loocv) = selection_groups === nothing ?
+        predict_loocv() : _selection_oof(selection_groups, n_train, n_time, predict_pair)
     first_row = length(scan_rows) + 1
     if method in ("idw", "adw")
         predictor = method == "idw" ? idw_predict : adw_predict
         for power in cfg.idw_powers, neighbors in cfg.neighbor_candidates
             try
-                interpolated = predictor(
-                    train_lonlat, target_values, train_lonlat;
-                    power=power, neighbors=neighbors, exclude_self=true,
+                interpolated = scored(
+                    (tr, va) -> predictor(
+                        train_lonlat[tr, :], target_values[tr, :], train_lonlat[va, :];
+                        power=power, neighbors=neighbors,
+                    ),
+                    () -> predictor(
+                        train_lonlat, target_values, train_lonlat;
+                        power=power, neighbors=neighbors, exclude_self=true,
+                    ),
                 )
                 prediction = mode == "direct" ? max.(interpolated, 0.0) : max.(y_sat .+ interpolated, 0.0)
-                metrics = _candidate_metrics(y_obs, y_sat, prediction; require_satellite=mode == "residual")
+                metrics = _candidate_metrics(
+                    y_obs, y_sat, prediction;
+                    require_satellite=mode == "residual", time_weights,
+                )
                 push!(scan_rows, _scan_row(;
                     scheme, product, fold, mode, method, power, neighbors, metrics...,
                 ))
@@ -1082,9 +1348,18 @@ function select_interpolation_parameter!(
     elseif method == "tps"
         for smooth in cfg.tps_smooth_candidates
             try
-                interpolated = tps_loo_predict(train_lonlat, target_values; smooth=smooth)
+                interpolated = scored(
+                    (tr, va) -> tps_predict(
+                        train_lonlat[tr, :], target_values[tr, :], train_lonlat[va, :];
+                        smooth=smooth,
+                    ),
+                    () -> tps_loo_predict(train_lonlat, target_values; smooth=smooth),
+                )
                 prediction = mode == "direct" ? max.(interpolated, 0.0) : max.(y_sat .+ interpolated, 0.0)
-                metrics = _candidate_metrics(y_obs, y_sat, prediction; require_satellite=mode == "residual")
+                metrics = _candidate_metrics(
+                    y_obs, y_sat, prediction;
+                    require_satellite=mode == "residual", time_weights,
+                )
                 push!(scan_rows, _scan_row(;
                     scheme, product, fold, mode, method, smooth, metrics...,
                 ))
@@ -1101,12 +1376,21 @@ function select_interpolation_parameter!(
             for (adaptive, candidates) in ((true, cfg.mger.bw_adaptive), (false, cfg.mger.bw_fixed_km))
                 for bw in candidates
                     try
-                        interpolated = predictor(
-                            train_lonlat, target_values, train_lonlat;
-                            kernel, adaptive, bw, exclude_self=true,
+                        interpolated = scored(
+                            (tr, va) -> predictor(
+                                train_lonlat[tr, :], target_values[tr, :], train_lonlat[va, :];
+                                kernel, adaptive, bw,
+                            ),
+                            () -> predictor(
+                                train_lonlat, target_values, train_lonlat;
+                                kernel, adaptive, bw, exclude_self=true,
+                            ),
                         )
                         prediction = mode == "direct" ? max.(interpolated, 0.0) : max.(y_sat .+ interpolated, 0.0)
-                        metrics = _candidate_metrics(y_obs, y_sat, prediction; require_satellite=mode == "residual")
+                        metrics = _candidate_metrics(
+                            y_obs, y_sat, prediction;
+                            require_satellite=mode == "residual", time_weights,
+                        )
                         push!(scan_rows, _scan_row(;
                             scheme, product, fold, mode, method, kernel, adaptive, bw, metrics...,
                         ))
@@ -1127,13 +1411,20 @@ function select_interpolation_parameter!(
             for (adaptive, candidates) in ((true, cfg.mger.bw_adaptive), (false, cfg.mger.bw_fixed_km))
                 for bw in candidates
                     try
-                        prediction = _hurdle_predict(
-                            train_lonlat, y_obs, y_sat, train_lonlat, y_sat,
-                            something(tuning_times);
-                            config=_hurdle_config(hurdle_context, kernel, adaptive, bw),
-                            exclude_self=true,
+                        hurdle_config = _hurdle_config(hurdle_context, kernel, adaptive, bw)
+                        corrected = scored(
+                            (tr, va) -> _hurdle_predict(
+                                train_lonlat[tr, :], y_obs[tr, :], y_sat[tr, :],
+                                train_lonlat[va, :], y_sat[va, :], something(tuning_times);
+                                config=hurdle_config,
+                            ).corrected,
+                            () -> _hurdle_predict(
+                                train_lonlat, y_obs, y_sat, train_lonlat, y_sat,
+                                something(tuning_times);
+                                config=hurdle_config, exclude_self=true,
+                            ).corrected,
                         )
-                        metrics = _candidate_metrics(y_obs, y_sat, prediction.corrected)
+                        metrics = _candidate_metrics(y_obs, y_sat, corrected; time_weights)
                         push!(scan_rows, _scan_row(;
                             scheme, product, fold, mode, method, kernel, adaptive, bw, metrics...,
                         ))
@@ -1150,12 +1441,16 @@ function select_interpolation_parameter!(
         mode == "residual" || throw(ArgumentError("mixed_gwr only supports residual mode"))
         for bw in cfg.mger.bw_adaptive
             try
-                interpolated = _mixed_gwr_predict(
-                    train_lonlat, target_values, train_lonlat;
-                    bw, exclude_self=true,
+                interpolated = scored(
+                    (tr, va) -> _mixed_gwr_predict(
+                        train_lonlat[tr, :], target_values[tr, :], train_lonlat[va, :]; bw,
+                    ),
+                    () -> _mixed_gwr_predict(
+                        train_lonlat, target_values, train_lonlat; bw, exclude_self=true,
+                    ),
                 )
                 prediction = max.(y_sat .+ interpolated, 0.0)
-                metrics = _candidate_metrics(y_obs, y_sat, prediction)
+                metrics = _candidate_metrics(y_obs, y_sat, prediction; time_weights)
                 push!(scan_rows, _scan_row(;
                     scheme, product, fold, mode, method, kernel=BISQUARE,
                     adaptive=true, bw, metrics...,
@@ -1171,7 +1466,7 @@ function select_interpolation_parameter!(
         mode == "residual" || throw(ArgumentError("mgwr only supports residual mode"))
         return select_mgwr_bandwidths!(
             scan_rows, cfg, scheme, product, fold, train_lonlat,
-            target_values, y_obs, y_sat,
+            target_values, y_obs, y_sat; time_weights, selection_groups,
         )
     else
         throw(ArgumentError("unknown method: $method"))
@@ -1937,6 +2232,9 @@ function run_interpolation_benchmark(cfg::InterpolationBenchmarkConfig)
     all_bootstrap_rows = NamedTuple[]
     run_status_rows = NamedTuple[]
     hurdle_rows = NamedTuple[]
+    # Cells where the fold was too small for an inner selection split and fell back to
+    # leave-one-out. Reported in `benchmark_scope.csv` so the fallback is never silent.
+    selection_fallback_cells = String[]
 
     if _dem_enabled(cfg)
         dem = something(cfg.dem)
@@ -1991,6 +2289,15 @@ function run_interpolation_benchmark(cfg::InterpolationBenchmarkConfig)
                 for (null_method, null_prediction) in null_predictions
                     predictions[null_method][val_idx, :] = null_prediction
                 end
+                # One inner split for the whole fold, so every method's candidates are scored
+                # against the same held-out stations, and so the joint contexts below agree with
+                # what the spatial-only methods use.
+                selection_groups = cfg.tuning_geometry === :inner_spatial ?
+                    selection_folds(cfg, scheme_symbol, train_ids, train_lonlat, fold, repeat_seed) :
+                    nothing
+                if cfg.tuning_geometry === :inner_spatial && selection_groups === nothing
+                    push!(selection_fallback_cells, "$scheme/$product/fold$fold")
+                end
 
                 dem_context = nothing
                 if _dem_enabled(cfg)
@@ -2007,6 +2314,7 @@ function run_interpolation_benchmark(cfg::InterpolationBenchmarkConfig)
                     )
                 end
                 joint_context = nothing
+                joint_selection_contexts = nothing
                 if joint_inputs !== nothing
                     joint = something(cfg.joint_covariates)
                     role_map = if nested_joint
@@ -2046,6 +2354,22 @@ function run_interpolation_benchmark(cfg::InterpolationBenchmarkConfig)
                         :scheme => fill(scheme, nrow(quality)),
                         :fold => fill(fold, nrow(quality)))
                     push!(joint_qc_tables, quality)
+                    # One context per inner selection group, so joint candidates can be scored by
+                    # predicting onto held-out stations instead of leave-one-out. Same builder,
+                    # same role map, inner indices — all scaling refits on the inner training set.
+                    if selection_groups !== nothing
+                        joint_selection_contexts = [(
+                            target_positions=group,
+                            context=build_joint_fold_context(
+                                product, role_map,
+                                train_idx[setdiff(1:length(train_idx), group)],
+                                train_idx[group], lonlat, y_obs, y_sat,
+                                joint_inputs.terrain, joint_inputs.era5.values,
+                                joint_inputs.ndvi === nothing ? nothing : joint_inputs.ndvi.aligned,
+                                joint,
+                            ),
+                        ) for group in selection_groups]
+                    end
                 end
 
                 hurdle_context = build_hurdle_context(
@@ -2064,6 +2388,7 @@ function run_interpolation_benchmark(cfg::InterpolationBenchmarkConfig)
                             all_scan_rows, cfg, method, mode, scheme_symbol, product, fold,
                             train_lonlat, y_obs_train, y_sat_train;
                             dem_context, joint_context, hurdle_context,
+                            selection_groups, joint_selection_contexts, repeat_seed,
                         )
                         fold_predictions[output_method] = predict_selected(
                             selected, method, mode, train_lonlat, val_lonlat,
@@ -2253,6 +2578,7 @@ function run_interpolation_benchmark(cfg::InterpolationBenchmarkConfig)
             "repeated_cv_partitions", "repeated_cv_seeds", "fold_center_init",
             "validation_target", "training_signal", "temporal_holdout", "primary_cv",
             "secondary_cv", "common_evaluation_mask", "tuning_time_limit",
+            "tuning_time_weighting", "tuning_geometry",
             "dem_variable_selection", "dem_role_assignment", "dem_leakage_control",
             "dem_empty_selection", "supported_claim", "unsupported_claim",
         ],
@@ -2262,6 +2588,14 @@ function run_interpolation_benchmark(cfg::InterpolationBenchmarkConfig)
             "concurrent training-station observations for direct methods; observation-minus-satellite residuals plus fold-selected DEM variables for residual_gwr, mixed_gwr, and mgwr",
             "false", "balanced two-dimensional spatial 5-fold", "random station 5-fold",
             "true across all eight methods", string(cfg.tuning_max_times),
+            cfg.tuning_time_weighting === :stratified ?
+                "stratified: wettest eighth taken with certainty, remaining hours systematically subsampled and inverse-probability weighted so the tuning RMSE estimates the reported pooled RMSE" :
+                "uniform (default): unweighted RMSE over a wet-oversampled subsample, so the tuning RMSE runs ~3x the reported pooled RMSE it stands in for; the level error is close to a constant multiplier and cancels in the candidate ranking",
+            cfg.tuning_geometry === :inner_spatial ?
+                "inner_spatial (default): candidates scored by out-of-fold prediction onto an inner $(cfg.tuning_inner_k == 0 ? cfg.k : cfg.tuning_inner_k)-group split of the training stations, built with the same splitter and scheme as the outer partition, so selection and reporting are the same estimand" *
+                (isempty(selection_fallback_cells) ? "" :
+                    "; FELL BACK to leave-one-out in $(length(selection_fallback_cells)) cell(s) too small to split: $(join(selection_fallback_cells, ", "))") :
+                "loocv (legacy): candidates scored by leave-one-out at training stations, which measures interpolation next to a retained gauge while the reported metric measures extrapolation to a station 20+ km from any gauge",
             _dem_enabled(cfg) ? "training-fold Pearson/Spearman direction check, joint aspect F test, BH q<0.05, and grouped VIF<5" : "disabled",
             _dem_enabled(cfg) ? "training-fold GWR Monte Carlo spatial nonstationarity test with BH q<0.05" : "disabled",
             _dem_enabled(cfg) ? "all DEM screening, scaling, role tests, and bandwidth selection use training stations only" : "not applicable",
