@@ -32,12 +32,30 @@ end
 using .JointVariableSelection: JointSelectionConfig, select_joint_covariates
 
 const BENCHMARK_METHODS = [
-    "raw", "idw", "adw", "tps", "gwr", "residual_gwr", "mixed_gwr", "mgwr",
+    "raw", "zero", "train_clim", "hour_field_mean",
+    "idw", "adw", "tps", "gwr", "gwr_const",
+    "residual_gwr", "residual_gwr_const", "mixed_gwr", "mgwr", "hurdle_gwr",
 ]
 const TRADITIONAL_METHODS = ["idw", "adw", "tps"]
+# Hyperparameter-free reference predictors, estimated from training stations only. They are
+# reported so a method's RMSE can be read as skill rather than as a bare number: on hourly
+# precipitation ~93% of station-hours are dry, so a large part of any RMSE is simply how hard
+# a method shrinks toward zero. Deliberately not in TRADITIONAL_METHODS - they are context for
+# the reader, not baselines the GWR claim is assessed against.
+const NULL_METHODS = ["zero", "train_clim", "hour_field_mean"]
+# The common evaluation mask stays pinned to the original comparison set. Every method must be
+# finite for a cell to count, so letting a newly added method into the mask would silently
+# re-score all the others and break comparability with earlier runs - the same coverage
+# confound that already makes the `balanced_spatial` numbers hard to read (direct `gwr` fails
+# often enough to drag the shared mask down to ~0.76). Diagnostic and reference methods are
+# therefore scored *on* the mask without being allowed to *define* it.
+const MASK_METHODS = [
+    "raw", "idw", "adw", "tps", "gwr", "residual_gwr", "mixed_gwr", "mgwr",
+]
 const BENCHMARK_RUNS = [
     ("direct", "idw"), ("direct", "adw"), ("direct", "tps"),
-    ("direct", "gwr"), ("residual", "gwr"), ("residual", "mixed_gwr"),
+    ("direct", "gwr"), ("direct", "gwr_const"), ("direct", "hurdle_gwr"),
+    ("residual", "gwr"), ("residual", "gwr_const"), ("residual", "mixed_gwr"),
     ("residual", "mgwr"),
 ]
 
@@ -470,6 +488,173 @@ function _gwr_predict(
     return st_gwr_predict_nanaware(X_train, values, weights; Xpred=X_target, min_obs=3)
 end
 
+"""
+Local-constant GWR: the same kernel and bandwidth machinery as `_gwr_predict`, but fitting a
+local mean instead of a local plane.
+
+This exists to separate two explanations that are otherwise confounded. `_gwr_predict` fits
+`[1, lon, lat]`, so it needs at least three effectively-weighted neighbours and cannot be as
+local as IDW/ADW, which need two. Running both over the same bandwidth grid says whether GWR
+loses because of the bandwidth it was given or because of the order of the local model.
+
+Unlike `_gwr_predict` this cannot go through `st_gwr_predict_nanaware`, which hard-requires a
+three-column design. The NaN handling mirrors `TraditionalInterpolation._weighted_predict`:
+renormalize by the weights of the stations that actually reported each hour.
+"""
+function _gwr_const_predict(
+    train_lonlat::Matrix{Float64}, values::Matrix{Float64}, target_lonlat::Matrix{Float64};
+    kernel::Int, adaptive::Bool, bw::Float64, exclude_self::Bool=false, min_obs::Int=1,
+)
+    distances = haversine_distance_matrix(train_lonlat, target_lonlat)
+    if exclude_self
+        size(train_lonlat, 1) == size(target_lonlat, 1) ||
+            throw(DimensionMismatch("GWR exclude_self requires matching rows"))
+        for i in 1:size(distances, 1)
+            distances[i, i] = Inf
+        end
+    end
+    weights = gw_weight(distances, bw; kernel=kernel, adaptive=adaptive)
+    n_target = size(target_lonlat, 1)
+    n_time = size(values, 2)
+    prediction = fill(NaN, n_target, n_time)
+    Threads.@threads for target in 1:n_target
+        @inbounds for time in 1:n_time
+            total = 0.0
+            weight_sum = 0.0
+            effective = 0
+            for station in axes(values, 1)
+                weight = weights[station, target]
+                value = values[station, time]
+                (weight > 0 && isfinite(weight) && !isnan(value)) || continue
+                total += weight * value
+                weight_sum += weight
+                effective += 1
+            end
+            if effective >= min_obs && weight_sum > 0
+                prediction[target, time] = total / weight_sum
+            end
+        end
+    end
+    return prediction
+end
+
+"""
+Per-fold context for `hurdle_gwr`.
+
+`fit_hurdle_gwr`/`predict_hurdle_gwr` need the fold's `times` vector, which the rest of the
+benchmark's method dispatch never has to carry; this mirrors the existing `dem_context` /
+`joint_context` keyword pattern rather than widening every signature. `diagnostics` is a shared
+accumulator (same pattern as `scan_rows`) for the degeneracy report described at
+`_hurdle_predict`.
+"""
+function build_hurdle_context(
+    times::Vector{DateTime}, cfg::InterpolationBenchmarkConfig,
+    diagnostics::Vector{NamedTuple}; scheme::String, product::String, fold::Int,
+)
+    wet_threshold = cfg.mger.rain_threshold
+    # `HurdleGWRConfig` requires `first(intensity_breaks) == wet_threshold`, sorted and unique.
+    # Deriving the breaks from the benchmark's own event thresholds keeps the occurrence table
+    # binned the same way the categorical scores are.
+    breaks = sort(unique(vcat(wet_threshold, filter(>(wet_threshold), cfg.event_thresholds))))
+    return (; times, wet_threshold, intensity_breaks=breaks, diagnostics,
+        scheme, product, fold)
+end
+
+"""Adapt the benchmark's `(adaptive, bw)` convention to HurdleGWR's `SpatialBandwidth`."""
+_hurdle_bandwidth(adaptive::Bool, bw::Float64) =
+    adaptive ? AdaptiveBandwidth(Int(round(bw))) : FixedBandwidth(bw)
+
+_hurdle_config(context, kernel::Int, adaptive::Bool, bw::Float64) = HurdleGWRConfig(
+    wet_threshold=context.wet_threshold,
+    intensity_breaks=context.intensity_breaks,
+    kernel=kernel,
+    bandwidth=_hurdle_bandwidth(adaptive, bw),
+)
+
+"""
+Fit the hurdle model on the training fold and predict `P(wet) * E[amount | wet]`.
+
+Unlike every other method here this is a time-pooled calibration, not a per-hour spatial fit:
+one local regression per target station, with time entering through annual/diurnal harmonics and
+a calendar-month occurrence bin. The satellite enters the design as a *fitted* `log1p_satellite`
+coefficient rather than as an offset with its coefficient forced to 1.
+
+`predict_hurdle_gwr` takes no gauge observations at the target at all, so held-out leakage is
+impossible by construction. `exclude_self` drives its `exclude_train_indices`, which zeroes a
+station's own spatial weight - the same leave-one-out convention `_gwr_predict` uses.
+
+Returns the full prediction object: the caller needs `used_global_amount` and
+`occurrence_fallback` as well as `corrected`, because when a local fit misses
+`min_amount_samples` / `min_effective_stations` the model *silently* falls back to global
+coefficients, and an undiagnosed fallback would report a global model as a local one.
+"""
+function _hurdle_predict(
+    train_lonlat::Matrix{Float64}, y_obs_train::Matrix{Float64},
+    y_sat_train::Matrix{Float64}, target_lonlat::Matrix{Float64},
+    y_sat_target::Matrix{Float64}, times::Vector{DateTime};
+    config::HurdleGWRConfig, exclude_self::Bool=false,
+)
+    model = fit_hurdle_gwr(y_obs_train, y_sat_train, train_lonlat, times; config)
+    exclusions = exclude_self ? collect(1:size(train_lonlat, 1)) : nothing
+    return predict_hurdle_gwr(
+        model, y_sat_target, target_lonlat, times; exclude_train_indices=exclusions,
+    )
+end
+
+"""Summarise how much of a hurdle prediction actually came from a *local* fit."""
+function _hurdle_diagnostic_row(prediction, context; kernel::Int, adaptive::Bool, bw::Float64)
+    fallback = prediction.occurrence_fallback
+    total = length(fallback)
+    share(code) = total == 0 ? NaN : count(==(code), fallback) / total
+    return (;
+        scheme=context.scheme, product=context.product, fold=context.fold,
+        kernel, adaptive, bw,
+        n_target=length(prediction.used_global_amount),
+        used_global_amount_fraction=mean(prediction.used_global_amount),
+        mean_effective_stations=mean(prediction.effective_stations),
+        occurrence_monthly=share(0x00), occurrence_all_month=share(0x01),
+        occurrence_global=share(0x02), occurrence_skipped=share(0x03),
+    )
+end
+
+"""
+Hyperparameter-free reference predictors for one fold, estimated from training stations only.
+
+- `zero`: constant 0. Hourly precipitation is ~93% dry, so this is a surprisingly strong
+  RMSE competitor and the floor any method must clear.
+- `train_clim`: the training stations' overall mean. A per-station climatology is not
+  estimable for a held-out station, so the pooled mean is the station-free analogue.
+- `hour_field_mean`: each hour's spatial mean over training stations - "is it raining
+  anywhere in the domain right now", carrying no spatial structure at all. An interpolator
+  that does not beat this is not doing spatial work.
+
+Reported alongside the real methods so `metrics_*.csv` can be read as skill rather than as a
+bare RMSE. See `NULL_METHODS`.
+"""
+function _null_fold_predictions(y_obs_train::Matrix{Float64}, n_val::Int)
+    n_time = size(y_obs_train, 2)
+    finite = filter(isfinite, vec(y_obs_train))
+    climatology = isempty(finite) ? NaN : mean(finite)
+    field_mean = Matrix{Float64}(undef, n_val, n_time)
+    @inbounds for time in 1:n_time
+        total = 0.0
+        count = 0
+        for station in axes(y_obs_train, 1)
+            value = y_obs_train[station, time]
+            if !isnan(value)
+                total += value
+                count += 1
+            end
+        end
+        field_mean[:, time] .= count > 0 ? total / count : NaN
+    end
+    return Dict{String,Matrix{Float64}}(
+        "zero" => zeros(Float64, n_val, n_time),
+        "train_clim" => fill(climatology, n_val, n_time),
+        "hour_field_mean" => field_mean,
+    )
+end
+
 """Build the provisional mixed-GWR design; replace this when variable roles are finalized."""
 function build_mixed_gwr_designs(
     train_lonlat::Matrix{Float64}, target_lonlat::Matrix{Float64},
@@ -848,7 +1033,7 @@ function select_interpolation_parameter!(
     scan_rows::Vector{NamedTuple}, cfg::InterpolationBenchmarkConfig,
     method::String, mode::String, scheme::Symbol, product::String, fold::Int,
     train_lonlat::Matrix{Float64}, y_obs::Matrix{Float64}, y_sat::Matrix{Float64};
-    dem_context=nothing, joint_context=nothing,
+    dem_context=nothing, joint_context=nothing, hurdle_context=nothing,
 )
     (mode, method) in BENCHMARK_RUNS ||
         throw(ArgumentError("unsupported benchmark method/mode pair: $method/$mode"))
@@ -863,10 +1048,14 @@ function select_interpolation_parameter!(
             joint_context, y_obs, y_sat,
         )
     end
+    # `hurdle_gwr` is the one method that needs the timestamps themselves, so the tuning subset
+    # has to be applied to them as well as to the data matrices.
+    tuning_times = hurdle_context === nothing ? nothing : hurdle_context.times
     if cfg.tuning_max_times > 0 && size(y_obs, 2) > cfg.tuning_max_times
         time_idx = _tuning_time_indices(y_obs, cfg.tuning_max_times)
         y_obs = y_obs[:, time_idx]
         y_sat = y_sat[:, time_idx]
+        tuning_times = tuning_times === nothing ? nothing : tuning_times[time_idx]
     end
     target_values = mode == "direct" ? y_obs : y_obs .- y_sat
     first_row = length(scan_rows) + 1
@@ -906,17 +1095,45 @@ function select_interpolation_parameter!(
                 ))
             end
         end
-    elseif method == "gwr"
+    elseif method in ("gwr", "gwr_const")
+        predictor = method == "gwr" ? _gwr_predict : _gwr_const_predict
         for kernel in cfg.mger.kernels
             for (adaptive, candidates) in ((true, cfg.mger.bw_adaptive), (false, cfg.mger.bw_fixed_km))
                 for bw in candidates
                     try
-                        interpolated = _gwr_predict(
+                        interpolated = predictor(
                             train_lonlat, target_values, train_lonlat;
                             kernel, adaptive, bw, exclude_self=true,
                         )
                         prediction = mode == "direct" ? max.(interpolated, 0.0) : max.(y_sat .+ interpolated, 0.0)
                         metrics = _candidate_metrics(y_obs, y_sat, prediction; require_satellite=mode == "residual")
+                        push!(scan_rows, _scan_row(;
+                            scheme, product, fold, mode, method, kernel, adaptive, bw, metrics...,
+                        ))
+                    catch e
+                        push!(scan_rows, _scan_row(;
+                            scheme, product, fold, mode, method, kernel, adaptive, bw,
+                            status="failed", error=sprint(showerror, e),
+                        ))
+                    end
+                end
+            end
+        end
+    elseif method == "hurdle_gwr"
+        mode == "direct" || throw(ArgumentError("hurdle_gwr only supports direct mode"))
+        hurdle_context === nothing &&
+            throw(ArgumentError("hurdle_gwr requires a hurdle_context carrying the fold times"))
+        for kernel in cfg.mger.kernels
+            for (adaptive, candidates) in ((true, cfg.mger.bw_adaptive), (false, cfg.mger.bw_fixed_km))
+                for bw in candidates
+                    try
+                        prediction = _hurdle_predict(
+                            train_lonlat, y_obs, y_sat, train_lonlat, y_sat,
+                            something(tuning_times);
+                            config=_hurdle_config(hurdle_context, kernel, adaptive, bw),
+                            exclude_self=true,
+                        )
+                        metrics = _candidate_metrics(y_obs, y_sat, prediction.corrected)
                         push!(scan_rows, _scan_row(;
                             scheme, product, fold, mode, method, kernel, adaptive, bw, metrics...,
                         ))
@@ -966,7 +1183,7 @@ function predict_selected(
     selected, method::String, mode::String,
     train_lonlat::Matrix{Float64}, target_lonlat::Matrix{Float64},
     y_obs_train::Matrix{Float64}, y_sat_train::Matrix{Float64}, y_sat_target::Matrix{Float64};
-    dem_context=nothing, joint_context=nothing,
+    dem_context=nothing, joint_context=nothing, hurdle_context=nothing,
 )
     (mode, method) in BENCHMARK_RUNS ||
         throw(ArgumentError("unsupported benchmark method/mode pair: $method/$mode"))
@@ -1030,6 +1247,24 @@ function predict_selected(
     elseif method == "gwr"
         _gwr_predict(train_lonlat, values, target_lonlat;
             kernel=selected.kernel, adaptive=selected.adaptive, bw=selected.bw)
+    elseif method == "gwr_const"
+        _gwr_const_predict(train_lonlat, values, target_lonlat;
+            kernel=selected.kernel, adaptive=selected.adaptive, bw=selected.bw)
+    elseif method == "hurdle_gwr"
+        hurdle_context === nothing &&
+            throw(ArgumentError("hurdle_gwr requires a hurdle_context carrying the fold times"))
+        prediction = _hurdle_predict(
+            train_lonlat, y_obs_train, y_sat_train, target_lonlat, y_sat_target,
+            hurdle_context.times;
+            config=_hurdle_config(
+                hurdle_context, selected.kernel, selected.adaptive, selected.bw,
+            ),
+        )
+        push!(hurdle_context.diagnostics, _hurdle_diagnostic_row(
+            prediction, hurdle_context;
+            kernel=selected.kernel, adaptive=selected.adaptive, bw=selected.bw,
+        ))
+        prediction.corrected
     elseif method == "mixed_gwr"
         _mixed_gwr_predict(train_lonlat, values, target_lonlat; bw=selected.bw)
     elseif method == "mgwr"
@@ -1082,27 +1317,32 @@ function append_stratified_metrics!(
     fold=missing, repeat::Int=1, seed::Int=0,
 )
     base = (; scheme, product, method, fold, repeat, seed)
-    push!(rows, _continuous_row(y_obs, prediction, common_mask; base..., group="overall", level="all"))
+    # `common_mask` is pinned to MASK_METHODS, so a method outside that set can still be NaN
+    # inside it and would otherwise score NaN rather than "worse". Drop its own gaps and let
+    # the `coverage` column report the shortfall instead. This is a no-op for the MASK_METHODS
+    # themselves, whose NaNs already defined the mask.
+    scored_mask = common_mask .& .!isnan.(prediction)
+    push!(rows, _continuous_row(y_obs, prediction, scored_mask; base..., group="overall", level="all"))
 
     rain_groups = (
         ("no_rain", -Inf, 0.1), ("light", 0.1, 2.5),
         ("moderate", 2.5, 8.0), ("heavy", 8.0, Inf),
     )
     for (name, lower, upper) in rain_groups
-        stratum = common_mask .& (y_obs .>= lower) .& (y_obs .< upper)
+        stratum = scored_mask .& (y_obs .>= lower) .& (y_obs .< upper)
         push!(rows, _continuous_row(y_obs, prediction, stratum;
             base..., group="rain_intensity", level=name))
     end
 
     for year_value in sort(unique(year.(times)))
         time_mask = reshape(year.(times) .== year_value, 1, :)
-        stratum = common_mask .& time_mask
+        stratum = scored_mask .& time_mask
         push!(rows, _continuous_row(y_obs, prediction, stratum;
             base..., group="year", level=string(year_value)))
     end
     for month_value in sort(unique(month.(times)))
         time_mask = reshape(month.(times) .== month_value, 1, :)
-        stratum = common_mask .& time_mask
+        stratum = scored_mask .& time_mask
         push!(rows, _continuous_row(y_obs, prediction, stratum;
             base..., group="month", level=lpad(month_value, 2, '0')))
     end
@@ -1113,13 +1353,13 @@ function append_stratified_metrics!(
     )
     for (name, lower, upper) in distance_groups
         station_mask = reshape((nearest_distance .>= lower) .& (nearest_distance .< upper), :, 1)
-        stratum = common_mask .& station_mask
+        stratum = scored_mask .& station_mask
         push!(rows, _continuous_row(y_obs, prediction, stratum;
             base..., group="nearest_train_km", level=name))
     end
 
     for threshold in thresholds
-        push!(rows, _event_row(y_obs, prediction, common_mask, threshold;
+        push!(rows, _event_row(y_obs, prediction, scored_mask, threshold;
             base..., group="event_threshold", level=string(threshold)))
     end
     return rows
@@ -1127,7 +1367,7 @@ end
 
 function _common_method_mask(y_obs::Matrix{Float64}, predictions::Dict{String,Matrix{Float64}})
     mask = .!isnan.(y_obs)
-    for method in BENCHMARK_METHODS
+    for method in MASK_METHODS
         mask .&= .!isnan.(predictions[method])
     end
     return BitMatrix(mask)
@@ -1176,13 +1416,26 @@ function _holm_adjust(pvalues::AbstractVector)
     return adjusted
 end
 
+"""
+Method under test when the caller does not name one. Kept as the default everywhere so the
+benchmark's own `paired_comparisons.csv` / `claim_assessment.csv` are unchanged by the
+method-aware parameters added for `scripts/run_claim_reassessment.jl`.
+"""
+const DEFAULT_CLAIM_METHOD = "residual_gwr"
+
 function paired_bootstrap_rows(
     cfg::InterpolationBenchmarkConfig, scheme::String, product::String,
     times::Vector{DateTime}, y_obs::Matrix{Float64}, predictions::Dict{String,Matrix{Float64}},
     common_mask::BitMatrix; repeat::Int=1, seed::Int=cfg.seed,
+    method::String=DEFAULT_CLAIM_METHOD, pairwise_mask::Bool=false,
 )
     rows = NamedTuple[]
     cfg.bootstrap_reps == 0 && return rows
+    treatment = predictions[method]
+    # A `method` column only appears once the caller asks for something other than the historical
+    # single-method behaviour: the row already carries `baseline` but nothing naming the treatment,
+    # so rows for two methods appended to one table would be indistinguishable.
+    tagged = method != DEFAULT_CLAIM_METHOD || pairwise_mask
     strata = (
         ("overall", common_mask),
         ("moderate", common_mask .& (y_obs .>= 2.5) .& (y_obs .< 8.0)),
@@ -1191,24 +1444,30 @@ function paired_bootstrap_rows(
     for (stratum, mask) in strata
         local_rows = NamedTuple[]
         for (baseline_index, baseline_method) in enumerate(TRADITIONAL_METHODS)
+            baseline = predictions[baseline_method]
+            # `common_mask` is pinned to MASK_METHODS, so a method outside that set can still be
+            # NaN inside it and would score NaN rather than "worse". Restrict each test to the
+            # cells both sides actually predicted.
+            test_mask = pairwise_mask ?
+                BitMatrix(mask .& .!isnan.(baseline) .& .!isnan.(treatment)) : BitMatrix(mask)
             deltas = _daily_bootstrap_delta(
                 MersenneTwister(seed + 1000 * baseline_index + sum(codeunits(product))),
-                times, y_obs, predictions[baseline_method], predictions["residual_gwr"],
-                BitMatrix(mask), cfg.bootstrap_reps,
+                times, y_obs, baseline, treatment, test_mask, cfg.bootstrap_reps,
             )
             isempty(deltas) && continue
-            observed_baseline = metric_continuous(y_obs, predictions[baseline_method]; mask=mask).RMSE
-            observed_gwr = metric_continuous(y_obs, predictions["residual_gwr"]; mask=mask).RMSE
+            observed_baseline = metric_continuous(y_obs, baseline; mask=test_mask).RMSE
+            observed_gwr = metric_continuous(y_obs, treatment; mask=test_mask).RMSE
             delta = observed_baseline - observed_gwr
             pvalue = min(1.0, 2 * min(mean(deltas .<= 0), mean(deltas .>= 0)))
-            push!(local_rows, (;
+            row = (;
                 scheme, product, stratum, baseline=baseline_method, repeat, seed,
-                n=count(mask), n_day=length(unique(Date.(times))), reps=cfg.bootstrap_reps,
+                n=count(test_mask), n_day=length(unique(Date.(times))), reps=cfg.bootstrap_reps,
                 RMSE_baseline=observed_baseline, RMSE_gwr=observed_gwr,
                 delta_RMSE=delta, relative_improvement=delta / observed_baseline,
                 ci_low=quantile(deltas, 0.025), ci_high=quantile(deltas, 0.975),
                 pvalue, pvalue_holm=NaN,
-            ))
+            )
+            push!(local_rows, tagged ? merge((; method), row) : row)
         end
         adjusted = _holm_adjust([row.pvalue for row in local_rows])
         for (index, row) in enumerate(local_rows)
@@ -1325,23 +1584,37 @@ per-baseline `overall` comparisons are already Holm-corrected against each other
 descriptive-only fields (how much better than the strongest competitor) and do not gate
 `product_supported`; the `*_win_count` fields show how many of the 3 baselines were actually
 beaten in each stratum.
+
+`method` selects which method is assessed (default `residual_gwr`, the historical behaviour).
+`own_coverage` maps product to the method's *own* prediction coverage; when supplied, the
+coverage gate uses it instead of `coverage` on the shared evaluation mask. The shared mask is
+pinned to `MASK_METHODS`, so it sits at ~0.8 because direct `gwr` fails ~20% of cells — gating on
+it asks every method to answer for a different method's failures, which no method can pass. Both
+numbers are reported side by side. Naming either argument switches the output to a self-describing
+schema (`method` + `RMSE_method`) so rows for different methods cannot be silently mixed.
 """
-function assess_gwr_claim(metrics::DataFrame, bootstrap::DataFrame, products::Vector{String})
+function assess_gwr_claim(
+    metrics::DataFrame, bootstrap::DataFrame, products::Vector{String};
+    method::String=DEFAULT_CLAIM_METHOD, own_coverage::Union{Nothing,AbstractDict}=nothing,
+)
     rows = NamedTuple[]
+    tagged = method != DEFAULT_CLAIM_METHOD || own_coverage !== nothing
+    bootstrap_has_method = :method in propertynames(bootstrap)
     for product in products
         overall_traditional = [_one_metric(metrics, product, method, "overall", "all")
             for method in TRADITIONAL_METHODS]
         best_index = argmin([row.RMSE for row in overall_traditional])
         best_method = TRADITIONAL_METHODS[best_index]
         best_overall = overall_traditional[best_index]
-        gwr_overall = _one_metric(metrics, product, "residual_gwr", "overall", "all")
+        gwr_overall = _one_metric(metrics, product, method, "overall", "all")
 
         # Overall: GWR must be significantly better than every baseline (each row already
         # Holm-corrected against the other two by paired_bootstrap_rows), not just whichever
         # one was easiest to beat.
         overall_bootstrap = filter(row ->
             row.scheme == "balanced_spatial" && row.product == product &&
-            row.stratum == "overall" && row.repeat == 1,
+            row.stratum == "overall" && row.repeat == 1 &&
+            (!bootstrap_has_method || row.method == method),
             bootstrap,
         )
         significant_per_baseline = Dict(String(row.baseline) =>
@@ -1351,11 +1624,11 @@ function assess_gwr_claim(metrics::DataFrame, bootstrap::DataFrame, products::Ve
             overall_win_count == length(TRADITIONAL_METHODS)
 
         # Heavy: GWR must improve on every baseline by at least 5%.
-        gwr_heavy = _one_metric(metrics, product, "residual_gwr", "rain_intensity", "heavy").RMSE
-        heavy_improvements = Dict(method => let
-                base = _one_metric(metrics, product, method, "rain_intensity", "heavy").RMSE
+        gwr_heavy = _one_metric(metrics, product, method, "rain_intensity", "heavy").RMSE
+        heavy_improvements = Dict(baseline => let
+                base = _one_metric(metrics, product, baseline, "rain_intensity", "heavy").RMSE
                 isfinite(base) && base > 0 ? (base - gwr_heavy) / base : NaN
-            end for method in TRADITIONAL_METHODS)
+            end for baseline in TRADITIONAL_METHODS)
         heavy_win_count = count(>=(0.05), filter(isfinite, collect(values(heavy_improvements))))
         heavy_ok = heavy_win_count == length(TRADITIONAL_METHODS)
         # Worst case across baselines, matching what the gate above requires.
@@ -1363,46 +1636,52 @@ function assess_gwr_claim(metrics::DataFrame, bootstrap::DataFrame, products::Ve
 
         # Moderate: GWR is allowed to be marginally worse here (non-inferiority), but not by
         # more than 2% against any baseline.
-        gwr_moderate = _one_metric(metrics, product, "residual_gwr", "rain_intensity", "moderate").RMSE
-        moderate_degradations = Dict(method => let
-                base = _one_metric(metrics, product, method, "rain_intensity", "moderate").RMSE
+        gwr_moderate = _one_metric(metrics, product, method, "rain_intensity", "moderate").RMSE
+        moderate_degradations = Dict(baseline => let
+                base = _one_metric(metrics, product, baseline, "rain_intensity", "moderate").RMSE
                 isfinite(base) && base > 0 ? (gwr_moderate - base) / base : NaN
-            end for method in TRADITIONAL_METHODS)
+            end for baseline in TRADITIONAL_METHODS)
         moderate_win_count = count(<=(0.02), filter(isfinite, collect(values(moderate_degradations))))
         moderate_ok = moderate_win_count == length(TRADITIONAL_METHODS)
         moderate_relative_degradation = maximum(values(moderate_degradations))
 
         # Year: a "win" requires beating every baseline that year, not just one.
-        year_levels = unique(filter(row ->
+        # `String.` because a `metrics` table read back from CSV carries InlineString levels,
+        # which `_one_metric`'s `::String` signature would reject.
+        year_levels = String.(unique(filter(row ->
             row.scheme == "balanced_spatial" && row.product == product &&
-            row.method == "residual_gwr" && ismissing(row.fold) && row.group == "year",
+            row.method == method && ismissing(row.fold) && row.group == "year",
             metrics,
-        ).level)
+        ).level))
         year_wins = 0
         for year_level in year_levels
-            gwr_year = _one_metric(metrics, product, "residual_gwr", "year", year_level).RMSE
-            year_wins += all(method ->
-                gwr_year < _one_metric(metrics, product, method, "year", year_level).RMSE,
+            gwr_year = _one_metric(metrics, product, method, "year", year_level).RMSE
+            year_wins += all(baseline ->
+                gwr_year < _one_metric(metrics, product, baseline, "year", year_level).RMSE,
                 TRADITIONAL_METHODS)
         end
         majority_years = isempty(year_levels) ? false : year_wins > length(year_levels) / 2
 
         # Event threshold: must not degrade CSI/FAR against any baseline.
-        gwr_event = _one_metric(metrics, product, "residual_gwr", "event_threshold", "0.1")
-        event_checks = Dict(method => let
-                base = _one_metric(metrics, product, method, "event_threshold", "0.1")
+        gwr_event = _one_metric(metrics, product, method, "event_threshold", "0.1")
+        event_checks = Dict(baseline => let
+                base = _one_metric(metrics, product, baseline, "event_threshold", "0.1")
                 gwr_event.CSI >= base.CSI - 0.02 && gwr_event.FAR <= base.FAR + 0.02
-            end for method in TRADITIONAL_METHODS)
+            end for baseline in TRADITIONAL_METHODS)
         event_win_count = count(values(event_checks))
         event_not_degraded = event_win_count == length(TRADITIONAL_METHODS)
 
-        coverage_acceptable = gwr_overall.coverage >= 0.95
+        gated_coverage = own_coverage === nothing ?
+            gwr_overall.coverage : Float64(own_coverage[product])
+        coverage_acceptable = gated_coverage >= 0.95
         direction_improved = gwr_overall.RMSE < best_overall.RMSE
         product_supported = significant && heavy_ok && moderate_ok && majority_years &&
             event_not_degraded && coverage_acceptable
-        push!(rows, (;
+        head = (;
             product, best_traditional=best_method,
-            RMSE_best_traditional=best_overall.RMSE, RMSE_residual_gwr=gwr_overall.RMSE,
+            RMSE_best_traditional=best_overall.RMSE,
+        )
+        tail = (;
             overall_relative_improvement=(best_overall.RMSE - gwr_overall.RMSE) / best_overall.RMSE,
             paired_significant=significant, overall_win_count=overall_win_count,
             heavy_relative_improvement=heavy_relative_improvement, heavy_win_count=heavy_win_count,
@@ -1411,7 +1690,13 @@ function assess_gwr_claim(metrics::DataFrame, bootstrap::DataFrame, products::Ve
             year_win_count=year_wins, year_count=length(year_levels), majority_years,
             event_not_degraded, event_win_count, common_coverage=gwr_overall.coverage,
             coverage_acceptable, direction_improved, product_supported,
-        ))
+        )
+        push!(rows, if tagged
+            merge((; method), head,
+                (; RMSE_method=gwr_overall.RMSE, own_coverage=gated_coverage), tail)
+        else
+            merge(head, (; RMSE_residual_gwr=gwr_overall.RMSE), tail)
+        end)
     end
     supported_products = count(row -> row.product_supported, rows)
     improved_products = count(row -> row.direction_improved, rows)
@@ -1651,6 +1936,7 @@ function run_interpolation_benchmark(cfg::InterpolationBenchmarkConfig)
     all_scan_rows = NamedTuple[]
     all_bootstrap_rows = NamedTuple[]
     run_status_rows = NamedTuple[]
+    hurdle_rows = NamedTuple[]
 
     if _dem_enabled(cfg)
         dem = something(cfg.dem)
@@ -1701,6 +1987,10 @@ function run_interpolation_benchmark(cfg::InterpolationBenchmarkConfig)
                 y_sat_val = Matrix{Float64}(y_sat[val_idx, :])
                 distance_train_val = haversine_distance_matrix(train_lonlat, val_lonlat)
                 nearest_train_distance[val_idx] = vec(minimum(distance_train_val, dims=1))
+                null_predictions = _null_fold_predictions(y_obs_train, length(val_idx))
+                for (null_method, null_prediction) in null_predictions
+                    predictions[null_method][val_idx, :] = null_prediction
+                end
 
                 dem_context = nothing
                 if _dem_enabled(cfg)
@@ -1758,7 +2048,13 @@ function run_interpolation_benchmark(cfg::InterpolationBenchmarkConfig)
                     push!(joint_qc_tables, quality)
                 end
 
-                fold_predictions = Dict{String,Matrix{Float64}}("raw" => y_sat_val)
+                hurdle_context = build_hurdle_context(
+                    data.times, cfg, hurdle_rows; scheme, product, fold,
+                )
+
+                fold_predictions = merge(
+                    Dict{String,Matrix{Float64}}("raw" => y_sat_val), null_predictions,
+                )
                 scan_start = length(all_scan_rows) + 1
                 for (mode, method) in BENCHMARK_RUNS
                     output_method = method in ("mixed_gwr", "mgwr") ? method :
@@ -1767,12 +2063,12 @@ function run_interpolation_benchmark(cfg::InterpolationBenchmarkConfig)
                         selected = select_interpolation_parameter!(
                             all_scan_rows, cfg, method, mode, scheme_symbol, product, fold,
                             train_lonlat, y_obs_train, y_sat_train;
-                            dem_context, joint_context,
+                            dem_context, joint_context, hurdle_context,
                         )
                         fold_predictions[output_method] = predict_selected(
                             selected, method, mode, train_lonlat, val_lonlat,
                             y_obs_train, y_sat_train, y_sat_val;
-                            dem_context, joint_context,
+                            dem_context, joint_context, hurdle_context,
                         )
                         predictions[output_method][val_idx, :] = fold_predictions[output_method]
                         uses_dem = dem_context !== nothing && mode == "residual" &&
@@ -1926,6 +2222,10 @@ function run_interpolation_benchmark(cfg::InterpolationBenchmarkConfig)
     nrow(rank_stability) > 0 &&
         CSV.write(joinpath(cfg.mger.outdir, "method_rank_stability.csv"), rank_stability)
     CSV.write(joinpath(cfg.mger.outdir, "parameter_scan.csv"), scans)
+    # How much of each hurdle prediction actually came from a local fit. Without this a
+    # globally-degenerate model is indistinguishable from a local one in the metrics.
+    isempty(hurdle_rows) ||
+        CSV.write(joinpath(cfg.mger.outdir, "hurdle_diagnostics.csv"), DataFrame(hurdle_rows))
     nrow(bootstrap) > 0 && CSV.write(joinpath(cfg.mger.outdir, "paired_comparisons.csv"), bootstrap)
     CSV.write(joinpath(cfg.mger.outdir, "run_status.csv"), status)
     _dem_enabled(cfg) && _write_dem_outputs(cfg.mger.outdir, dem_store, scans, status)

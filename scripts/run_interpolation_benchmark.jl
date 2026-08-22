@@ -15,7 +15,7 @@ repeat_seeds(repeats::Int) = repeats <= 1 ? Int[] : [20260627 + 1000 * i for i i
 
 function benchmark_config(
     mode::Symbol; with_random::Bool=false, legacy_dem::Bool=false, repeats::Int=1,
-    nested_covariates::Bool=false,
+    nested_covariates::Bool=false, local_grid::Bool=false,
 )
     mode in (:smoke, :full) || throw(ArgumentError("mode must be :smoke or :full"))
     nested_covariates && legacy_dem && throw(ArgumentError(
@@ -30,6 +30,7 @@ function benchmark_config(
             (smoke ? "interpolation_benchmark_smoke_joint_covariates" :
                 "interpolation_benchmark_full_joint_covariates")) *
             (nested_covariates ? "_nested" : "") *
+            (local_grid ? "_localgrid" : "") *
             (repeats > 1 ? "_repeats$(repeats)" : ""),
     )
     mkpath(outdir)
@@ -56,8 +57,15 @@ function benchmark_config(
         outdir=outdir,
         kernels=smoke ? [GAUSSIAN, BISQUARE] :
             [GAUSSIAN, EXPONENTIAL, BISQUARE, TRICUBE, BOXCAR],
-        bw_adaptive=smoke ? [30.0, 80.0] : [30.0, 50.0, 80.0, 120.0],
-        bw_fixed_km=smoke ? [30.0, 50.0] : [10.0, 20.0, 30.0, 50.0],
+        # The canonical grids start at 30 nearest neighbours (~37 km with 237 Hubei stations),
+        # while IDW/ADW may use 8 (~18 km) - and both families select their grid minimum in
+        # nearly every fold, so the floor, not the data, is picking the bandwidth. `--local-grid`
+        # extends the GWR floor down to IDW/ADW's locality so the two can be compared at equal
+        # bandwidth; see `output/benchmark_diagnostics/bandwidth_saturation.csv`.
+        bw_adaptive=local_grid ? [8.0, 12.0, 16.0, 20.0, 30.0, 50.0, 80.0, 120.0] :
+            (smoke ? [30.0, 80.0] : [30.0, 50.0, 80.0, 120.0]),
+        bw_fixed_km=local_grid ? [5.0, 10.0, 20.0, 30.0, 50.0] :
+            (smoke ? [30.0, 50.0] : [10.0, 20.0, 30.0, 50.0]),
         rain_threshold=0.1,
         use_loocv_eval=true,
         # Full mode spans Jan 2022 - Dec 2024. FY4B's strict-completeness QC yields zero
@@ -102,7 +110,8 @@ function benchmark_config(
             ROOT, "data", "processed", "covariates",
             "station_ndvi_16day_2022_2024.csv",
         ),
-        bandwidth_candidates=[30, 50, 80, 120, 160],
+        bandwidth_candidates=local_grid ? [8, 12, 16, 20, 30, 50, 80, 120, 160] :
+            [30, 50, 80, 120, 160],
         feature_time_offset_hours=9,
         max_ndvi_age_days=32,
         wet_threshold=0.1,
@@ -116,6 +125,11 @@ function benchmark_config(
         wet_threshold=0.1,
         min_wet_hours=smoke ? 20 : 100,
         k=5,
+        # Deliberately NOT extended by --local-grid. This grid feeds the ERA5/NDVI/DEM
+        # local-vs-global role tests (JointVariableSelection._family_configs), i.e. which
+        # covariates get selected. Holding it fixed keeps the same covariate set as the
+        # baseline nested run, so a change in RMSE is attributable to the fitting bandwidth
+        # alone rather than to a different set of variables.
         bandwidth_candidates=[30, 50, 80, 120, 160],
         independent_permutations=smoke ? 99 : 999,
         spatial_permutations=smoke ? 99 : 999,
@@ -177,7 +191,8 @@ function main(args=ARGS)
         mode == :full && !legacy_dem
     end
     repeats = parse_repeats(args)
-    cfg = benchmark_config(mode; with_random, legacy_dem, repeats, nested_covariates)
+    local_grid = "--local-grid" in args
+    cfg = benchmark_config(mode; with_random, legacy_dem, repeats, nested_covariates, local_grid)
     !legacy_dem && Threads.nthreads() == 1 && @warn(
         "Joint dynamic models are compute intensive; use julia -t auto for parallel hourly fits",
     )
@@ -187,7 +202,8 @@ function main(args=ARGS)
         "the fixed full-data selection path.",
     )
     println("Running interpolation benchmark: mode=$mode, repeats=$repeats, " *
-        "nested_covariates=$nested_covariates, output=$(cfg.mger.outdir)")
+        "nested_covariates=$nested_covariates, local_grid=$local_grid, " *
+        "output=$(cfg.mger.outdir)")
     result = run_interpolation_benchmark(cfg)
     println("Finished: $(nrow(result.metrics)) metric rows, $(nrow(result.scans)) scan rows")
     if nrow(result.claim) > 0

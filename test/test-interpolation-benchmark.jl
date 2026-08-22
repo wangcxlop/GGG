@@ -491,10 +491,12 @@ end
         )
         result = run_interpolation_benchmark(cfg)
         @test !isempty(result.metrics)
-        @test nrow(result.status) == 2 * 3 * 7
+        @test nrow(result.status) == 2 * 3 * 10
         @test all(result.status.status .== "success")
-        @test Set(result.status.method) ==
-            Set(["idw", "adw", "tps", "gwr", "residual_gwr", "mixed_gwr", "mgwr"])
+        @test Set(result.status.method) == Set([
+            "idw", "adw", "tps", "gwr", "gwr_const", "hurdle_gwr",
+            "residual_gwr", "residual_gwr_const", "mixed_gwr", "mgwr",
+        ])
         @test Set(result.metrics.method) == Set(BENCHMARK_METHODS)
         @test Set((row.mode, row.method) for row in eachrow(result.scans)) == Set(BENCHMARK_RUNS)
         @test Set(result.scans.group[result.scans.method .== "mgwr"]) ==
