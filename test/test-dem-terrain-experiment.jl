@@ -1,5 +1,6 @@
 using Test
 using DataFrames
+using LinearAlgebra
 using Random
 using Statistics
 
@@ -211,4 +212,116 @@ end
     )
     @test !all(failed_convergence)
     @test all(isnan, failed_prediction)
+end
+
+"""
+Weighted-least-squares prediction at every target, written straight from the definition.
+
+`_local_hat` returns the linear operator that produces this, so `hat * y` must match it
+for any `y`. Deriving the reference from the definition rather than from a copy of the
+implementation is what makes these tests bite on a rewrite of the inner loop.
+"""
+function reference_local_prediction(
+    Xtrain, Xtarget, distances, y, neighbors; ridge=1e-8, exclude_self=false,
+)
+    p = size(Xtrain, 2)
+    prediction = zeros(Float64, size(Xtarget, 1))
+    for target in axes(Xtarget, 1)
+        d = copy(distances[:, target])
+        exclude_self && (d[target] = Inf)
+        w = DEMTerrainExperiment._adaptive_bisquare(d, neighbors)
+        valid = w .> 0
+        count(valid) >= p + 1 || continue
+        Xv = Xtrain[valid, :]
+        wv = w[valid]
+        beta = (Xv' * (wv .* Xv) + ridge * I) \ (Xv' * (wv .* y[valid]))
+        prediction[target] = dot(Xtarget[target, :], beta)
+    end
+    return prediction
+end
+
+@testset "adaptive bisquare weights" begin
+    distances = [5.0, 1.0, 9.0, 3.0, Inf, 7.0]
+    bandwidth = sort(filter(isfinite, distances))[3]
+    @test bandwidth == 5.0
+    weights = DEMTerrainExperiment._adaptive_bisquare(distances, 3)
+    for (index, d) in enumerate(distances)
+        @test weights[index] ==
+            (isfinite(d) && d < bandwidth ? (1 - (d / bandwidth)^2)^2 : 0.0)
+    end
+    @test all(iszero, weights[distances .>= bandwidth])
+    @test count(>(0), weights) == 2
+
+    # Asking for more neighbours than there are finite distances clamps to the largest.
+    @test DEMTerrainExperiment._adaptive_bisquare(distances, 99) ==
+        DEMTerrainExperiment._adaptive_bisquare(distances, 5)
+    # No finite distance at all: no station gets weight.
+    @test all(iszero, DEMTerrainExperiment._adaptive_bisquare(fill(Inf, 4), 2))
+    # Every finite distance zero: the kernel degenerates to exact coincidence.
+    @test DEMTerrainExperiment._adaptive_bisquare([0.0, 0.0, Inf], 2) == [1.0, 1.0, 0.0]
+    @test DEMTerrainExperiment._adaptive_bisquare(zeros(4), 2) == ones(4)
+end
+
+@testset "local hat operator matches weighted least squares" begin
+    rng = MersenneTwister(2026)
+    n, m = 40, 11
+    lonlat = hcat(109.0 .+ 4 .* rand(rng, n), 30.0 .+ 4 .* rand(rng, n))
+    target_lonlat = hcat(109.0 .+ 4 .* rand(rng, m), 30.0 .+ 4 .* rand(rng, m))
+    train_distances = DEMTerrainExperiment._haversine_matrix(lonlat, lonlat)
+    target_distances = DEMTerrainExperiment._haversine_matrix(lonlat, target_lonlat)
+    y = randn(rng, n)
+    for p in 1:5
+        Xtrain = hcat(ones(n), randn(rng, n, p - 1))
+        Xtarget = hcat(ones(m), randn(rng, m, p - 1))
+        for bandwidth in (10, 20, n)
+            square = DEMTerrainExperiment._local_hat(
+                Xtrain, Xtrain, train_distances, bandwidth,
+            )
+            @test square * y ≈ reference_local_prediction(
+                Xtrain, Xtrain, train_distances, y, bandwidth,
+            )
+
+            held_out = DEMTerrainExperiment._local_hat(
+                Xtrain, Xtrain, train_distances, bandwidth; exclude_self=true,
+            )
+            @test all(iszero, diag(held_out))
+            @test held_out * y ≈ reference_local_prediction(
+                Xtrain, Xtrain, train_distances, y, bandwidth; exclude_self=true,
+            )
+
+            rectangular = DEMTerrainExperiment._local_hat(
+                Xtrain, Xtarget, target_distances, bandwidth,
+            )
+            @test size(rectangular) == (m, n)
+            @test rectangular * y ≈ reference_local_prediction(
+                Xtrain, Xtarget, target_distances, y, bandwidth,
+            )
+        end
+    end
+
+    # A bandwidth too small to support the design leaves the row at zero rather than
+    # throwing — `_gwr_smoothers` is the one that throws, `_local_hat` is not.
+    Xwide = hcat(ones(n), randn(rng, n, 5))
+    @test all(iszero, DEMTerrainExperiment._local_hat(
+        Xwide, Xwide, train_distances, 2,
+    ))
+
+    # The ridge is applied to the normal equations, so a larger one shrinks the operator.
+    Xtrain = hcat(ones(n), randn(rng, n, 2))
+    weak = DEMTerrainExperiment._local_hat(Xtrain, Xtrain, train_distances, 12; ridge=1e-8)
+    strong = DEMTerrainExperiment._local_hat(Xtrain, Xtrain, train_distances, 12; ridge=1.0)
+    @test !(weak ≈ strong)
+    @test strong * y ≈ reference_local_prediction(
+        Xtrain, Xtrain, train_distances, y, 12; ridge=1.0,
+    )
+
+    @test_throws DimensionMismatch DEMTerrainExperiment._local_hat(
+        Xtrain, randn(rng, m, 2), target_distances, 12,
+    )
+    @test_throws DimensionMismatch DEMTerrainExperiment._local_hat(
+        Xtrain, Xtrain, target_distances, 12,
+    )
+    @test_throws DimensionMismatch DEMTerrainExperiment._local_hat(
+        Xtrain, hcat(ones(m), randn(rng, m, 2)), target_distances, 12; exclude_self=true,
+    )
 end
