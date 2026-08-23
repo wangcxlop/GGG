@@ -44,18 +44,6 @@ function load_common_data(outdir::AbstractString)
     return load_global_common_product_data(cfg)
 end
 
-"""Load every method's out-of-fold prediction matrix for one (scheme, product) cell."""
-function load_predictions(product_dir::AbstractString, ids::Vector{String})
-    predictions = Dict{String,Matrix{Float64}}()
-    for path in readdir(product_dir; join=true)
-        name = basename(path)
-        startswith(name, "oof_") && endswith(name, ".csv") || continue
-        method = name[5:end-4]
-        predictions[method] = read_wide_matrix(path, ids)
-    end
-    return predictions
-end
-
 function main(args=ARGS)
     run_dir = isempty(args) ? DEFAULT_RUN : abspath(args[1])
     isdir(run_dir) || error("benchmark output directory not found: $run_dir")
@@ -88,7 +76,7 @@ function main(args=ARGS)
             mask = read_mask_matrix(
                 joinpath(product_dir, "common_evaluation_mask.csv"), ids,
             )
-            predictions = load_predictions(product_dir, ids)
+            predictions = load_prediction_matrices(product_dir, ids)
             merge!(predictions, nulls)
 
             rescaled, coefficients = satellite_rescale_matrix(

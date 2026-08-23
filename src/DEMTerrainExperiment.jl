@@ -239,14 +239,58 @@ function _haversine_matrix(train_lonlat::Matrix{Float64}, target_lonlat::Matrix{
     return result
 end
 
-function _adaptive_bisquare(distances::Vector{Float64}, neighbors::Int)
-    finite_distances = sort(filter(isfinite, distances))
-    isempty(finite_distances) && return zeros(Float64, length(distances))
-    k = clamp(neighbors, 2, length(finite_distances))
-    bandwidth = finite_distances[k]
+"""
+Adaptive bisquare weights, written into `weights` and using `buffer` as scratch.
+
+Only the k-th smallest finite distance is needed, so `partialsort!` on a reused buffer
+replaces `sort(filter(isfinite, distances))`; it returns the same value in linear time
+and without allocating. `distances` is not modified.
+"""
+function _adaptive_bisquare!(
+    weights::Vector{Float64}, distances::Vector{Float64}, neighbors::Int,
+    buffer::Vector{Float64},
+)
+    n = length(distances)
+    finite_count = 0
+    @inbounds for i in 1:n
+        d = distances[i]
+        isfinite(d) || continue
+        finite_count += 1
+        buffer[finite_count] = d
+    end
+    if finite_count == 0
+        fill!(weights, 0.0)
+        return weights
+    end
+    finite_distances = view(buffer, 1:finite_count)
+    # Kept exactly as it was, quirk included: with a single finite distance `clamp` returns
+    # `hi = 1` for the usual `neighbors >= 2`, but `lo = 2` for `neighbors <= 1`, which then
+    # asks for an element that is not there. Both the old indexing and `partialsort!` below
+    # raise `BoundsError` on that input, and no caller can reach it — the bandwidth grids
+    # start at 8 and callers clamp with `min(bandwidth, n - 1)`.
+    k = clamp(neighbors, 2, finite_count)
+    # `partialsort!` permutes `finite_distances` without dropping elements, so the
+    # `maximum` fallback below still sees the same multiset.
+    bandwidth = partialsort!(finite_distances, k)
     bandwidth > 0 || (bandwidth = maximum(finite_distances))
-    bandwidth > 0 || return Float64.(distances .== 0)
-    return [isfinite(d) && d < bandwidth ? (1 - (d / bandwidth)^2)^2 : 0.0 for d in distances]
+    if !(bandwidth > 0)
+        @inbounds for i in 1:n
+            weights[i] = distances[i] == 0 ? 1.0 : 0.0
+        end
+        return weights
+    end
+    @inbounds for i in 1:n
+        d = distances[i]
+        weights[i] = isfinite(d) && d < bandwidth ? (1 - (d / bandwidth)^2)^2 : 0.0
+    end
+    return weights
+end
+
+function _adaptive_bisquare(distances::Vector{Float64}, neighbors::Int)
+    n = length(distances)
+    return _adaptive_bisquare!(
+        Vector{Float64}(undef, n), distances, neighbors, Vector{Float64}(undef, n),
+    )
 end
 
 function _gwr_smoothers(
@@ -376,17 +420,54 @@ function _local_hat(
     exclude_self && ntrain != ntarget &&
         throw(DimensionMismatch("exclude_self requires matching train and target rows"))
     H = zeros(Float64, ntarget, ntrain)
-    for target in 1:ntarget
-        d = copy(@view distances[:, target])
+    # Allocated once per call rather than once per target: the old body allocated ten
+    # arrays inside the loop and spent most of its time in the allocator, not in BLAS.
+    # All buffers are call-local, so the `Threads.@threads` callers stay safe.
+    d = Vector{Float64}(undef, ntrain)
+    w = Vector{Float64}(undef, ntrain)
+    buffer = Vector{Float64}(undef, ntrain)
+    indices = Vector{Int}(undef, ntrain)
+    wv = Vector{Float64}(undef, ntrain)
+    hv = Vector{Float64}(undef, ntrain)
+    Xv = Matrix{Float64}(undef, ntrain, p)
+    WX = Matrix{Float64}(undef, ntrain, p)
+    A = Matrix{Float64}(undef, p, p)
+    xt = Vector{Float64}(undef, p)
+    @inbounds for target in 1:ntarget
+        copyto!(d, view(distances, :, target))
         exclude_self && (d[target] = Inf)
-        w = _adaptive_bisquare(d, neighbors)
-        valid = w .> 0
-        count(valid) >= p + 1 || continue
-        Xv = Xtrain[valid, :]
-        wv = w[valid]
-        A = Xv' * (wv .* Xv) + ridge * I
-        B = A \ (Xv' .* wv')
-        H[target, findall(valid)] = vec(Xtarget[target, :]' * B)
+        _adaptive_bisquare!(w, d, neighbors, buffer)
+        n_valid = 0
+        for i in 1:ntrain
+            w[i] > 0 || continue
+            n_valid += 1
+            indices[n_valid] = i
+            wv[n_valid] = w[i]
+            for j in 1:p
+                Xv[n_valid, j] = Xtrain[i, j]
+                WX[n_valid, j] = w[i] * Xtrain[i, j]
+            end
+        end
+        n_valid >= p + 1 || continue
+        Xvalid = view(Xv, 1:n_valid, :)
+        mul!(A, transpose(Xvalid), view(WX, 1:n_valid, :))
+        for j in 1:p
+            A[j, j] += ridge
+        end
+        for j in 1:p
+            xt[j] = Xtarget[target, j]
+        end
+        # `A` is symmetric, so `xt' * (A \ (Xv' .* wv')) == (A \ xt)' * (Xv' .* wv')`.
+        # Solving for the p-vector first and contracting afterwards replaces a solve with
+        # `n_valid` right-hand sides by one with a single right-hand side, which is the bulk
+        # of the saving. The plain `Matrix` backslash is kept deliberately (rather than a
+        # Cholesky) so behaviour on ill-conditioned or non-finite `A` is unchanged.
+        coefficients = A \ xt
+        hvalid = view(hv, 1:n_valid)
+        mul!(hvalid, Xvalid, coefficients)
+        for t in 1:n_valid
+            H[target, indices[t]] = hvalid[t] * wv[t]
+        end
     end
     return H
 end

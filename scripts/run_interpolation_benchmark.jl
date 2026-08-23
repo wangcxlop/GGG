@@ -16,6 +16,8 @@ repeat_seeds(repeats::Int) = repeats <= 1 ? Int[] : [20260627 + 1000 * i for i i
 function benchmark_config(
     mode::Symbol; with_random::Bool=false, legacy_dem::Bool=false, repeats::Int=1,
     nested_covariates::Bool=false, local_grid::Bool=false,
+    stratified_tuning_weights::Bool=false, legacy_tuning_geometry::Bool=false,
+    mgwr_grouping::Symbol=:intercept_only, residual_shrinkage::Bool=true,
 )
     mode in (:smoke, :full) || throw(ArgumentError("mode must be :smoke or :full"))
     nested_covariates && legacy_dem && throw(ArgumentError(
@@ -31,6 +33,13 @@ function benchmark_config(
                 "interpolation_benchmark_full_joint_covariates")) *
             (nested_covariates ? "_nested" : "") *
             (local_grid ? "_localgrid" : "") *
+            (stratified_tuning_weights ? "_strattuning" : "") *
+            (legacy_tuning_geometry ? "_loocvtuning" : "") *
+            # Keyed on the historical layout rather than on the current default, so the pre-fix
+            # run directories keep their names and a default run lands somewhere new instead of
+            # overwriting the before-picture.
+            (mgwr_grouping === :split ? "" : "_mgwr$(mgwr_grouping)") *
+            (residual_shrinkage ? "" : "_noshrink") *
             (repeats > 1 ? "_repeats$(repeats)" : ""),
     )
     mkpath(outdir)
@@ -116,7 +125,11 @@ function benchmark_config(
         max_ndvi_age_days=32,
         wet_threshold=0.1,
         tolerance=1e-5,
-        max_iterations=200,
+        # 200 was binding: the back-fit's median sweep count sat at 150-194 once smooth covariate
+        # groups entered, so MGWR discarded whole hours for want of a few more iterations. See the
+        # field comment in `JointCovariateBenchmarkConfig`.
+        max_iterations=1000,
+        mgwr_spatial_grouping=mgwr_grouping,
     )
     # Same permutation rigor as the per-fold nested selection is asked to match the legacy DEM
     # path's precedent (999 full / 99 smoke), rather than reducing it for speed.
@@ -159,9 +172,30 @@ function benchmark_config(
             [1e-4, 1e-3, 1e-2, 1e-1, 1.0],
         min_tuning_coverage=0.95,
         tuning_max_times=smoke ? 72 : 336,
+        tuning_time_weighting=stratified_tuning_weights ? :stratified : :uniform,
+        tuning_geometry=legacy_tuning_geometry ? :loocv : :inner_spatial,
+        # `[1.0]` is the historical unshrunk correction; the ladder costs no extra model fits.
+        residual_shrinkage_candidates=residual_shrinkage ?
+            [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0] : [1.0],
         event_thresholds=[0.1, 2.5, 8.0, 16.0],
         bootstrap_reps=legacy_dem ? (smoke ? 200 : 2000) : joint_bootstrap_reps,
     )
+end
+
+"""
+Parse `--mgwr-grouping <split|shared|intercept_only>`; absent means `:intercept_only`.
+`--mgwr-grouping split` restores the historical three-single-column-group layout.
+"""
+function parse_mgwr_grouping(args)
+    index = findfirst(startswith("--mgwr-grouping"), args)
+    index === nothing && return :intercept_only
+    text = args[index] == "--mgwr-grouping" ? get(args, index + 1, "intercept_only") :
+        split(args[index], "=", limit=2)[2]
+    grouping = Symbol(text)
+    grouping in (:split, :shared, :intercept_only) || throw(ArgumentError(
+        "--mgwr-grouping expects split, shared, or intercept_only, got $text",
+    ))
+    return grouping
 end
 
 """Parse `--repeats N`; absent means a single partition (the historical behaviour)."""
@@ -192,7 +226,30 @@ function main(args=ARGS)
     end
     repeats = parse_repeats(args)
     local_grid = "--local-grid" in args
-    cfg = benchmark_config(mode; with_random, legacy_dem, repeats, nested_covariates, local_grid)
+    # Hyperparameters are tuned on a wet-oversampled subsample but scored on every hour, so the
+    # tuning RMSE runs ~3x the metric it estimates. --stratified-tuning-weights reweights the
+    # subsample to remove that. It is opt-in, not the default: the level error turned out to be
+    # nearly a constant multiplier that cancels in the ranking, so correcting it changes
+    # published numbers without improving selection. See scripts/verify_tuning_time_weighting.jl.
+    stratified_tuning_weights = "--stratified-tuning-weights" in args
+    # Candidates are now scored by predicting onto an inner spatial split of the training
+    # stations, matching the geometry the results table reports. The old leave-one-out criterion
+    # measured interpolation next to a retained gauge and picked bandwidths 19-101% worse on the
+    # reported metric; --legacy-tuning-geometry restores it for reproducing pre-fix numbers.
+    legacy_tuning_geometry = "--legacy-tuning-geometry" in args
+    # How MGWR splits the spatial trend into back-fitting groups. The coordinate columns are
+    # near-constant inside a local window, so they couple with the intercept and with any smooth
+    # covariate; that coupling drives how many sweeps the back-fit needs and whether it converges
+    # at all. See the field comment in `JointCovariateBenchmarkConfig`.
+    mgwr_grouping = parse_mgwr_grouping(args)
+    # GWR is unbiased and never shrinks, so its residual correction comes out the right shape at
+    # the wrong magnitude - the measured optimal rescale is 0.47-0.84 depending on the product.
+    # The scale is now selected with the bandwidth on the inner spatial split, at no extra fitting
+    # cost; --no-residual-shrinkage pins it to 1 and reproduces the unshrunk numbers.
+    residual_shrinkage = !("--no-residual-shrinkage" in args)
+    cfg = benchmark_config(mode; with_random, legacy_dem, repeats, nested_covariates,
+        local_grid, stratified_tuning_weights, legacy_tuning_geometry, mgwr_grouping,
+        residual_shrinkage)
     !legacy_dem && Threads.nthreads() == 1 && @warn(
         "Joint dynamic models are compute intensive; use julia -t auto for parallel hourly fits",
     )
@@ -203,6 +260,10 @@ function main(args=ARGS)
     )
     println("Running interpolation benchmark: mode=$mode, repeats=$repeats, " *
         "nested_covariates=$nested_covariates, local_grid=$local_grid, " *
+        "tuning_time_weighting=$(cfg.tuning_time_weighting), " *
+        "tuning_geometry=$(cfg.tuning_geometry), " *
+        "mgwr_grouping=$mgwr_grouping, " *
+        "residual_shrinkage=$residual_shrinkage, " *
         "output=$(cfg.mger.outdir)")
     result = run_interpolation_benchmark(cfg)
     println("Finished: $(nrow(result.metrics)) metric rows, $(nrow(result.scans)) scan rows")

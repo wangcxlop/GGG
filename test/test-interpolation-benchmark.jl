@@ -392,6 +392,57 @@ end
     end
 end
 
+@testset "Residual shrinkage" begin
+    f = synthetic_joint_benchmark_fixture()
+    train_idx = collect(1:22)
+    val_idx = collect(23:30)
+    roles = Dict("elevation" => "local")
+    context = JointCovariateModels.build_joint_fold_context(
+        "FY4B", roles, train_idx, val_idx, f.lonlat, f.y_obs, f.y_sat,
+        f.terrain, f.era5, nothing, f.joint_cfg,
+    )
+    residuals = f.y_obs[train_idx, :] .- f.y_sat[train_idx, :]
+    y_obs_train = f.y_obs[train_idx, :]
+    y_sat_train = f.y_sat[train_idx, :]
+    times = collect(1:size(residuals, 2))
+
+    unshrunk = _joint_candidate_metrics(
+        context, residuals, y_obs_train, y_sat_train, "residual_gwr",
+        [8], times, nothing, nothing, [1.0],
+    )
+    @test unshrunk.shrink == 1.0
+
+    ladder = _joint_candidate_metrics(
+        context, residuals, y_obs_train, y_sat_train, "residual_gwr",
+        [8], times, nothing, nothing, [0.25, 0.5, 0.75, 1.0],
+    )
+    # The ladder always contains 1.0, so it can never score worse than the unshrunk fit.
+    @test ladder.RMSE <= unshrunk.RMSE + 1e-12
+    @test ladder.shrink in (0.25, 0.5, 0.75, 1.0)
+    # Shrinking rescales the correction; it cannot change which cells are predictable.
+    @test ladder.n == unshrunk.n
+    @test ladder.coverage == unshrunk.coverage
+
+    # Inflate the residual the model is asked to reproduce so the fitted correction comes out
+    # roughly twice as large as the error it should remove. The selector must then pull it back.
+    inflated_obs = y_sat_train .+ 2.0 .* (y_obs_train .- y_sat_train)
+    inflated = _joint_candidate_metrics(
+        context, 2.0 .* residuals, inflated_obs, y_sat_train, "residual_gwr",
+        [8], times, nothing, nothing, [0.25, 0.5, 0.75, 1.0],
+    )
+    over_corrected = _joint_candidate_metrics(
+        context, 2.0 .* residuals, y_obs_train, y_sat_train, "residual_gwr",
+        [8], times, nothing, nothing, [0.25, 0.5, 0.75, 1.0],
+    )
+    @test inflated.shrink >= over_corrected.shrink
+    @test over_corrected.shrink < 1.0
+
+    @test_throws ArgumentError _joint_candidate_metrics(
+        context, residuals, y_obs_train, y_sat_train, "residual_gwr",
+        [8], times, nothing, nothing, Float64[],
+    )
+end
+
 @testset "Joint covariate config requires exactly one selection mode" begin
     mger = _dummy_mger()
     dummy_selection = JointVariableSelection.JointSelectionConfig(outdir="unused")
@@ -587,5 +638,277 @@ end
         repeat_scope = CSV.read(joinpath(repeat_outdir, "benchmark_scope.csv"), DataFrame)
         @test only(repeat_scope.value[repeat_scope.key .== "repeated_cv_partitions"]) == "2"
         @test only(repeat_scope.value[repeat_scope.key .== "repeated_cv_seeds"]) == "7,8"
+        @test only(repeat_scope.value[repeat_scope.key .== "tuning_time_weighting"]) ==
+            only(scope.value[scope.key .== "tuning_time_weighting"])
+        @test startswith(
+            only(scope.value[scope.key .== "tuning_time_weighting"]), "uniform")
+    end
+end
+
+@testset "Inner spatial selection split" begin
+    n_station = 60
+    ids = string.(5001:(5000 + n_station))
+    lon = [110.0 + 0.15 * mod(i - 1, 10) for i in 1:n_station]
+    lat = [30.0 + 0.15 * div(i - 1, 10) for i in 1:n_station]
+    lonlat = hcat(lon, lat)
+    cfg = InterpolationBenchmarkConfig(
+        mger=MGERConfig(station_meta_path="a", obs_hourly_wide_path="b",
+            sat_paths=Dict("FY4B" => "c"), outdir="d"),
+        k=5,
+    )
+
+    @testset "partitions the training set exactly once" begin
+        groups = selection_folds(cfg, :balanced_spatial, ids, lonlat, 1, cfg.seed)
+        @test groups !== nothing
+        @test length(groups) == cfg.k
+        flat = reduce(vcat, groups)
+        @test sort(flat) == collect(1:n_station)
+        @test length(unique(flat)) == n_station
+        # Same splitter as the outer partition, so the inner geometry matches by construction.
+        @test all(group -> !isempty(group), groups)
+        # The partition must not be the same one in every outer fold.
+        other = selection_folds(cfg, :balanced_spatial, ids, lonlat, 2, cfg.seed)
+        @test Set(Set.(groups)) != Set(Set.(other))
+        # `:random` gets a random inner split — its reporting geometry already matches LOOCV.
+        random_groups = selection_folds(cfg, :random, ids, lonlat, 1, cfg.seed)
+        @test sort(reduce(vcat, random_groups)) == collect(1:n_station)
+    end
+
+    @testset "declines to split a fold that is too small" begin
+        # 8 stations split five ways would leave too few to fit the widest design; the caller
+        # falls back to leave-one-out and records it rather than failing or degrading silently.
+        @test selection_folds(cfg, :balanced_spatial, ids[1:8], lonlat[1:8, :], 1, cfg.seed) ===
+            nothing
+        @test selection_folds(cfg, :balanced_spatial, ids[1:12], lonlat[1:12, :], 1, cfg.seed) ===
+            nothing
+        @test selection_folds(cfg, :balanced_spatial, ids[1:40], lonlat[1:40, :], 1, cfg.seed) !==
+            nothing
+    end
+
+    @testset "_selection_oof assembles every training row" begin
+        groups = selection_folds(cfg, :balanced_spatial, ids, lonlat, 1, cfg.seed)
+        n_time = 4
+        seen_train = Set{Int}()
+        oof = _selection_oof(groups, n_station, n_time, (tr, va) -> begin
+            # Inner train and inner val must be complementary, never overlapping.
+            @test isempty(intersect(tr, va))
+            @test sort(vcat(tr, va)) == collect(1:n_station)
+            union!(seen_train, tr)
+            fill(7.5, length(va), n_time)
+        end)
+        @test size(oof) == (n_station, n_time)
+        @test all(oof .== 7.5)
+        @test !any(isnan, oof)
+        # Every station is used for fitting in at least one inner group.
+        @test length(seen_train) == n_station
+    end
+
+    @testset "config validation" begin
+        base = InterpolationBenchmarkConfig(
+            mger=MGERConfig(station_meta_path="a", obs_hourly_wide_path="b",
+                sat_paths=Dict("FY4B" => "c"), outdir="d"))
+        @test base.tuning_geometry === :inner_spatial
+        @test base.tuning_inner_k == 0
+        for bad in (:loo, :spatial, :none)
+            @test_throws ArgumentError _validate_benchmark_config(
+                InterpolationBenchmarkConfig(mger=base.mger, tuning_geometry=bad), 60)
+        end
+        @test_throws ArgumentError _validate_benchmark_config(
+            InterpolationBenchmarkConfig(mger=base.mger, tuning_inner_k=1), 60)
+        # 0 means "use cfg.k", and any k_inner >= 2 is accepted.
+        @test _validate_benchmark_config(
+            InterpolationBenchmarkConfig(mger=base.mger, tuning_inner_k=3), 60) === nothing
+    end
+end
+
+@testset "Benchmark runs end to end on the inner spatial split" begin
+    mktempdir() do temp_dir
+        # Deliberately larger than the main fixture: 60 stations with k=3 leave 40 training
+        # stations and 27 inner-training stations, enough for the widest design, so this exercises
+        # the shipped default rather than falling back to leave-one-out.
+        n_station = 60
+        ids = string.(6001:(6000 + n_station))
+        lon = [110.0 + 0.15 * mod(i - 1, 10) for i in 1:n_station]
+        lat = [30.0 + 0.15 * div(i - 1, 10) for i in 1:n_station]
+        times = collect(DateTime(2022, 6, 1):Hour(1):DateTime(2022, 6, 1, 7))
+        station_path = joinpath(temp_dir, "stations.csv")
+        CSV.write(station_path, DataFrame(station_id=ids, lon=lon, lat=lat))
+
+        obs = Matrix{Float64}(undef, n_station, length(times))
+        for station in 1:n_station, time in eachindex(times)
+            obs[station, time] = max(
+                0.0, 0.5 + 0.03 * station + 0.3 * sin(time / 2) + 0.04 * mod(station * time, 3))
+        end
+        obs_path = joinpath(temp_dir, "obs.csv")
+        _write_benchmark_wide(obs_path, times, ids, obs)
+        sat_paths = Dict{String,String}()
+        for (product, bias) in (("FY4B", 0.3), ("GPM", -0.2))
+            path = joinpath(temp_dir, "$(lowercase(product)).csv")
+            _write_benchmark_wide(path, times, ids,
+                max.(obs .+ bias .+ 0.02 .* reshape(1:n_station, :, 1), 0.0))
+            sat_paths[product] = path
+        end
+
+        function run_with(geometry::Symbol)
+            outdir = joinpath(temp_dir, "benchmark_$(geometry)")
+            cfg = InterpolationBenchmarkConfig(
+                mger=MGERConfig(
+                    station_meta_path=station_path, obs_hourly_wide_path=obs_path,
+                    sat_paths=sat_paths, outdir=outdir, kernels=[GAUSSIAN],
+                    bw_adaptive=[8.0, 16.0], bw_fixed_km=[20.0, 100.0],
+                    expected_common_time_count=length(times),
+                ),
+                k=3, seed=11, cv_schemes=[:balanced_spatial],
+                idw_powers=[2.0], neighbor_candidates=Union{Nothing,Int}[8],
+                tps_smooth_candidates=[0.01], min_tuning_coverage=0.8, bootstrap_reps=0,
+                tuning_geometry=geometry,
+            )
+            return cfg, run_interpolation_benchmark(cfg)
+        end
+
+        cfg_inner, inner = run_with(:inner_spatial)
+        @test !isempty(inner.metrics)
+        # Every method that ran to completion still produces exactly one selected candidate per
+        # cell. (`mgwr` legitimately fails on a fixture this small — see the parity check below,
+        # which is what guards against the inner split breaking a method.)
+        succeeded = Set((row.product, row.fold, row.method)
+            for row in eachrow(inner.status) if row.status == "success")
+        @test all(groupby(inner.scans, [:scheme, :product, :fold, :mode, :method, :group])) do group
+            method = group.method[1] in ("mixed_gwr", "mgwr") ? group.method[1] :
+                (group.mode[1] == "direct" ? group.method[1] : "residual_$(group.method[1])")
+            (group.product[1], group.fold[1], method) in succeeded || return true
+            return count(group.selected) == 1
+        end
+        scope = CSV.read(joinpath(cfg_inner.mger.outdir, "benchmark_scope.csv"), DataFrame)
+        geometry_note = only(scope.value[scope.key .== "tuning_geometry"])
+        @test startswith(geometry_note, "inner_spatial")
+        # The fold was big enough, so nothing fell back — otherwise the scope row says so and
+        # this fixture would not be testing the shipped default at all.
+        @test !occursin("FELL BACK", geometry_note)
+
+        # The legacy criterion still runs and reaches different conclusions.
+        cfg_loocv, loocv = run_with(:loocv)
+        legacy_scope = CSV.read(joinpath(cfg_loocv.mger.outdir, "benchmark_scope.csv"), DataFrame)
+        @test startswith(
+            only(legacy_scope.value[legacy_scope.key .== "tuning_geometry"]), "loocv")
+        # Parity: switching the criterion must not make any method start failing. Whatever fails
+        # under the inner split has to fail under leave-one-out too, or the split broke it.
+        failures(result) = Set((row.product, row.fold, row.method)
+            for row in eachrow(result.status) if row.status != "success")
+        @test failures(inner) ⊆ failures(loocv)
+
+        key = [:scheme, :product, :fold, :mode, :method, :group]
+        picks(scans) = select(filter(:selected => identity, scans), key..., :bw, :power, :smooth)
+        joined = innerjoin(picks(inner.scans), picks(loocv.scans), on=key, makeunique=true)
+        @test nrow(joined) > 0
+        # The two criteria are different estimands, so they must not be trivially identical.
+        @test any(.!isequal.(joined.bw, joined.bw_1)) ||
+            any(.!isequal.(joined.power, joined.power_1)) ||
+            any(.!isequal.(joined.smooth, joined.smooth_1))
+    end
+end
+
+@testset "Tuning time weighting" begin
+    Random.seed!(20260822)
+    n_station, n_time, n_wet = 20, 5000, 350
+    wet_hours = randperm(n_time)[1:n_wet]
+    is_wet = falses(n_time)
+    is_wet[wet_hours] .= true
+
+    y_obs = zeros(Float64, n_station, n_time)
+    prediction = zeros(Float64, n_station, n_time)
+    for time in 1:n_time
+        # Errors differ by an order of magnitude between the classes, so an estimator that gets
+        # the class mixture wrong cannot accidentally land on the right pooled answer.
+        y_obs[:, time] .= is_wet[time] ? 8.0 : 0.0
+        prediction[:, time] .= y_obs[1, time] + (is_wet[time] ? 4.0 : 0.5)
+    end
+    y_sat = zeros(Float64, n_station, n_time)
+
+    @testset "stratified sample" begin
+        indices, weights = _tuning_time_sample(y_obs, 336, :stratified)
+        # The historical sample took the union of two overlapping halves, so it could collapse
+        # below the requested size; disjoint strata cannot.
+        @test length(indices) == 336
+        @test length(unique(indices)) == 336
+        @test issorted(indices)
+        @test length(weights) == 336
+        # Certainty stratum weighs 1, the subsampled remainder carries the inverse inclusion
+        # probability, and the design totals the full hour count.
+        certainty = div(336, 8)
+        remainder = 336 - certainty
+        @test sort(unique(round.(weights; digits=6))) ==
+            sort(unique(round.([1.0, (n_time - certainty) / remainder]; digits=6)))
+        @test count(≈(1.0), weights) == certainty
+        @test sum(weights) ≈ n_time
+        # The certainty stratum holds only wet hours; the weighted remainder is drawn from the
+        # dry majority, which is where the reported metric actually lives.
+        @test all(is_wet[indices[weights .≈ 1.0]])
+        @test count(is_wet[indices[weights .> 1.0]]) < 20
+    end
+
+    @testset "uniform sample reproduces the legacy objective" begin
+        indices, weights = _tuning_time_sample(y_obs, 336, :uniform)
+        @test weights === nothing
+        @test indices == _tuning_time_indices(y_obs, 336)
+        # No subsetting at all when the full record already fits inside the budget.
+        short, short_weights = _tuning_time_sample(y_obs[:, 1:100], 336, :stratified)
+        @test short == collect(1:100)
+        @test short_weights === nothing
+    end
+
+    @testset "weighted metric estimates the full-sample metric" begin
+        full = _candidate_metrics(y_obs, y_sat, prediction; require_satellite=false)
+
+        indices, weights = _tuning_time_sample(y_obs, 336, :stratified)
+        fixed = _candidate_metrics(
+            y_obs[:, indices], y_sat[:, indices], prediction[:, indices];
+            require_satellite=false, time_weights=weights,
+        )
+        legacy_indices, _ = _tuning_time_sample(y_obs, 336, :uniform)
+        legacy = _candidate_metrics(
+            y_obs[:, legacy_indices], y_sat[:, legacy_indices], prediction[:, legacy_indices];
+            require_satellite=false,
+        )
+
+        # The weighted subsample recovers the pooled metric; the legacy one scores the wet class
+        # it oversampled and lands more than twice too high.
+        @test isapprox(fixed.RMSE, full.RMSE; rtol=0.05)
+        @test isapprox(fixed.MAE, full.MAE; rtol=0.10)
+        @test legacy.RMSE > 2 * full.RMSE
+        @test legacy.MAE > 2 * full.MAE
+
+        # Coverage stays a raw cell count so `min_tuning_coverage` keeps its meaning, and
+        # all-ones weights must not perturb the unweighted path.
+        @test fixed.n == n_station * 336
+        @test fixed.coverage == 1.0
+        ones_weighted = _candidate_metrics(
+            y_obs, y_sat, prediction;
+            require_satellite=false, time_weights=ones(Float64, n_time),
+        )
+        @test ones_weighted.RMSE ≈ full.RMSE
+        @test ones_weighted.MAE ≈ full.MAE
+        @test ones_weighted.n == full.n
+        @test ones_weighted.coverage == full.coverage
+        @test_throws ArgumentError _candidate_metrics(
+            y_obs, y_sat, prediction;
+            require_satellite=false, time_weights=ones(Float64, n_time - 1),
+        )
+    end
+
+    @testset "config validation" begin
+        base = InterpolationBenchmarkConfig(
+            mger=MGERConfig(
+                station_meta_path="a", obs_hourly_wide_path="b",
+                sat_paths=Dict("FY4B" => "c"), outdir="d",
+            ),
+        )
+        # `:uniform` is the default on purpose — see the note in `_tuning_time_sample`.
+        @test base.tuning_time_weighting === :uniform
+        @test_throws ArgumentError _validate_benchmark_config(
+            InterpolationBenchmarkConfig(
+                mger=base.mger, tuning_time_weighting=:wet_only,
+            ), 10,
+        )
     end
 end
