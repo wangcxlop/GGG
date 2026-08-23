@@ -103,6 +103,24 @@ Base.@kwdef struct InterpolationBenchmarkConfig
     # outer fold geometry. Ignored when `tuning_geometry === :loocv`.
     tuning_inner_k::Int = 0
     mgwr_max_tuning_iterations::Int = 5
+    # Scale applied to the joint dynamic models' residual correction before it is added back to
+    # the satellite field. GWR is unbiased and never shrinks, so the correction it produces is
+    # the right shape at the wrong magnitude: `satellite_offset.csv` measures the optimal rescale
+    # at 0.84 / 0.47 / 0.53 for FY4B / GPM / GSMaP, i.e. the models over-correct by up to 2x.
+    #
+    # The scale is selected jointly with the bandwidth on the inner spatial split, and costs
+    # nothing to add: `_joint_candidate_metrics` rescores the residual prediction it has already
+    # computed, so the ladder needs no extra model fits. Scoring the clipped objective rather than
+    # the closed-form `E[g*r]/E[g^2]` keeps selection consistent with the reported metric, which
+    # the `max(., 0)` clip would otherwise break.
+    #
+    # The ladder starts at 0.1 rather than 0.3 because a smoke run with a 0.3 floor put 31 of 75
+    # selected joint rows *on* that floor - the grid, not the data, would have been picking the
+    # scale, which is the same failure the bandwidth grids hit before `--local-grid`.
+    #
+    # `[1.0]` disables shrinkage and reproduces the historical unshrunk behaviour exactly.
+    residual_shrinkage_candidates::Vector{Float64} =
+        [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
     event_thresholds::Vector{Float64} = [0.1, 2.5, 8.0, 16.0]
     bootstrap_reps::Int = 2000
 end
@@ -138,6 +156,10 @@ function _validate_benchmark_config(cfg::InterpolationBenchmarkConfig, n_station
         throw(ArgumentError("tuning_inner_k must be 0 (use cfg.k) or at least 2"))
     cfg.mgwr_max_tuning_iterations > 0 ||
         throw(ArgumentError("mgwr_max_tuning_iterations must be positive"))
+    isempty(cfg.residual_shrinkage_candidates) &&
+        throw(ArgumentError("residual_shrinkage_candidates must not be empty"))
+    all(s -> 0 < s <= 1, cfg.residual_shrinkage_candidates) ||
+        throw(ArgumentError("residual shrinkage candidates must be in (0, 1]"))
     xor(cfg.terrain_path === nothing, cfg.dem === nothing) && throw(ArgumentError(
         "terrain_path and dem must either both be configured or both be omitted",
     ))
@@ -166,6 +188,13 @@ function _validate_benchmark_config(cfg::InterpolationBenchmarkConfig, n_station
             throw(ArgumentError("joint bandwidth candidates must exceed one neighbor"))
         joint.max_iterations > 0 || throw(ArgumentError("joint max_iterations must be positive"))
         joint.tolerance > 0 || throw(ArgumentError("joint tolerance must be positive"))
+        # Successive over-relaxation diverges outside (0, 2); see the field comment in
+        # `JointCovariateBenchmarkConfig` for why the default sits above 1.
+        0 < joint.relaxation < 2 ||
+            throw(ArgumentError("joint relaxation must be in (0, 2)"))
+        joint.mgwr_spatial_grouping in (:split, :shared, :intercept_only) || throw(ArgumentError(
+            "mgwr_spatial_grouping must be :split, :shared, or :intercept_only",
+        ))
     end
     return nothing
 end
@@ -848,7 +877,7 @@ end
 function _scan_row(; scheme, product, fold, mode, method, group="all", iteration=0,
     repeat=1, seed=0,
     power=NaN, neighbors=missing,
-    smooth=NaN, kernel=missing, adaptive=missing, bw=NaN, n=0, coverage=0.0,
+    smooth=NaN, kernel=missing, adaptive=missing, bw=NaN, shrink=NaN, n=0, coverage=0.0,
     RMSE=Inf, MAE=Inf, status="success", error="", selected=false)
     stored_neighbors = neighbors === nothing ? 0 : neighbors
     return (;
@@ -856,7 +885,8 @@ function _scan_row(; scheme, product, fold, mode, method, group="all", iteration
         method=String(method), group=String(group), iteration=Int(iteration),
         repeat=Int(repeat), seed=Int(seed),
         power=Float64(power), neighbors=stored_neighbors, smooth=Float64(smooth),
-        kernel, adaptive, bw=Float64(bw), n=Int(n), coverage=Float64(coverage),
+        kernel, adaptive, bw=Float64(bw), shrink=Float64(shrink),
+        n=Int(n), coverage=Float64(coverage),
         RMSE=Float64(RMSE), MAE=Float64(MAE), status=String(status), error=String(error),
         selected=Bool(selected),
     )
@@ -1117,8 +1147,10 @@ function _joint_candidate_metrics(
     context, residuals::Matrix{Float64}, y_obs::Matrix{Float64},
     y_sat::Matrix{Float64}, method::String, bandwidths::Vector{Int},
     time_indices::Vector{Int}, time_weights::Union{Nothing,Vector{Float64}}=nothing,
-    selection_contexts=nothing,
+    selection_contexts=nothing, shrink_candidates::Vector{Float64}=[1.0],
 )
+    isempty(shrink_candidates) &&
+        throw(ArgumentError("shrink_candidates must not be empty"))
     residual_prediction, converged = if selection_contexts === nothing
         dynamic_covariate_predict(
             context, residuals, method, bandwidths; time_indices, leave_one_out=true,
@@ -1139,11 +1171,21 @@ function _joint_candidate_metrics(
         end
         (out_of_fold, any_converged)
     end
-    corrected = max.(y_sat[:, time_indices] .+ residual_prediction, 0.0)
-    metrics = _candidate_metrics(
-        y_obs[:, time_indices], y_sat[:, time_indices], corrected; time_weights,
-    )
-    return merge(metrics, (;
+    # The fit is the expensive part and does not depend on the shrinkage scale, so the ladder is
+    # rescored against the same `residual_prediction`. Scoring the clipped correction (rather than
+    # solving `E[g*r]/E[g^2]` in closed form) keeps the criterion identical to the reported metric,
+    # which the `max(., 0)` clip would otherwise break.
+    best = nothing
+    for shrink in shrink_candidates
+        corrected = max.(y_sat[:, time_indices] .+ shrink .* residual_prediction, 0.0)
+        metrics = _candidate_metrics(
+            y_obs[:, time_indices], y_sat[:, time_indices], corrected; time_weights,
+        )
+        if best === nothing || (metrics.RMSE, metrics.MAE) < (best.RMSE, best.MAE)
+            best = merge(metrics, (; shrink))
+        end
+    end
+    return merge(best, (;
         converged_times=count(converged), total_times=length(converged),
     ))
 end
@@ -1169,18 +1211,22 @@ function select_joint_parameter!(
     candidates = joint_context.bandwidth_candidates
     isempty(candidates) && throw(ArgumentError("no joint bandwidth candidate is usable"))
     group_names = joint_group_names(joint_context, joint_method)
+    # Shrinkage rides along with every candidate: the model fit does not depend on it, so the
+    # ladder is rescored inside `_joint_candidate_metrics` for free and the winner is reported
+    # in the scan row's `shrink` column alongside its bandwidth.
+    shrink_candidates = cfg.residual_shrinkage_candidates
     if joint_method in ("residual_gwr", "mixed_gwr")
         first_row = length(scan_rows) + 1
         for bandwidth in candidates
             try
                 metrics = _joint_candidate_metrics(
                     joint_context, residuals, y_obs, y_sat, joint_method,
-                    [bandwidth], times, time_weights, selection_entries,
+                    [bandwidth], times, time_weights, selection_entries, shrink_candidates,
                 )
                 push!(scan_rows, _scan_row(;
                     scheme, product, fold, mode, method,
                     group=only(group_names), kernel=BISQUARE, adaptive=true,
-                    bw=bandwidth, n=metrics.n, coverage=metrics.coverage,
+                    bw=bandwidth, shrink=metrics.shrink, n=metrics.n, coverage=metrics.coverage,
                     RMSE=metrics.RMSE, MAE=metrics.MAE,
                     status=metrics.coverage >= cfg.min_tuning_coverage ? "success" : "failed",
                     error=metrics.coverage >= cfg.min_tuning_coverage ? "" :
@@ -1195,8 +1241,8 @@ function select_joint_parameter!(
             end
         end
         selected = _select_candidate!(scan_rows, first_row, cfg.min_tuning_coverage)
-        return (; bandwidths=[Int(round(selected.bw))], joint_model=true,
-            joint_method)
+        return (; bandwidths=[Int(round(selected.bw))], shrink=selected.shrink,
+            joint_model=true, joint_method)
     end
 
     bandwidths = fill(last(candidates), length(group_names))
@@ -1212,12 +1258,13 @@ function select_joint_parameter!(
                 try
                     metrics = _joint_candidate_metrics(
                         joint_context, residuals, y_obs, y_sat, joint_method,
-                        trial, times, time_weights, selection_entries,
+                        trial, times, time_weights, selection_entries, shrink_candidates,
                     )
                     push!(scan_rows, _scan_row(;
                         scheme, product, fold, mode, method, iteration,
                         group=group_names[group_index], kernel=BISQUARE, adaptive=true,
-                        bw=bandwidth, n=metrics.n, coverage=metrics.coverage,
+                        bw=bandwidth, shrink=metrics.shrink,
+                        n=metrics.n, coverage=metrics.coverage,
                         RMSE=metrics.RMSE, MAE=metrics.MAE,
                         status=metrics.coverage >= cfg.min_tuning_coverage ? "success" : "failed",
                         error=metrics.coverage >= cfg.min_tuning_coverage ? "" :
@@ -1252,6 +1299,7 @@ function select_joint_parameter!(
     converged || throw(ArgumentError(
         "joint MGWR bandwidth search did not converge in $(cfg.mgwr_max_tuning_iterations) iterations",
     ))
+    selected_shrink = NaN
     for group_index in eachindex(group_names)
         matching = filter(eachindex(scan_rows)) do index
             row = scan_rows[index]
@@ -1263,8 +1311,12 @@ function select_joint_parameter!(
         isempty(matching) && error("selected joint MGWR bandwidth row is absent")
         selected_index = last(matching)
         scan_rows[selected_index] = merge(scan_rows[selected_index], (; selected=true))
+        # The search only stops once a whole sweep leaves `bandwidths` unchanged, so every group's
+        # winning row in the final iteration was scored against the same bandwidth vector and
+        # therefore the same residual prediction. Any of their shrink values is the right one.
+        selected_shrink = scan_rows[selected_index].shrink
     end
-    return (; bandwidths, joint_model=true, joint_method)
+    return (; bandwidths, shrink=selected_shrink, joint_model=true, joint_method)
 end
 
 function select_interpolation_parameter!(
@@ -1495,7 +1547,10 @@ function predict_selected(
             product=joint_context.product, method=selected.joint_method,
             failed_hours=count(.!converged),
         )
-        prediction
+        # Folded in here rather than at the shared `y_sat_target .+ interpolated` tail below,
+        # which serves every other method and must keep its historical behaviour.
+        shrink = hasproperty(selected, :shrink) ? selected.shrink : 1.0
+        isfinite(shrink) ? prediction .* shrink : prediction
     elseif is_dem_model && method == "gwr" && mode == "residual"
         designs = dem_context.all_local
         prediction, _ = mixed_gwr_predict(
@@ -2605,6 +2660,24 @@ function run_interpolation_benchmark(cfg::InterpolationBenchmarkConfig)
         ],
     )
     if joint_inputs !== nothing
+        joint = something(cfg.joint_covariates)
+        append!(scope, DataFrame(
+            key=["mgwr_spatial_grouping", "backfit_relaxation", "backfit_max_iterations",
+                "residual_shrinkage"],
+            value=[
+                joint.mgwr_spatial_grouping === :split ?
+                    "split (default): the intercept, longitude and latitude each form their own single-column back-fitting group" :
+                    joint.mgwr_spatial_grouping === :shared ?
+                        "shared: intercept, longitude and latitude solved as one weighted least squares, so only the covariates carry separate bandwidths" :
+                        "intercept_only: the coordinate columns are dropped; a locally varying intercept plus one group per local covariate",
+                "$(joint.relaxation) (successive over-relaxation on the back-fitting sweeps; converges to the same fixed point for any admissible value, so this trades rate only — plain Gauss-Seidel at 1.0 fails to converge on most hours)",
+                string(joint.max_iterations),
+                length(cfg.residual_shrinkage_candidates) == 1 &&
+                    only(cfg.residual_shrinkage_candidates) == 1.0 ?
+                    "disabled: the residual correction is added back unshrunk, as GWR produces it" :
+                    "enabled: a scale in $(minimum(cfg.residual_shrinkage_candidates))-$(maximum(cfg.residual_shrinkage_candidates)) is selected with the bandwidth on the inner spatial split and applied to the joint dynamic models' residual correction",
+            ],
+        ))
         training_row = findfirst(==("training_signal"), scope.key)
         scope.value[training_row] = nested_joint ?
             "concurrent training-station observations for direct methods; observation-minus-satellite residuals plus a per-fold, training-station-only product-specific DEM/ERA5 covariate specification for residual_gwr, mixed_gwr, and mgwr" :

@@ -64,8 +64,9 @@ end
     @test JCM.joint_effective_roles(context, "residual_gwr") ==
         Dict("elevation" => "local", "u10" => "local")
     @test JCM.joint_effective_roles(context, "mixed_gwr") == fixture.roles
-    @test JCM.joint_group_names(context, "mgwr") ==
-        ["intercept", "longitude", "latitude", "u10"]
+    # The default layout drops the coordinate columns; `:split` is exercised by the grouping
+    # testset below.
+    @test JCM.joint_group_names(context, "mgwr") == ["intercept", "u10"]
     @test context.predictor_train["elevation"][:, :, 1] ≈
         context.predictor_train["elevation"][:, :, 5]
     @test !(context.predictor_train["u10"][:, :, 1] ≈
@@ -79,10 +80,107 @@ end
     @test all(converged)
     @test all(isfinite, prediction)
     mgwr_prediction, mgwr_converged = JCM.dynamic_covariate_predict(
-        context, residuals, "mgwr", fill(20, 4),
+        context, residuals, "mgwr", fill(20, 2),
     )
     @test count(mgwr_converged) >= 4
     @test count(isfinite, mgwr_prediction) >= 4length(fixture.target)
+end
+
+"""Rebuild the fixture's context under a different MGWR spatial grouping."""
+function regrouped_context(fixture, grouping::Symbol)
+    cfg = JCM.JointCovariateBenchmarkConfig(
+        spec_path="unused", terrain_path="unused", era5_paths=Dict{Int,String}(),
+        bandwidth_candidates=[10, 15, 20], max_iterations=200, tolerance=1e-5,
+        mgwr_spatial_grouping=grouping,
+    )
+    return JCM.build_joint_fold_context(
+        "GPM", fixture.roles, fixture.train, fixture.target, fixture.lonlat,
+        fixture.Yobs, fixture.Ysat, fixture.terrain, fixture.era5, nothing, cfg,
+    )
+end
+
+@testset "mgwr spatial grouping controls only the spatial block" begin
+    fixture = joint_model_fixture()
+    residuals = fixture.Yobs[fixture.train, :] .- fixture.Ysat[fixture.train, :]
+    expected = Dict(
+        :split => ["intercept", "longitude", "latitude", "u10"],
+        :shared => ["shared_spatial", "u10"],
+        :intercept_only => ["intercept", "u10"],
+    )
+    for (grouping, names) in expected
+        context = regrouped_context(fixture, grouping)
+        @test JCM.joint_group_names(context, "mgwr") == names
+        # The covariate always keeps its own group, which is what makes the model multiscale.
+        @test last(names) == "u10"
+        prediction, converged = JCM.dynamic_covariate_predict(
+            context, residuals, "mgwr", fill(20, length(names)),
+        )
+        @test size(prediction) == (length(fixture.target), size(fixture.Yobs, 2))
+        @test all(converged)
+        @test all(isfinite, prediction)
+    end
+    # The non-mgwr methods keep one shared spatial group whatever the setting says.
+    for grouping in (:split, :shared, :intercept_only)
+        context = regrouped_context(fixture, grouping)
+        @test JCM.joint_group_names(context, "mixed_gwr") == ["shared_local"]
+        @test JCM.joint_group_names(context, "residual_gwr") == ["shared_all_local"]
+    end
+    @test_throws ArgumentError JCM.joint_group_names(
+        regrouped_context(fixture, :nonsense), "mgwr",
+    )
+end
+
+@testset "back-fitting rejects a bandwidth vector of the wrong length" begin
+    fixture = joint_model_fixture()
+    n = length(fixture.train)
+    lonlat = fixture.lonlat[fixture.train, :]
+    groups = [ones(n, 1), reshape(collect(range(-1.0, 1.0; length=n)), :, 1)]
+    response = reshape(collect(range(0.0, 1.0; length=n)), :, 1)
+    empty_global = zeros(n, 0)
+    # Two groups, three bandwidths: the loop used to `zip` these and silently drop the extra,
+    # producing a wrong fit rather than an error.
+    @test_throws DimensionMismatch JCM._multiscale_predict_damped(
+        groups, empty_global, response, lonlat, groups, empty_global, lonlat,
+        [10, 10, 10], fixture.cfg,
+    )
+    prediction, ok = JCM._multiscale_predict_damped(
+        groups, empty_global, response, lonlat, groups, empty_global, lonlat,
+        [10, 10], fixture.cfg,
+    )
+    @test only(ok)
+    @test all(isfinite, prediction)
+end
+
+@testset "relaxation is configurable and reaches the same fixed point" begin
+    fixture = joint_model_fixture()
+    residuals = fixture.Yobs[fixture.train, :] .- fixture.Ysat[fixture.train, :]
+    @test fixture.cfg.relaxation == 1.5
+    # Over-relaxation changes the convergence rate, not the solution, so a run at a different
+    # admissible factor must agree with the default to within the convergence tolerance.
+    # Pinned to `:split`, the layout where the relaxation factor actually decides whether the
+    # back-fit converges at all.
+    relaxed = JCM.JointCovariateBenchmarkConfig(
+        spec_path="unused", terrain_path="unused", era5_paths=Dict{Int,String}(),
+        bandwidth_candidates=[10, 15, 20], max_iterations=4000, tolerance=1e-10,
+        relaxation=1.0, mgwr_spatial_grouping=:split,
+    )
+    context = JCM.build_joint_fold_context(
+        "GPM", fixture.roles, fixture.train, fixture.target, fixture.lonlat,
+        fixture.Yobs, fixture.Ysat, fixture.terrain, fixture.era5, nothing, relaxed,
+    )
+    tight = JCM.JointCovariateBenchmarkConfig(
+        spec_path="unused", terrain_path="unused", era5_paths=Dict{Int,String}(),
+        bandwidth_candidates=[10, 15, 20], max_iterations=4000, tolerance=1e-10,
+        relaxation=1.5, mgwr_spatial_grouping=:split,
+    )
+    tight_context = JCM.build_joint_fold_context(
+        "GPM", fixture.roles, fixture.train, fixture.target, fixture.lonlat,
+        fixture.Yobs, fixture.Ysat, fixture.terrain, fixture.era5, nothing, tight,
+    )
+    slow, slow_ok = JCM.dynamic_covariate_predict(context, residuals, "mgwr", fill(20, 4))
+    fast, fast_ok = JCM.dynamic_covariate_predict(tight_context, residuals, "mgwr", fill(20, 4))
+    @test all(slow_ok) && all(fast_ok)
+    @test slow ≈ fast atol = 1e-4
 end
 
 @testset "joint training-fold isolation and missing target" begin

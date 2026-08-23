@@ -46,7 +46,58 @@ Base.@kwdef struct JointCovariateBenchmarkConfig
     wet_threshold::Float64 = 0.1
     ridge::Float64 = 1e-8
     tolerance::Float64 = 1e-5
-    max_iterations::Int = 200
+    # The back-fit routinely needs several hundred sweeps once smooth covariate groups are in
+    # play; at the old cap of 200 the median sweep count sat at 150-194 and MGWR discarded whole
+    # hours for want of a few more iterations. Measured on the real `_local_hat`/`_global_projection`
+    # operators (150 stations, 93%-dry residuals, two smooth ERA5-like covariate groups): the
+    # `:split` layout converges on 60% of hours at 200 sweeps and 100% at 500.
+    max_iterations::Int = 1000
+    # Successive over-relaxation factor for the back-fitting sweeps. It converges to the same
+    # fixed point for any admissible value - `relaxation` cancels at the fixed point - so this
+    # trades convergence *rate* only.
+    #
+    # DO NOT "fix" this to 1.0. The name `_multiscale_predict_damped` suggests damping and a
+    # value above 1 looks like a bug, but plain Gauss-Seidel is far worse here: on the fixture
+    # above, the share of hours converging within 200 sweeps runs
+    #
+    #   layout            w=1.0  w=1.1  w=1.2  w=1.3  w=1.5  w=1.7
+    #   :split               4%    12%    40%    98%    60%     1%
+    #   :shared              3%     8%    22%   100%   100%    52%
+    #   :intercept_only    100%   100%   100%   100%   100%   100%
+    #
+    # i.e. over-relaxation is what makes the coupled layouts usable at all. 1.5 is kept as the
+    # historical value; 1.3 looked better on that one synthetic fixture, which is not enough
+    # evidence to move a default, and the layout that wins on accuracy is insensitive to it.
+    relaxation::Float64 = 1.5
+    # How MGWR splits the spatial trend into back-fitting groups. Covariate groups always get
+    # their own bandwidth, which is what makes the model multiscale; this controls only the
+    # `[1, z_lon, z_lat]` block.
+    #
+    #   :split           - one single-column group each for the intercept, longitude and latitude
+    #                      (the historical layout).
+    #   :shared          - one three-column group, solved by a single weighted least squares the
+    #                      way `mixed_gwr` does.
+    #   :intercept_only  - drop the coordinate columns; a locally varying intercept plus the
+    #                      covariate groups.
+    #
+    # The coordinate groups are near-constant inside any local window, so they are near-collinear
+    # with the intercept group *and* with any spatially smooth covariate. That coupling, not the
+    # relaxation factor, is what governs how many sweeps the back-fit needs.
+    #
+    # `:intercept_only` is the default on measured evidence. Against a common-cell paired
+    # comparison of the smoke run (`scripts/compare_benchmark_runs.jl --smoke`, where the
+    # traditional methods move +0.0% and so confirm the pairing), MGWR's RMSE change is
+    #
+    #   layout            FY4B     GPM   GSMaP   coverage at 1.000   smoke wall clock
+    #   :split           +0.1%   -6.8%   -5.1%             8 / 15             30-58 min
+    #   :shared          +0.9%   -5.7%   -3.5%            13 / 15                16 min
+    #   :intercept_only  -4.3%   -6.5%   -6.4%            15 / 15                14 min
+    #
+    # i.e. it wins on two products, is 0.3pp behind on the third against a layout scored on
+    # fewer cells, and is the only one that never discards an hour. Dropping the coordinate plane
+    # also frees the intercept to go genuinely local (8-80 neighbours) instead of pinning near the
+    # grid maximum, which is the multiscale behaviour the method is supposed to have.
+    mgwr_spatial_grouping::Symbol = :intercept_only
 end
 
 struct JointFoldContext
@@ -275,9 +326,24 @@ function _design_at(context::JointFoldContext, method::String, time::Int; target
     local_groups = Matrix{Float64}[]
     group_names = String[]
     if method == "mgwr"
-        for index in axes(spatial, 2)
-            push!(local_groups, spatial[:, index:index])
-            push!(group_names, ("intercept", "longitude", "latitude")[index])
+        # `mgwr_spatial_grouping` controls only the spatial block; covariates always get their
+        # own group, and therefore their own bandwidth, in every variant.
+        grouping = context.config.mgwr_spatial_grouping
+        if grouping === :split
+            for index in axes(spatial, 2)
+                push!(local_groups, spatial[:, index:index])
+                push!(group_names, ("intercept", "longitude", "latitude")[index])
+            end
+        elseif grouping === :shared
+            push!(local_groups, copy(spatial))
+            # Deliberately not "shared_local" (mixed_gwr's name) or "all" (`_scan_row`'s default
+            # for ungrouped methods): the scan-row lookups match on the group name.
+            push!(group_names, "shared_spatial")
+        elseif grouping === :intercept_only
+            push!(local_groups, spatial[:, 1:1])
+            push!(group_names, "intercept")
+        else
+            throw(ArgumentError("unsupported mgwr_spatial_grouping: $grouping"))
         end
         for group in context.variables
             roles[group] == "local" || continue
@@ -458,6 +524,11 @@ function _multiscale_predict_damped(
     target_lonlat::Matrix{Float64}, bandwidths::Vector{Int}, cfg;
     exclude_self::Bool=false,
 )
+    length(local_train) == length(local_target) == length(bandwidths) ||
+        throw(DimensionMismatch(
+            "local group count ($(length(local_train)) train, $(length(local_target)) target) " *
+            "must match the bandwidth count ($(length(bandwidths)))",
+        ))
     y = vec(response)
     train_distances = DEMTerrainExperiment._haversine_matrix(train_lonlat, train_lonlat)
     train_hats = [DEMTerrainExperiment._local_hat(
@@ -468,7 +539,7 @@ function _multiscale_predict_damped(
     global_component = global_hat * y
     previous = fill(NaN, length(y))
     converged = false
-    relaxation = 1.5
+    relaxation = cfg.relaxation
     for _ in 1:cfg.max_iterations
         for group in eachindex(local_train)
             partial = y - global_component
@@ -484,6 +555,10 @@ function _multiscale_predict_damped(
         global_component .= relaxation .* global_update .+
             (1 - relaxation) .* global_component
         fitted = local_sum + global_component
+        # A diverging sweep makes `change` NaN, which fails the tolerance test silently and then
+        # burns the whole iteration budget. Bail as soon as the iterate leaves the reals, the way
+        # the undamped sibling does.
+        all(isfinite, fitted) || return fill(NaN, size(target_lonlat, 1), 1), falses(1)
         change = all(isfinite, previous) ?
             norm(fitted - previous) / max(norm(previous), eps()) : Inf
         previous .= fitted

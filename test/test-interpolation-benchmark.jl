@@ -392,6 +392,57 @@ end
     end
 end
 
+@testset "Residual shrinkage" begin
+    f = synthetic_joint_benchmark_fixture()
+    train_idx = collect(1:22)
+    val_idx = collect(23:30)
+    roles = Dict("elevation" => "local")
+    context = JointCovariateModels.build_joint_fold_context(
+        "FY4B", roles, train_idx, val_idx, f.lonlat, f.y_obs, f.y_sat,
+        f.terrain, f.era5, nothing, f.joint_cfg,
+    )
+    residuals = f.y_obs[train_idx, :] .- f.y_sat[train_idx, :]
+    y_obs_train = f.y_obs[train_idx, :]
+    y_sat_train = f.y_sat[train_idx, :]
+    times = collect(1:size(residuals, 2))
+
+    unshrunk = _joint_candidate_metrics(
+        context, residuals, y_obs_train, y_sat_train, "residual_gwr",
+        [8], times, nothing, nothing, [1.0],
+    )
+    @test unshrunk.shrink == 1.0
+
+    ladder = _joint_candidate_metrics(
+        context, residuals, y_obs_train, y_sat_train, "residual_gwr",
+        [8], times, nothing, nothing, [0.25, 0.5, 0.75, 1.0],
+    )
+    # The ladder always contains 1.0, so it can never score worse than the unshrunk fit.
+    @test ladder.RMSE <= unshrunk.RMSE + 1e-12
+    @test ladder.shrink in (0.25, 0.5, 0.75, 1.0)
+    # Shrinking rescales the correction; it cannot change which cells are predictable.
+    @test ladder.n == unshrunk.n
+    @test ladder.coverage == unshrunk.coverage
+
+    # Inflate the residual the model is asked to reproduce so the fitted correction comes out
+    # roughly twice as large as the error it should remove. The selector must then pull it back.
+    inflated_obs = y_sat_train .+ 2.0 .* (y_obs_train .- y_sat_train)
+    inflated = _joint_candidate_metrics(
+        context, 2.0 .* residuals, inflated_obs, y_sat_train, "residual_gwr",
+        [8], times, nothing, nothing, [0.25, 0.5, 0.75, 1.0],
+    )
+    over_corrected = _joint_candidate_metrics(
+        context, 2.0 .* residuals, y_obs_train, y_sat_train, "residual_gwr",
+        [8], times, nothing, nothing, [0.25, 0.5, 0.75, 1.0],
+    )
+    @test inflated.shrink >= over_corrected.shrink
+    @test over_corrected.shrink < 1.0
+
+    @test_throws ArgumentError _joint_candidate_metrics(
+        context, residuals, y_obs_train, y_sat_train, "residual_gwr",
+        [8], times, nothing, nothing, Float64[],
+    )
+end
+
 @testset "Joint covariate config requires exactly one selection mode" begin
     mger = _dummy_mger()
     dummy_selection = JointVariableSelection.JointSelectionConfig(outdir="unused")
