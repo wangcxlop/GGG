@@ -33,8 +33,8 @@ using .JointVariableSelection: JointSelectionConfig, select_joint_covariates
 
 const BENCHMARK_METHODS = [
     "raw", "zero", "train_clim", "hour_field_mean",
-    "idw", "adw", "tps", "gwr", "gwr_const",
-    "residual_gwr", "residual_gwr_const", "mixed_gwr", "mgwr", "hurdle_gwr",
+    "idw", "adw", "tps", "gwr",
+    "residual_gwr", "mixed_gwr", "mgwr",
 ]
 const TRADITIONAL_METHODS = ["idw", "adw", "tps"]
 # Hyperparameter-free reference predictors, estimated from training stations only. They are
@@ -52,11 +52,13 @@ const NULL_METHODS = ["zero", "train_clim", "hour_field_mean"]
 const MASK_METHODS = [
     "raw", "idw", "adw", "tps", "gwr", "residual_gwr", "mixed_gwr", "mgwr",
 ]
+# `hurdle_gwr` is deliberately absent. The model and its benchmark adapters
+# (`build_hurdle_context`, `_hurdle_predict`, and the branches in
+# `select_interpolation_parameter!` / `predict_selected`) are kept so re-enabling it is a
+# one-line change here, but it is not part of the reported comparison.
 const BENCHMARK_RUNS = [
-    ("direct", "idw"), ("direct", "adw"), ("direct", "tps"),
-    ("direct", "gwr"), ("direct", "gwr_const"), ("direct", "hurdle_gwr"),
-    ("residual", "gwr"), ("residual", "gwr_const"), ("residual", "mixed_gwr"),
-    ("residual", "mgwr"),
+    ("direct", "idw"), ("direct", "adw"), ("direct", "tps"), ("direct", "gwr"),
+    ("residual", "gwr"), ("residual", "mixed_gwr"), ("residual", "mgwr"),
 ]
 
 Base.@kwdef struct InterpolationBenchmarkConfig
@@ -609,56 +611,6 @@ function _gwr_predict(
     end
     weights = gw_weight(distances, bw; kernel=kernel, adaptive=adaptive)
     return st_gwr_predict_nanaware(X_train, values, weights; Xpred=X_target, min_obs=3)
-end
-
-"""
-Local-constant GWR: the same kernel and bandwidth machinery as `_gwr_predict`, but fitting a
-local mean instead of a local plane.
-
-This exists to separate two explanations that are otherwise confounded. `_gwr_predict` fits
-`[1, lon, lat]`, so it needs at least three effectively-weighted neighbours and cannot be as
-local as IDW/ADW, which need two. Running both over the same bandwidth grid says whether GWR
-loses because of the bandwidth it was given or because of the order of the local model.
-
-Unlike `_gwr_predict` this cannot go through `st_gwr_predict_nanaware`, which hard-requires a
-three-column design. The NaN handling mirrors `TraditionalInterpolation._weighted_predict`:
-renormalize by the weights of the stations that actually reported each hour.
-"""
-function _gwr_const_predict(
-    train_lonlat::Matrix{Float64}, values::Matrix{Float64}, target_lonlat::Matrix{Float64};
-    kernel::Int, adaptive::Bool, bw::Float64, exclude_self::Bool=false, min_obs::Int=1,
-)
-    distances = haversine_distance_matrix(train_lonlat, target_lonlat)
-    if exclude_self
-        size(train_lonlat, 1) == size(target_lonlat, 1) ||
-            throw(DimensionMismatch("GWR exclude_self requires matching rows"))
-        for i in 1:size(distances, 1)
-            distances[i, i] = Inf
-        end
-    end
-    weights = gw_weight(distances, bw; kernel=kernel, adaptive=adaptive)
-    n_target = size(target_lonlat, 1)
-    n_time = size(values, 2)
-    prediction = fill(NaN, n_target, n_time)
-    Threads.@threads for target in 1:n_target
-        @inbounds for time in 1:n_time
-            total = 0.0
-            weight_sum = 0.0
-            effective = 0
-            for station in axes(values, 1)
-                weight = weights[station, target]
-                value = values[station, time]
-                (weight > 0 && isfinite(weight) && !isnan(value)) || continue
-                total += weight * value
-                weight_sum += weight
-                effective += 1
-            end
-            if effective >= min_obs && weight_sum > 0
-                prediction[target, time] = total / weight_sum
-            end
-        end
-    end
-    return prediction
 end
 
 """
@@ -1422,18 +1374,17 @@ function select_interpolation_parameter!(
                 ))
             end
         end
-    elseif method in ("gwr", "gwr_const")
-        predictor = method == "gwr" ? _gwr_predict : _gwr_const_predict
+    elseif method == "gwr"
         for kernel in cfg.mger.kernels
             for (adaptive, candidates) in ((true, cfg.mger.bw_adaptive), (false, cfg.mger.bw_fixed_km))
                 for bw in candidates
                     try
                         interpolated = scored(
-                            (tr, va) -> predictor(
+                            (tr, va) -> _gwr_predict(
                                 train_lonlat[tr, :], target_values[tr, :], train_lonlat[va, :];
                                 kernel, adaptive, bw,
                             ),
-                            () -> predictor(
+                            () -> _gwr_predict(
                                 train_lonlat, target_values, train_lonlat;
                                 kernel, adaptive, bw, exclude_self=true,
                             ),
@@ -1596,9 +1547,6 @@ function predict_selected(
         tps_predict(train_lonlat, values, target_lonlat; smooth=selected.smooth)
     elseif method == "gwr"
         _gwr_predict(train_lonlat, values, target_lonlat;
-            kernel=selected.kernel, adaptive=selected.adaptive, bw=selected.bw)
-    elseif method == "gwr_const"
-        _gwr_const_predict(train_lonlat, values, target_lonlat;
             kernel=selected.kernel, adaptive=selected.adaptive, bw=selected.bw)
     elseif method == "hurdle_gwr"
         hurdle_context === nothing &&

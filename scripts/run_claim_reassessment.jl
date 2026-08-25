@@ -5,8 +5,8 @@
 # The benchmark's own `claim_assessment.csv` is produced with the defaults of
 # `assess_gwr_claim`, which assess `residual_gwr` and gate coverage on the *shared* evaluation
 # mask. That mask is pinned to `MASK_METHODS` and sits at ~0.80 because direct `gwr` fails ~20%
-# of cells, so the coverage gate can never pass for anyone, and the methods that actually win
-# this run (`hurdle_gwr`, `residual_gwr_const`) are never assessed at all.
+# of cells, so the coverage gate can never pass for anyone, and every GWR-family method other
+# than `residual_gwr` is never assessed at all.
 #
 # This reads the artefacts the run already wrote, so it costs no benchmark re-run.
 #
@@ -29,9 +29,10 @@ const DEFAULT_RUN = joinpath(
 )
 # The claim is defined on the balanced-spatial partition only (see `_one_metric`).
 const SCHEME = "balanced_spatial"
+# `hurdle_gwr` is no longer produced by the benchmark, but it is kept here so older run
+# directories that still contain it can be re-assessed; methods absent from disk are skipped.
 const ASSESSED_METHODS = [
-    "gwr", "gwr_const", "residual_gwr", "residual_gwr_const",
-    "mixed_gwr", "mgwr", "hurdle_gwr",
+    "gwr", "residual_gwr", "mixed_gwr", "mgwr", "hurdle_gwr",
 ]
 
 """The `MGERConfig` the full benchmark run used, so the common station/time grid matches."""

@@ -29,7 +29,7 @@ include(joinpath(ROOT, "scripts", "run_interpolation_benchmark.jl"))
 using CSV, DataFrames, Statistics
 
 const OUTDIR = joinpath(ROOT, "output", "tuning_weighting_verification")
-const METHODS = ["gwr", "gwr_const"]
+const METHODS = ["gwr"]
 
 """Every (kernel, adaptive, bw) triple the benchmark's selector would scan, in scan order."""
 function candidate_grid(mger)
@@ -57,7 +57,6 @@ function evaluate_cell(cfg, lonlat, data, train_idx, method::String, grid)
     y_obs = Matrix{Float64}(data.Y_obs[train_idx, :])
     y_sat = Matrix{Float64}(data.Y_sat[train_idx, :])
     residuals = y_obs .- y_sat
-    predictor = method == "gwr" ? _gwr_predict : _gwr_const_predict
 
     legacy_idx, _ = _tuning_time_sample(y_obs, cfg.tuning_max_times, :uniform)
     fixed_idx, fixed_weights = _tuning_time_sample(y_obs, cfg.tuning_max_times, :stratified)
@@ -66,7 +65,7 @@ function evaluate_cell(cfg, lonlat, data, train_idx, method::String, grid)
         for name in ("truth", "legacy", "fixed"))
     for candidate in grid
         interpolated = try
-            predictor(train_lonlat, residuals, train_lonlat;
+            _gwr_predict(train_lonlat, residuals, train_lonlat;
                 kernel=candidate.kernel, adaptive=candidate.adaptive, bw=candidate.bw,
                 exclude_self=true)
         catch
