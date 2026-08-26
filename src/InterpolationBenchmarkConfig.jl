@@ -12,10 +12,14 @@ const TRADITIONAL_METHODS = ["idw", "adw", "tps"]
 const NULL_METHODS = ["zero", "train_clim", "hour_field_mean"]
 # The common evaluation mask stays pinned to the original comparison set. Every method must be
 # finite for a cell to count, so letting a newly added method into the mask would silently
-# re-score all the others and break comparability with earlier runs - the same coverage
-# confound that already makes the `balanced_spatial` numbers hard to read (direct `gwr` fails
-# often enough to drag the shared mask down to ~0.76). Diagnostic and reference methods are
-# therefore scored *on* the mask without being allowed to *define* it.
+# re-score all the others and break comparability with earlier runs. This used to be a real
+# confound - `mgwr`'s back-fit non-convergence dropped whole hours and dragged the shared mask
+# down to ~0.76 - but that was a fit-level bug in mgwr's back-fit (fixed by raising
+# max_iterations and defaulting mgwr_spatial_grouping to :intercept_only), not a `gwr` coverage
+# problem: direct `gwr` has always had ~1.0 own coverage. Post-fix, the shared mask sits at
+# ~0.96-0.98 and mgwr's remaining dropouts cost <1e-4 relative RMSE (see
+# scripts/run_mgwr_diagnostics.jl). Diagnostic and reference methods are therefore scored *on*
+# the mask without being allowed to *define* it.
 const MASK_METHODS = [
     "raw", "idw", "adw", "tps", "gwr", "residual_gwr", "mixed_gwr", "mgwr",
 ]
@@ -27,6 +31,11 @@ const BENCHMARK_RUNS = [
     ("direct", "idw"), ("direct", "adw"), ("direct", "tps"), ("direct", "gwr"),
     ("residual", "gwr"), ("residual", "mixed_gwr"), ("residual", "mgwr"),
 ]
+
+"""Convert the benchmark's `Int` kernel index into the weight-formula `Function` the
+`mixed_gwr`/`mgwr` local-hat machinery (`DEMTerrainExperiment`/`JointCovariateModels`) expects.
+`GWR_KERNELS` isn't exported, so it needs `MixedGWR.` qualification here."""
+_kernel_function(kernel::Int) = MixedGWR.GWR_KERNELS[kernel + 1]
 
 Base.@kwdef struct InterpolationBenchmarkConfig
     mger::MGERConfig

@@ -198,10 +198,14 @@ beaten in each stratum.
 `method` selects which method is assessed (default `residual_gwr`, the historical behaviour).
 `own_coverage` maps product to the method's *own* prediction coverage; when supplied, the
 coverage gate uses it instead of `coverage` on the shared evaluation mask. The shared mask is
-pinned to `MASK_METHODS`, so it sits at ~0.8 because direct `gwr` fails ~20% of cells — gating on
-it asks every method to answer for a different method's failures, which no method can pass. Both
-numbers are reported side by side. Naming either argument switches the output to a self-describing
-schema (`method` + `RMSE_method`) so rows for different methods cannot be silently mixed.
+pinned to `MASK_METHODS`; historically `mgwr` back-fit non-convergence dropped whole hours and
+dragged it down to ~0.8 (not `gwr`, which has always had ~1.0 own coverage), so gating on the
+shared mask asked every method to answer for mgwr's failures, which no method could pass. That
+non-convergence is now fixed and the shared mask sits at ~0.96-0.98 (see
+scripts/run_mgwr_diagnostics.jl), but `own_coverage` remains available since it's still the more
+correct number to gate on. Both numbers are reported side by side. Naming either argument
+switches the output to a self-describing schema (`method` + `RMSE_method`) so rows for different
+methods cannot be silently mixed.
 """
 function assess_gwr_claim(
     metrics::DataFrame, bootstrap::DataFrame, products::Vector{String};
