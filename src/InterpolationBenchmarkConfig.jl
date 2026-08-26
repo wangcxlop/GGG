@@ -1,0 +1,180 @@
+const BENCHMARK_METHODS = [
+    "raw", "zero", "train_clim", "hour_field_mean",
+    "idw", "adw", "tps", "gwr",
+    "residual_gwr", "mixed_gwr", "mgwr",
+]
+const TRADITIONAL_METHODS = ["idw", "adw", "tps"]
+# Hyperparameter-free reference predictors, estimated from training stations only. They are
+# reported so a method's RMSE can be read as skill rather than as a bare number: on hourly
+# precipitation ~93% of station-hours are dry, so a large part of any RMSE is simply how hard
+# a method shrinks toward zero. Deliberately not in TRADITIONAL_METHODS - they are context for
+# the reader, not baselines the GWR claim is assessed against.
+const NULL_METHODS = ["zero", "train_clim", "hour_field_mean"]
+# The common evaluation mask stays pinned to the original comparison set. Every method must be
+# finite for a cell to count, so letting a newly added method into the mask would silently
+# re-score all the others and break comparability with earlier runs - the same coverage
+# confound that already makes the `balanced_spatial` numbers hard to read (direct `gwr` fails
+# often enough to drag the shared mask down to ~0.76). Diagnostic and reference methods are
+# therefore scored *on* the mask without being allowed to *define* it.
+const MASK_METHODS = [
+    "raw", "idw", "adw", "tps", "gwr", "residual_gwr", "mixed_gwr", "mgwr",
+]
+# `hurdle_gwr` is deliberately absent. The model and its benchmark adapters
+# (`build_hurdle_context`, `_hurdle_predict`, and the branches in
+# `select_interpolation_parameter!` / `predict_selected`) are kept so re-enabling it is a
+# one-line change here, but it is not part of the reported comparison.
+const BENCHMARK_RUNS = [
+    ("direct", "idw"), ("direct", "adw"), ("direct", "tps"), ("direct", "gwr"),
+    ("residual", "gwr"), ("residual", "mixed_gwr"), ("residual", "mgwr"),
+]
+
+Base.@kwdef struct InterpolationBenchmarkConfig
+    mger::MGERConfig
+    terrain_path::Union{Nothing,String} = nothing
+    dem::Union{Nothing,DEMExperimentConfig} = nothing
+    joint_covariates::Union{Nothing,JointCovariateBenchmarkConfig} = nothing
+    # Set to run joint-covariate variable selection fresh inside every training fold instead of
+    # once on the full station set (`joint_covariates.spec_path`). Exactly one of the two must
+    # be set when `joint_covariates` is enabled.
+    joint_selection::Union{Nothing,JointSelectionConfig} = nothing
+    k::Int = 5
+    seed::Int = 20260627
+    # Repeated cross-validation: one independent fold partition per seed. Empty means a
+    # single repeat using `seed`, which reproduces the historical single-split behaviour.
+    seeds::Vector{Int} = Int[]
+    fold_center_init::Symbol = :kmeanspp
+    cv_schemes::Vector{Symbol} = [:balanced_spatial, :random]
+    idw_powers::Vector{Float64} = [1.0, 1.5, 2.0, 2.5, 3.0]
+    neighbor_candidates::Vector{Union{Nothing,Int}} = Union{Nothing,Int}[8, 16, 32, 64, nothing]
+    tps_smooth_candidates::Vector{Float64} = [1e-4, 1e-3, 1e-2, 1e-1, 1.0]
+    min_tuning_coverage::Float64 = 0.95
+    tuning_max_times::Int = 336
+    # `:stratified` weights the tuning subsample so its RMSE estimates the pooled RMSE the
+    # benchmark reports, instead of the wet-hour RMSE the unweighted subsample scores.
+    #
+    # It is NOT the default, despite being the more correct estimator, because measurement says
+    # the level error it removes was very nearly a constant multiplier and therefore cancelled
+    # in the ranking: over 30 product/fold/method cells it costs 0.586% mean regret against the
+    # exact full-record curve where `:uniform` costs 0.096%, and on the joint-covariate path the
+    # two are a wash (63.4% vs 63.7%). Switching the default would move published numbers for no
+    # measured gain. See `scripts/verify_tuning_time_weighting.jl`, and the header of
+    # `_tuning_time_sample` for what actually dominates selection error.
+    tuning_time_weighting::Symbol = :uniform
+    # How candidates are scored during selection. `:inner_spatial` predicts out-of-fold onto an
+    # inner split of the training stations, built by the same splitter and scheme as the outer
+    # partition, so the selection criterion is the same estimand the benchmark reports.
+    # `:loocv` is the historical leave-one-out-at-training-stations criterion, which scores
+    # interpolation skill (median 5.5 km to the nearest remaining gauge) while the results table
+    # reports extrapolation skill (median 23.9 km under `balanced_spatial`). See
+    # `selection_folds` for the measurements.
+    tuning_geometry::Symbol = :inner_spatial
+    # Groups in the inner selection split; 0 means "use `cfg.k`", which is what reproduces the
+    # outer fold geometry. Ignored when `tuning_geometry === :loocv`.
+    tuning_inner_k::Int = 0
+    mgwr_max_tuning_iterations::Int = 5
+    # Scale applied to the joint dynamic models' residual correction before it is added back to
+    # the satellite field. GWR is unbiased and never shrinks, so the correction it produces is
+    # the right shape at the wrong magnitude: `satellite_offset.csv` measures the optimal rescale
+    # at 0.84 / 0.47 / 0.53 for FY4B / GPM / GSMaP, i.e. the models over-correct by up to 2x.
+    #
+    # The scale is selected jointly with the bandwidth on the inner spatial split, and costs
+    # nothing to add: `_joint_candidate_metrics` rescores the residual prediction it has already
+    # computed, so the ladder needs no extra model fits. Scoring the clipped objective rather than
+    # the closed-form `E[g*r]/E[g^2]` keeps selection consistent with the reported metric, which
+    # the `max(., 0)` clip would otherwise break.
+    #
+    # The ladder starts at 0.1 rather than 0.3 because a smoke run with a 0.3 floor put 31 of 75
+    # selected joint rows *on* that floor - the grid, not the data, would have been picking the
+    # scale, which is the same failure the bandwidth grids hit before `--local-grid`.
+    #
+    # `[1.0]` disables shrinkage and reproduces the historical unshrunk behaviour exactly.
+    residual_shrinkage_candidates::Vector{Float64} =
+        [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+    event_thresholds::Vector{Float64} = [0.1, 2.5, 8.0, 16.0]
+    bootstrap_reps::Int = 2000
+end
+
+"""Fold seeds for the run: one repeat per seed, defaulting to a single repeat on `cfg.seed`."""
+benchmark_seeds(cfg::InterpolationBenchmarkConfig) =
+    isempty(cfg.seeds) ? [cfg.seed] : cfg.seeds
+
+function _validate_benchmark_config(cfg::InterpolationBenchmarkConfig, n_station::Int)
+    2 <= cfg.k <= n_station || throw(ArgumentError("k must be between 2 and station count"))
+    length(unique(benchmark_seeds(cfg))) == length(benchmark_seeds(cfg)) ||
+        throw(ArgumentError("seeds must be unique"))
+    cfg.fold_center_init in (:kmeanspp, :farthest) ||
+        throw(ArgumentError("fold_center_init must be :kmeanspp or :farthest"))
+    all(s -> s in (:balanced_spatial, :random, :strip), cfg.cv_schemes) ||
+        throw(ArgumentError("cv_schemes must contain :balanced_spatial, :random, or :strip"))
+    length(unique(cfg.cv_schemes)) == length(cfg.cv_schemes) ||
+        throw(ArgumentError("cv_schemes must be unique"))
+    all(>(0), cfg.idw_powers) || throw(ArgumentError("IDW/ADW powers must be positive"))
+    all(x -> x === nothing || x > 0, cfg.neighbor_candidates) ||
+        throw(ArgumentError("neighbor candidates must be positive or nothing"))
+    all(>(0), cfg.tps_smooth_candidates) ||
+        throw(ArgumentError("TPS smoothing candidates must be positive"))
+    0 < cfg.min_tuning_coverage <= 1 ||
+        throw(ArgumentError("min_tuning_coverage must be in (0, 1]"))
+    cfg.bootstrap_reps >= 0 || throw(ArgumentError("bootstrap_reps must be non-negative"))
+    cfg.tuning_max_times >= 0 || throw(ArgumentError("tuning_max_times must be non-negative"))
+    cfg.tuning_time_weighting in (:stratified, :uniform) ||
+        throw(ArgumentError("tuning_time_weighting must be :stratified or :uniform"))
+    cfg.tuning_geometry in (:inner_spatial, :loocv) ||
+        throw(ArgumentError("tuning_geometry must be :inner_spatial or :loocv"))
+    cfg.tuning_inner_k == 0 || cfg.tuning_inner_k >= 2 ||
+        throw(ArgumentError("tuning_inner_k must be 0 (use cfg.k) or at least 2"))
+    cfg.mgwr_max_tuning_iterations > 0 ||
+        throw(ArgumentError("mgwr_max_tuning_iterations must be positive"))
+    isempty(cfg.residual_shrinkage_candidates) &&
+        throw(ArgumentError("residual_shrinkage_candidates must not be empty"))
+    all(s -> 0 < s <= 1, cfg.residual_shrinkage_candidates) ||
+        throw(ArgumentError("residual shrinkage candidates must be in (0, 1]"))
+    xor(cfg.terrain_path === nothing, cfg.dem === nothing) && throw(ArgumentError(
+        "terrain_path and dem must either both be configured or both be omitted",
+    ))
+    cfg.joint_covariates !== nothing && cfg.terrain_path !== nothing && throw(ArgumentError(
+        "joint covariates and legacy DEM screening cannot be enabled together",
+    ))
+    if cfg.dem !== nothing
+        cfg.dem.min_wet_hours > 0 || throw(ArgumentError("DEM min_wet_hours must be positive"))
+        cfg.dem.screen_permutations > 0 ||
+            throw(ArgumentError("DEM screen_permutations must be positive"))
+        cfg.dem.spatial_permutations > 0 ||
+            throw(ArgumentError("DEM spatial_permutations must be positive"))
+        all(>(1), cfg.dem.bandwidth_candidates) ||
+            throw(ArgumentError("DEM bandwidth candidates must exceed one neighbor"))
+    end
+    if cfg.joint_covariates !== nothing
+        joint = cfg.joint_covariates
+        xor(joint.spec_path === nothing, cfg.joint_selection === nothing) || throw(ArgumentError(
+            "joint covariates require exactly one of spec_path (fixed full-data selection) or " *
+            "joint_selection (nested per-fold selection)",
+        ))
+        joint.spec_path === nothing || isfile(joint.spec_path) ||
+            throw(ArgumentError("joint specification does not exist"))
+        isfile(joint.terrain_path) || throw(ArgumentError("joint terrain table does not exist"))
+        all(>(1), joint.bandwidth_candidates) ||
+            throw(ArgumentError("joint bandwidth candidates must exceed one neighbor"))
+        joint.max_iterations > 0 || throw(ArgumentError("joint max_iterations must be positive"))
+        joint.tolerance > 0 || throw(ArgumentError("joint tolerance must be positive"))
+        # Successive over-relaxation diverges outside (0, 2); see the field comment in
+        # `JointCovariateBenchmarkConfig` for why the default sits above 1.
+        0 < joint.relaxation < 2 ||
+            throw(ArgumentError("joint relaxation must be in (0, 2)"))
+        joint.mgwr_spatial_grouping in (:split, :shared, :intercept_only) || throw(ArgumentError(
+            "mgwr_spatial_grouping must be :split, :shared, or :intercept_only",
+        ))
+    end
+    return nothing
+end
+
+"""
+Per-repeat output root. A single-repeat run keeps the historical `outdir/<scheme>/...` layout so
+existing verify scripts and downstream readers are unaffected; repeated runs nest under
+`outdir/repeat_<i>/`.
+"""
+_repeat_dir(outdir::String, repeat_index::Int, n_repeats::Int) =
+    n_repeats == 1 ? outdir : joinpath(outdir, "repeat_$(lpad(repeat_index, 2, '0'))")
+
+_dem_enabled(cfg::InterpolationBenchmarkConfig) = cfg.terrain_path !== nothing
+_joint_enabled(cfg::InterpolationBenchmarkConfig) = cfg.joint_covariates !== nothing
