@@ -75,82 +75,117 @@ function select_mgwr_bandwidths!(
     time_weights::Union{Nothing,Vector{Float64}}=nothing, selection_groups=nothing,
 )
     n_train, n_time = size(residuals)
-    candidates = sort(unique(Int(round(bw)) for bw in cfg.mger.bw_adaptive))
-    isempty(candidates) && throw(ArgumentError("MGWR requires adaptive bandwidth candidates"))
     designs = build_mgwr_designs(train_lonlat, train_lonlat)
-    bandwidths = fill(last(candidates), length(designs.group_names))
     first_row = length(scan_rows) + 1
-    final_iteration = 0
-    converged = false
-
-    for iteration in 1:cfg.mgwr_max_tuning_iterations
-        previous = copy(bandwidths)
-        for (group_index, group) in enumerate(designs.group_names)
-            candidate_rows = Int[]
-            for bw in candidates
-                trial = copy(bandwidths)
-                trial[group_index] = bw
-                try
-                    interpolated = selection_groups === nothing ?
-                        _mgwr_predict(
-                            train_lonlat, residuals, train_lonlat;
-                            bandwidths=trial, exclude_self=true,
-                        ) :
-                        _selection_oof(selection_groups, n_train, n_time, (tr, va) ->
-                            _mgwr_predict(
-                                train_lonlat[tr, :], residuals[tr, :], train_lonlat[va, :];
-                                bandwidths=trial,
-                            ))
-                    prediction = max.(y_sat .+ interpolated, 0.0)
-                    metrics = _candidate_metrics(y_obs, y_sat, prediction; time_weights)
-                    push!(scan_rows, _scan_row(;
-                        scheme, product, fold, mode="residual", method="mgwr",
-                        group, iteration, kernel=BISQUARE, adaptive=true, bw, metrics...,
-                    ))
-                catch e
-                    push!(scan_rows, _scan_row(;
-                        scheme, product, fold, mode="residual", method="mgwr",
-                        group, iteration, kernel=BISQUARE, adaptive=true, bw,
-                        status="failed", error=sprint(showerror, e),
-                    ))
+    # Each (kernel, adaptive/fixed bandwidth-family) combination runs its own independent
+    # per-group coordinate descent to convergence (identical logic to the historical
+    # bisquare-only, adaptive-only search, just parameterised); combinations are then compared
+    # by the RMSE of the last group scored in their converged sweep — the descent never computes
+    # one joint RMSE for the whole config, so this is the best single number available per
+    # combination (same convention as `select_joint_parameter!`'s mgwr branch). A combination
+    # that has no candidates, or fails to converge, is skipped rather than aborting the search.
+    best_result = nothing
+    bandwidth_families = _bandwidth_families(
+        cfg, _usable_adaptive_candidates(cfg.mger.bw_adaptive, n_train, selection_groups),
+    )
+    for kernel in cfg.mger.kernels
+        for (adaptive, raw_candidates) in bandwidth_families
+            candidates = adaptive ? sort(unique(round.(raw_candidates))) : sort(unique(raw_candidates))
+            isempty(candidates) && continue
+            # Start every group at the widest candidate - the global one, when it is in the
+            # family. A back-fit that starts wide and tightens is the conventional direction,
+            # and the descent runs to convergence either way.
+            bandwidths = fill(last(candidates), length(designs.group_names))
+            final_iteration = 0
+            last_index = 0
+            converged = false
+            try
+                for iteration in 1:cfg.mgwr_max_tuning_iterations
+                    previous = copy(bandwidths)
+                    for (group_index, group) in enumerate(designs.group_names)
+                        candidate_rows = Int[]
+                        for bw in candidates
+                            trial = copy(bandwidths)
+                            trial[group_index] = bw
+                            try
+                                interpolated = selection_groups === nothing ?
+                                    _mgwr_predict(
+                                        train_lonlat, residuals, train_lonlat;
+                                        bandwidths=trial, kernel, adaptive, exclude_self=true,
+                                    ) :
+                                    _selection_oof(selection_groups, n_train, n_time, (tr, va) ->
+                                        _mgwr_predict(
+                                            train_lonlat[tr, :], residuals[tr, :],
+                                            train_lonlat[va, :]; bandwidths=trial, kernel, adaptive,
+                                        ))
+                                prediction = max.(y_sat .+ interpolated, 0.0)
+                                metrics = _candidate_metrics(y_obs, y_sat, prediction; time_weights)
+                                push!(scan_rows, _scan_row(;
+                                    scheme, product, fold, mode="residual", method="mgwr",
+                                    group, iteration, kernel, adaptive, bw, metrics...,
+                                ))
+                            catch e
+                                push!(scan_rows, _scan_row(;
+                                    scheme, product, fold, mode="residual", method="mgwr",
+                                    group, iteration, kernel, adaptive, bw,
+                                    status="failed", error=sprint(showerror, e),
+                                ))
+                            end
+                            push!(candidate_rows, length(scan_rows))
+                        end
+                        valid = filter(candidate_rows) do index
+                            row = scan_rows[index]
+                            row.status == "success" && row.coverage >= cfg.min_tuning_coverage &&
+                                isfinite(row.RMSE)
+                        end
+                        isempty(valid) && throw(ArgumentError(
+                            "all MGWR candidates failed for group $group " *
+                            "(kernel=$kernel, adaptive=$adaptive)",
+                        ))
+                        best_index = sort(valid; by=index -> (
+                            scan_rows[index].RMSE, scan_rows[index].MAE, -scan_rows[index].coverage,
+                        ))[1]
+                        bandwidths[group_index] = scan_rows[best_index].bw
+                        last_index = best_index
+                    end
+                    final_iteration = iteration
+                    if bandwidths == previous
+                        converged = true
+                        break
+                    end
                 end
-                push!(candidate_rows, length(scan_rows))
+            catch error
+                error isa ArgumentError || rethrow()
+                continue
             end
-            valid = filter(candidate_rows) do index
-                row = scan_rows[index]
-                row.status == "success" && row.coverage >= cfg.min_tuning_coverage &&
-                    isfinite(row.RMSE)
+            converged || continue
+            rmse = scan_rows[last_index].RMSE
+            if best_result === nothing || rmse < best_result.rmse
+                best_result = (; kernel, adaptive, bandwidths=copy(bandwidths), final_iteration, rmse)
             end
-            isempty(valid) && throw(ArgumentError(
-                "all MGWR candidates failed for group $group or had insufficient coverage",
-            ))
-            best_index = sort(valid; by=index -> (
-                scan_rows[index].RMSE, scan_rows[index].MAE, -scan_rows[index].coverage,
-            ))[1]
-            bandwidths[group_index] = Int(round(scan_rows[best_index].bw))
-        end
-        final_iteration = iteration
-        if bandwidths == previous
-            converged = true
-            break
         end
     end
-    converged || throw(ArgumentError(
-        "MGWR bandwidth search did not converge in $(cfg.mgwr_max_tuning_iterations) iterations",
+    best_result === nothing && throw(ArgumentError(
+        "MGWR bandwidth search did not converge for any kernel/bandwidth-family combination " *
+        "in $(cfg.mgwr_max_tuning_iterations) iterations",
     ))
+    kernel = best_result.kernel
+    adaptive = best_result.adaptive
+    bandwidths = best_result.bandwidths
+    final_iteration = best_result.final_iteration
 
     for (group_index, group) in enumerate(designs.group_names)
         matching_rows = filter(first_row:length(scan_rows)) do index
             row = scan_rows[index]
-            row.method == "mgwr" && row.group == group &&
-                row.iteration == final_iteration && row.status == "success" &&
-                Int(round(row.bw)) == bandwidths[group_index]
+            row.method == "mgwr" && row.group == group && row.kernel == kernel &&
+                row.adaptive == adaptive && row.iteration == final_iteration &&
+                row.status == "success" && row.bw == bandwidths[group_index]
         end
         isempty(matching_rows) && error("MGWR selected bandwidth row is missing for $group")
         selected_index = last(matching_rows)
         scan_rows[selected_index] = merge(scan_rows[selected_index], (; selected=true))
     end
-    return (; bandwidths)
+    return (; bandwidths, kernel, adaptive)
 end
 
 """
@@ -280,6 +315,11 @@ function select_interpolation_parameter!(
     # everything downstream is identical.
     scored(predict_pair, predict_loocv) = selection_groups === nothing ?
         predict_loocv() : _selection_oof(selection_groups, n_train, n_time, predict_pair)
+    # Shared by every GWR-family branch below, so `gwr`, `hurdle_gwr` and `mixed_gwr` search the
+    # same candidates as each other and as the joint models in `select_joint_parameter!`.
+    bandwidth_families = _bandwidth_families(
+        cfg, _usable_adaptive_candidates(cfg.mger.bw_adaptive, n_train, selection_groups),
+    )
     first_row = length(scan_rows) + 1
     if method in ("idw", "adw")
         predictor = method == "idw" ? idw_predict : adw_predict
@@ -337,7 +377,7 @@ function select_interpolation_parameter!(
         end
     elseif method == "gwr"
         for kernel in cfg.mger.kernels
-            for (adaptive, candidates) in ((true, cfg.mger.bw_adaptive), (false, cfg.mger.bw_fixed_km))
+            for (adaptive, candidates) in bandwidth_families
                 for bw in candidates
                     try
                         interpolated = scored(
@@ -372,8 +412,13 @@ function select_interpolation_parameter!(
         hurdle_context === nothing &&
             throw(ArgumentError("hurdle_gwr requires a hurdle_context carrying the fold times"))
         for kernel in cfg.mger.kernels
-            for (adaptive, candidates) in ((true, cfg.mger.bw_adaptive), (false, cfg.mger.bw_fixed_km))
+            for (adaptive, candidates) in bandwidth_families
                 for bw in candidates
+                    # `FixedBandwidth` rejects a non-finite bandwidth by construction, so the
+                    # family's global candidate cannot be expressed as a `HurdleGWRConfig`.
+                    # Skip it rather than logging a guaranteed-failure row per kernel; giving
+                    # `hurdle_gwr` a global option means teaching `SpatialBandwidth` about one.
+                    isfinite(bw) || continue
                     try
                         hurdle_config = _hurdle_config(hurdle_context, kernel, adaptive, bw)
                         corrected = scored(
@@ -403,27 +448,32 @@ function select_interpolation_parameter!(
         end
     elseif method == "mixed_gwr"
         mode == "residual" || throw(ArgumentError("mixed_gwr only supports residual mode"))
-        for bw in cfg.mger.bw_adaptive
-            try
-                interpolated = scored(
-                    (tr, va) -> _mixed_gwr_predict(
-                        train_lonlat[tr, :], target_values[tr, :], train_lonlat[va, :]; bw,
-                    ),
-                    () -> _mixed_gwr_predict(
-                        train_lonlat, target_values, train_lonlat; bw, exclude_self=true,
-                    ),
-                )
-                prediction = max.(y_sat .+ interpolated, 0.0)
-                metrics = _candidate_metrics(y_obs, y_sat, prediction; time_weights)
-                push!(scan_rows, _scan_row(;
-                    scheme, product, fold, mode, method, kernel=BISQUARE,
-                    adaptive=true, bw, metrics...,
-                ))
-            catch e
-                push!(scan_rows, _scan_row(;
-                    scheme, product, fold, mode, method, kernel=BISQUARE,
-                    adaptive=true, bw, status="failed", error=sprint(showerror, e),
-                ))
+        for kernel in cfg.mger.kernels
+            for (adaptive, candidates) in bandwidth_families
+                for bw in candidates
+                    try
+                        interpolated = scored(
+                            (tr, va) -> _mixed_gwr_predict(
+                                train_lonlat[tr, :], target_values[tr, :], train_lonlat[va, :];
+                                bw, kernel, adaptive,
+                            ),
+                            () -> _mixed_gwr_predict(
+                                train_lonlat, target_values, train_lonlat;
+                                bw, kernel, adaptive, exclude_self=true,
+                            ),
+                        )
+                        prediction = max.(y_sat .+ interpolated, 0.0)
+                        metrics = _candidate_metrics(y_obs, y_sat, prediction; time_weights)
+                        push!(scan_rows, _scan_row(;
+                            scheme, product, fold, mode, method, kernel, adaptive, bw, metrics...,
+                        ))
+                    catch e
+                        push!(scan_rows, _scan_row(;
+                            scheme, product, fold, mode, method, kernel, adaptive, bw,
+                            status="failed", error=sprint(showerror, e),
+                        ))
+                    end
+                end
             end
         end
     elseif method == "mgwr"

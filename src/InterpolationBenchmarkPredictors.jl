@@ -14,6 +14,15 @@ function _gwr_predict(
         end
     end
     weights = gw_weight(distances, bw; kernel=kernel, adaptive=adaptive)
+    if exclude_self
+        # The `Inf` distance above is what keeps self out of the adaptive neighbour ranking, but
+        # it does not by itself produce a zero weight: at the global candidate (`bw = Inf`)
+        # `kernel(Inf, Inf)` is NaN for four of the five kernels and 1.0 for boxcar, which would
+        # leak the held-out station straight back into its own fit. Clear it explicitly.
+        for i in axes(weights, 1)
+            weights[i, i] = 0.0
+        end
+    end
     return st_gwr_predict_nanaware(X_train, values, weights; Xpred=X_target, min_obs=3)
 end
 
@@ -148,13 +157,14 @@ end
 
 function _mixed_gwr_predict(
     train_lonlat::Matrix{Float64}, values::Matrix{Float64},
-    target_lonlat::Matrix{Float64}; bw::Float64, exclude_self::Bool=false,
+    target_lonlat::Matrix{Float64}; bw::Float64, kernel::Int, adaptive::Bool=true,
+    exclude_self::Bool=false,
 )
     designs = build_mixed_gwr_designs(train_lonlat, target_lonlat)
     prediction, _ = mixed_gwr_predict(
         designs.local_train, designs.global_train, values, train_lonlat,
-        designs.local_target, designs.global_target, target_lonlat, Int(round(bw));
-        exclude_self,
+        designs.local_target, designs.global_target, target_lonlat, bw,
+        _kernel_function(kernel); adaptive, exclude_self,
     )
     return prediction
 end
@@ -176,13 +186,14 @@ end
 
 function _mgwr_predict(
     train_lonlat::Matrix{Float64}, values::Matrix{Float64},
-    target_lonlat::Matrix{Float64}; bandwidths::Vector{Int}, exclude_self::Bool=false,
+    target_lonlat::Matrix{Float64}; bandwidths::Vector{Float64}, kernel::Int,
+    adaptive::Bool=true, exclude_self::Bool=false,
 )
     designs = build_mgwr_designs(train_lonlat, target_lonlat)
     prediction, _ = multiscale_gwr_predict(
         designs.local_train, designs.global_train, values, train_lonlat,
-        designs.local_target, designs.global_target, target_lonlat, bandwidths;
-        exclude_self,
+        designs.local_target, designs.global_target, target_lonlat, bandwidths,
+        _kernel_function(kernel); adaptive, exclude_self,
     )
     return prediction
 end
@@ -201,7 +212,9 @@ function predict_selected(
         hasproperty(selected, :joint_model) && selected.joint_model
     interpolated = if is_joint_model && mode == "residual"
         prediction, converged = dynamic_covariate_predict(
-            joint_context, values, selected.joint_method, selected.bandwidths,
+            joint_context, values, selected.joint_method,
+            Float64.(selected.bandwidths), _kernel_function(selected.kernel);
+            adaptive=selected.adaptive,
         )
         any(.!converged) && @warn(
             "joint dynamic model did not converge for some hours",
@@ -218,7 +231,8 @@ function predict_selected(
             designs.mixed_local_train, zeros(Float64, size(train_lonlat, 1), 0), values,
             train_lonlat, designs.mixed_local_target,
             zeros(Float64, size(target_lonlat, 1), 0), target_lonlat,
-            Int(round(selected.bw)); ridge=dem_context.dem.ridge,
+            selected.bw, _kernel_function(selected.kernel); adaptive=selected.adaptive,
+            ridge=dem_context.dem.ridge,
             tolerance=dem_context.dem.tolerance,
             max_iterations=dem_context.dem.max_iterations,
         )
@@ -228,7 +242,8 @@ function predict_selected(
         prediction, _ = mixed_gwr_predict(
             designs.mixed_local_train, designs.global_train, values, train_lonlat,
             designs.mixed_local_target, designs.global_target, target_lonlat,
-            Int(round(selected.bw)); ridge=dem_context.dem.ridge,
+            selected.bw, _kernel_function(selected.kernel); adaptive=selected.adaptive,
+            ridge=dem_context.dem.ridge,
             tolerance=dem_context.dem.tolerance,
             max_iterations=dem_context.dem.max_iterations,
         )
@@ -238,7 +253,9 @@ function predict_selected(
         prediction, _ = multiscale_gwr_predict(
             designs.multiscale_train, designs.global_train, values, train_lonlat,
             designs.multiscale_target, designs.global_target, target_lonlat,
-            selected.bandwidths; ridge=dem_context.dem.ridge,
+            selected.bandwidths, _kernel_function(selected.kernel);
+            adaptive=selected.adaptive,
+            ridge=dem_context.dem.ridge,
             tolerance=dem_context.dem.tolerance,
             max_iterations=dem_context.dem.max_iterations,
         )
@@ -270,10 +287,14 @@ function predict_selected(
         ))
         prediction.corrected
     elseif method == "mixed_gwr"
-        _mixed_gwr_predict(train_lonlat, values, target_lonlat; bw=selected.bw)
+        _mixed_gwr_predict(
+            train_lonlat, values, target_lonlat;
+            bw=selected.bw, kernel=selected.kernel, adaptive=selected.adaptive,
+        )
     elseif method == "mgwr"
         _mgwr_predict(
-            train_lonlat, values, target_lonlat; bandwidths=selected.bandwidths,
+            train_lonlat, values, target_lonlat; bandwidths=Float64.(selected.bandwidths),
+            kernel=selected.kernel, adaptive=selected.adaptive,
         )
     else
         throw(ArgumentError("unknown method: $method"))

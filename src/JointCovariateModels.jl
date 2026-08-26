@@ -521,8 +521,8 @@ function _multiscale_predict_damped(
     local_train::Vector{Matrix{Float64}}, global_train::Matrix{Float64},
     response::Matrix{Float64}, train_lonlat::Matrix{Float64},
     local_target::Vector{Matrix{Float64}}, global_target::Matrix{Float64},
-    target_lonlat::Matrix{Float64}, bandwidths::Vector{Int}, cfg;
-    exclude_self::Bool=false,
+    target_lonlat::Matrix{Float64}, bandwidths::Vector{Float64}, kernel::Function, cfg;
+    adaptive::Bool=true, exclude_self::Bool=false,
 )
     length(local_train) == length(local_target) == length(bandwidths) ||
         throw(DimensionMismatch(
@@ -532,7 +532,7 @@ function _multiscale_predict_damped(
     y = vec(response)
     train_distances = DEMTerrainExperiment._haversine_matrix(train_lonlat, train_lonlat)
     train_hats = [DEMTerrainExperiment._local_hat(
-        X, X, train_distances, bandwidth; ridge=cfg.ridge, exclude_self,
+        X, X, train_distances, bandwidth, kernel; adaptive, ridge=cfg.ridge, exclude_self,
     ) for (X, bandwidth) in zip(local_train, bandwidths)]
     global_hat = DEMTerrainExperiment._global_projection(global_train; ridge=cfg.ridge)
     local_components = [zeros(length(y)) for _ in local_train]
@@ -585,7 +585,7 @@ function _multiscale_predict_damped(
         end
         target_hat = DEMTerrainExperiment._local_hat(
             local_train[group], local_target[group], target_distances,
-            bandwidths[group]; ridge=cfg.ridge,
+            bandwidths[group], kernel; adaptive, ridge=cfg.ridge,
         )
         prediction .+= target_hat * partial
     end
@@ -594,7 +594,8 @@ end
 
 function dynamic_covariate_predict(
     context::JointFoldContext, residuals::Matrix{Float64}, method::String,
-    bandwidths::Vector{Int}; time_indices::Vector{Int}=collect(axes(residuals, 2)),
+    bandwidths::Vector{Float64}, kernel::Function;
+    adaptive::Bool=true, time_indices::Vector{Int}=collect(axes(residuals, 2)),
     leave_one_out::Bool=false,
 )
     method in ("residual_gwr", "mixed_gwr", "mgwr") ||
@@ -629,7 +630,9 @@ function dynamic_covariate_predict(
             global_target = target_design.global_design
             target_lonlat = context.target_lonlat
         end
-        adjusted = min.(bandwidths, count(valid) - 1)
+        # Clamping to the valid station count only makes sense for an adaptive neighbor count; a
+        # fixed-km bandwidth must be applied as given.
+        adjusted = adaptive ? min.(bandwidths, count(valid) - 1) : bandwidths
         response = reshape(y[valid], :, 1)
         values_matrix, ok_vector = if leave_one_out && !isempty(global_train)
             # The held station is excluded analytically from the global coefficient;
@@ -643,8 +646,8 @@ function dynamic_covariate_predict(
                 local_prediction, ok = _multiscale_predict_damped(
                     local_train, zeros(Float64, count(valid), 0), partial,
                     train_lonlat, local_train, zeros(Float64, count(valid), 0),
-                    train_lonlat, adjusted, context.config;
-                    exclude_self=true,
+                    train_lonlat, adjusted, kernel, context.config;
+                    adaptive, exclude_self=true,
                 )
                 local_prediction .+= global_loo
                 local_prediction, ok
@@ -652,7 +655,7 @@ function dynamic_covariate_predict(
                 local_prediction, ok = mixed_gwr_predict(
                     only(local_train), zeros(Float64, count(valid), 0), partial,
                     train_lonlat, only(local_train), zeros(Float64, count(valid), 0),
-                    train_lonlat, only(adjusted); ridge=context.config.ridge,
+                    train_lonlat, only(adjusted), kernel; adaptive, ridge=context.config.ridge,
                     tolerance=context.config.tolerance,
                     max_iterations=context.config.max_iterations,
                     exclude_self=true,
@@ -663,14 +666,14 @@ function dynamic_covariate_predict(
         elseif method == "mgwr"
             _multiscale_predict_damped(
                 local_train, global_train, response, train_lonlat,
-                local_target, global_target, target_lonlat, adjusted, context.config;
-                exclude_self=leave_one_out,
+                local_target, global_target, target_lonlat, adjusted, kernel, context.config;
+                adaptive, exclude_self=leave_one_out,
             )
         else
             mixed_gwr_predict(
                 only(local_train), global_train, response, train_lonlat,
-                only(local_target), global_target, target_lonlat, only(adjusted);
-                ridge=context.config.ridge, tolerance=context.config.tolerance,
+                only(local_target), global_target, target_lonlat, only(adjusted), kernel;
+                adaptive, ridge=context.config.ridge, tolerance=context.config.tolerance,
                 max_iterations=context.config.max_iterations,
                 exclude_self=leave_one_out,
             )

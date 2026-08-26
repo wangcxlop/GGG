@@ -71,6 +71,48 @@ end
     )
 end
 
+@testset "mixed_gwr and mgwr sweep every configured kernel" begin
+    # `gwr`/`residual_gwr` have always swept every configured kernel; `mixed_gwr`/`mgwr` used to
+    # be hardcoded to BISQUARE regardless of `cfg.mger.kernels`. This is the parity guard: with
+    # more than one kernel configured, both methods' scans must actually vary kernel, not just
+    # report it.
+    rng = MersenneTwister(2027)
+    n = 30
+    train_lonlat = hcat(110.0 .+ rand(rng, n), 30.0 .+ rand(rng, n))
+    n_time = 6
+    y_sat = 5.0 .+ 0.3 .* randn(rng, n, n_time)
+    y_obs = y_sat .+ 0.2 .* randn(rng, n, n_time)
+
+    mger = MGERConfig(
+        station_meta_path="unused.csv", obs_hourly_wide_path="unused.csv",
+        sat_paths=Dict("FY4B" => "unused.csv"), outdir="unused",
+        kernels=[GAUSSIAN, BISQUARE], bw_adaptive=[8.0, 16.0], bw_fixed_km=[20.0, 50.0],
+    )
+    cfg = InterpolationBenchmarkConfig(mger=mger, mgwr_max_tuning_iterations=3)
+
+    mixed_rows = NamedTuple[]
+    mixed_selected = select_interpolation_parameter!(
+        mixed_rows, cfg, "mixed_gwr", "residual", :balanced_spatial, "TEST", 1,
+        train_lonlat, y_obs, y_sat,
+    )
+    @test length(unique(row.kernel for row in mixed_rows)) > 1
+    @test length(unique(row.adaptive for row in mixed_rows)) > 1
+    @test mixed_selected.kernel in cfg.mger.kernels
+    @test mixed_selected.adaptive isa Bool
+    @test count(row.selected for row in mixed_rows) == 1
+
+    mgwr_rows = NamedTuple[]
+    mgwr_selected = select_interpolation_parameter!(
+        mgwr_rows, cfg, "mgwr", "residual", :balanced_spatial, "TEST", 1,
+        train_lonlat, y_obs, y_sat,
+    )
+    @test length(unique(row.kernel for row in mgwr_rows)) > 1
+    @test length(unique(row.adaptive for row in mgwr_rows)) > 1
+    @test mgwr_selected.kernel in cfg.mger.kernels
+    @test mgwr_selected.adaptive isa Bool
+    @test count(row.selected for row in mgwr_rows) == length(mgwr_selected.bandwidths)
+end
+
 @testset "Balanced spatial folds" begin
     ids = string.(1:23)
     lonlat = hcat(
@@ -406,15 +448,16 @@ end
     y_sat_train = f.y_sat[train_idx, :]
     times = collect(1:size(residuals, 2))
 
+    bisquare = _kernel_function(BISQUARE)
     unshrunk = _joint_candidate_metrics(
         context, residuals, y_obs_train, y_sat_train, "residual_gwr",
-        [8], times, nothing, nothing, [1.0],
+        [8.0], bisquare, times, nothing, nothing, [1.0],
     )
     @test unshrunk.shrink == 1.0
 
     ladder = _joint_candidate_metrics(
         context, residuals, y_obs_train, y_sat_train, "residual_gwr",
-        [8], times, nothing, nothing, [0.25, 0.5, 0.75, 1.0],
+        [8.0], bisquare, times, nothing, nothing, [0.25, 0.5, 0.75, 1.0],
     )
     # The ladder always contains 1.0, so it can never score worse than the unshrunk fit.
     @test ladder.RMSE <= unshrunk.RMSE + 1e-12
@@ -428,19 +471,190 @@ end
     inflated_obs = y_sat_train .+ 2.0 .* (y_obs_train .- y_sat_train)
     inflated = _joint_candidate_metrics(
         context, 2.0 .* residuals, inflated_obs, y_sat_train, "residual_gwr",
-        [8], times, nothing, nothing, [0.25, 0.5, 0.75, 1.0],
+        [8.0], bisquare, times, nothing, nothing, [0.25, 0.5, 0.75, 1.0],
     )
     over_corrected = _joint_candidate_metrics(
         context, 2.0 .* residuals, y_obs_train, y_sat_train, "residual_gwr",
-        [8], times, nothing, nothing, [0.25, 0.5, 0.75, 1.0],
+        [8.0], bisquare, times, nothing, nothing, [0.25, 0.5, 0.75, 1.0],
     )
     @test inflated.shrink >= over_corrected.shrink
     @test over_corrected.shrink < 1.0
 
     @test_throws ArgumentError _joint_candidate_metrics(
         context, residuals, y_obs_train, y_sat_train, "residual_gwr",
-        [8], times, nothing, nothing, Float64[],
+        [8.0], bisquare, times, nothing, nothing, Float64[],
     )
+end
+
+@testset "DEM and joint mixed_gwr/mgwr sweep every kernel and bandwidth family" begin
+    # Mirrors the baseline-path parity test above: `select_dem_parameter!`/
+    # `select_joint_parameter!` used to fix `mixed_gwr`/`mgwr` at kernel=BISQUARE and, even after
+    # the kernel sweep was added, only ever searched the adaptive (neighbor-count) bandwidth
+    # family. With more than one kernel and a non-empty fixed-km grid configured, both dimensions
+    # must actually vary, matching the baseline path's `gwr`.
+    mger = MGERConfig(
+        station_meta_path="unused.csv", obs_hourly_wide_path="unused.csv",
+        sat_paths=Dict("FY4B" => "unused.csv"), outdir="unused",
+        kernels=[GAUSSIAN, BISQUARE], bw_adaptive=[8.0, 16.0], bw_fixed_km=[20.0, 50.0],
+    )
+
+    @testset "DEM path" begin
+        rng = MersenneTwister(2029)
+        n = 40
+        lonlat = hcat(collect(range(109.5, 112.0; length=n)), 30.0 .+ rand(rng, n))
+        elevation = collect(range(100.0, 1800.0; length=n))
+        aspect = rand(rng, n) .* 360
+        terrain = DataFrame(
+            station_id=string.(1:n), elevation_m=elevation, slope_deg=5.0 .+ rand(rng, n) .* 20,
+            aspect_deg=aspect, aspect_sin=sind.(aspect), aspect_cos=cosd.(aspect),
+        )
+        train_idx, val_idx = 1:32, 33:40
+        role_map = Dict("elevation" => "local")
+        response = 0.002 .* elevation[train_idx] .+ 0.01 .* randn(rng, length(train_idx))
+        selection = (; role_map, response, selection_status="selected")
+        dem = DEMTerrainExperiment.DEMExperimentConfig(
+            outdir="unused", bandwidth_candidates=[16, 24],
+        )
+        dem_context = build_dem_fold_context(
+            selection, terrain[train_idx, :], terrain[val_idx, :],
+            lonlat[train_idx, :], lonlat[val_idx, :], dem,
+        )
+        cfg = InterpolationBenchmarkConfig(mger=mger, terrain_path="unused", dem=dem)
+
+        for method in ("mixed_gwr", "mgwr")
+            scan_rows = NamedTuple[]
+            selected = select_dem_parameter!(
+                scan_rows, cfg, method, "residual", :balanced_spatial, "TEST", 1, dem_context,
+            )
+            @test length(unique(row.kernel for row in scan_rows)) > 1
+            @test length(unique(row.adaptive for row in scan_rows)) > 1
+            @test selected.kernel in cfg.mger.kernels
+            @test selected.adaptive isa Bool
+        end
+    end
+
+    @testset "Joint-covariate path" begin
+        f = synthetic_joint_benchmark_fixture()
+        train_idx = collect(1:22)
+        val_idx = collect(23:30)
+        roles = Dict("elevation" => "local")
+        joint_context = JointCovariateModels.build_joint_fold_context(
+            "FY4B", roles, train_idx, val_idx, f.lonlat, f.y_obs, f.y_sat,
+            f.terrain, f.era5, nothing, f.joint_cfg,
+        )
+        cfg = InterpolationBenchmarkConfig(
+            mger=mger, joint_covariates=f.joint_cfg, mgwr_max_tuning_iterations=3,
+        )
+        y_obs_train = f.y_obs[train_idx, :]
+        y_sat_train = f.y_sat[train_idx, :]
+
+        for method in ("mixed_gwr", "mgwr")
+            scan_rows = NamedTuple[]
+            selected = select_joint_parameter!(
+                scan_rows, cfg, method, "residual", :balanced_spatial, "FY4B", 1,
+                joint_context, y_obs_train, y_sat_train,
+            )
+            @test length(unique(row.kernel for row in scan_rows)) > 1
+            @test length(unique(row.adaptive for row in scan_rows)) > 1
+            @test selected.kernel in cfg.mger.kernels
+            @test selected.adaptive isa Bool
+        end
+    end
+end
+
+@testset "Explicit global bandwidth candidate" begin
+    # The whole design rests on `bw = Inf` meaning "unweighted OLS over the training stations"
+    # for every kernel, so that global can ride the existing bandwidth plumbing instead of
+    # needing its own code path. Pin that rather than leaving it implicit in `kernel.jl`.
+    @testset "bw = Inf gives every kernel a flat weight of one" begin
+        distances = [0.0 5.0; 12.5 0.0; 40.0 120.0]
+        for kernel in (GAUSSIAN, EXPONENTIAL, BISQUARE, TRICUBE, BOXCAR)
+            @test gw_weight(distances, Inf; kernel=kernel, adaptive=false) == ones(3, 2)
+        end
+    end
+
+    @testset "global still excludes the held-out station under exclude_self" begin
+        # `_gwr_predict` drops self by setting its distance to Inf, which is enough to keep it
+        # out of the adaptive neighbour ranking but NOT enough to zero its weight at bw = Inf:
+        # `kernel(Inf, Inf)` is NaN for four kernels and 1.0 for boxcar. Boxcar is the one that
+        # fails silently - it would hand each station its own value back.
+        rng = MersenneTwister(4711)
+        n = 12
+        lonlat = hcat(110.0 .+ rand(rng, n), 30.0 .+ rand(rng, n))
+        values = reshape(collect(1.0:n), n, 1)
+        center = (mean(lonlat[:, 1]), mean(lonlat[:, 2]))
+        X = build_X_intercept_centered(lonlat; center=center)
+        # At bw = Inf every weight is one, so leave-one-out GWR is exactly OLS refitted on the
+        # other n-1 stations. That is the invariant a leaked self-weight breaks.
+        expected = [only(X[i:i, :] * (X[setdiff(1:n, i), :] \ values[setdiff(1:n, i), 1]))
+                    for i in 1:n]
+        for kernel in (GAUSSIAN, EXPONENTIAL, BISQUARE, TRICUBE, BOXCAR)
+            loo = _gwr_predict(
+                lonlat, values, lonlat; kernel=kernel, adaptive=false, bw=Inf, exclude_self=true,
+            )
+            @test all(isfinite, loo)
+            @test vec(loo) ≈ expected
+        end
+    end
+
+    mger = MGERConfig(
+        station_meta_path="unused.csv", obs_hourly_wide_path="unused.csv",
+        sat_paths=Dict("FY4B" => "unused.csv"), outdir="unused",
+        kernels=[GAUSSIAN, BISQUARE], bw_adaptive=[8.0, 16.0], bw_fixed_km=[20.0, 50.0],
+    )
+
+    @testset "_bandwidth_families appends global only when enabled" begin
+        with_global = InterpolationBenchmarkConfig(mger=mger)
+        without_global = InterpolationBenchmarkConfig(mger=mger, bw_include_global=false)
+        @test with_global.bw_include_global
+
+        (adaptive_on, fixed_on) = _bandwidth_families(with_global, mger.bw_adaptive)
+        @test adaptive_on == (true, [8.0, 16.0])
+        @test fixed_on == (false, [20.0, 50.0, Inf])
+
+        (_, fixed_off) = _bandwidth_families(without_global, mger.bw_adaptive)
+        @test fixed_off == (false, [20.0, 50.0])
+
+        # The adaptive family is passed through untouched: the joint path has already filtered
+        # its own grid by the time it calls this.
+        (adaptive_filtered, _) = _bandwidth_families(with_global, [12])
+        @test adaptive_filtered == (true, [12.0])
+    end
+
+    @testset "adaptive candidates are capped by the inner selection split" begin
+        # 30 training stations split into three inner groups of ten: a candidate is only ever
+        # fitted on 20, so anything above that would fall through gw_weight's `dn > 1` branch
+        # to a near-global fit during scoring and then refit as a genuine 24-neighbour model.
+        groups = [collect(1:10), collect(11:20), collect(21:30)]
+        @test _selection_train_minimum(30, groups) == 20
+        @test _usable_adaptive_candidates([8.0, 16.0, 20.0, 24.0], 30, groups) ==
+            [8.0, 16.0, 20.0]
+        # `:loocv` geometry holds out a single station instead of a whole group.
+        @test _selection_train_minimum(30, nothing) == 29
+        @test _usable_adaptive_candidates([8.0, 24.0], 30, nothing) == [8.0, 24.0]
+    end
+
+    @testset "the joint scan actually offers global" begin
+        f = synthetic_joint_benchmark_fixture()
+        train_idx = collect(1:22)
+        val_idx = collect(23:30)
+        joint_context = JointCovariateModels.build_joint_fold_context(
+            "FY4B", Dict("elevation" => "local"), train_idx, val_idx,
+            f.lonlat, f.y_obs, f.y_sat, f.terrain, f.era5, nothing, f.joint_cfg,
+        )
+        cfg = InterpolationBenchmarkConfig(
+            mger=mger, joint_covariates=f.joint_cfg, mgwr_max_tuning_iterations=3,
+        )
+        scan_rows = NamedTuple[]
+        select_joint_parameter!(
+            scan_rows, cfg, "gwr", "residual", :balanced_spatial, "FY4B", 1,
+            joint_context, f.y_obs[train_idx, :], f.y_sat[train_idx, :],
+        )
+        global_rows = filter(row -> row.bw == Inf, scan_rows)
+        @test !isempty(global_rows)
+        @test all(row -> row.adaptive === false, global_rows)
+        @test any(row -> row.status == "success", global_rows)
+    end
 end
 
 @testset "Joint covariate config requires exactly one selection mode" begin

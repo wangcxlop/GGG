@@ -253,15 +253,20 @@ function verify_joint(cells=JOINT_CELLS)
             :stratified)
 
         for bandwidth in candidates
+            # This script predates kernel selection; it keeps the historical bisquare-only
+            # behaviour explicitly, since it is measuring the tuning-time-weighting objective,
+            # not the kernel sweep.
+            bandwidth_f = Float64(bandwidth)
+            kernel_fn = _kernel_function(BISQUARE)
             # The reported metric: held-out stations, every hour.
-            held_out, _ = dynamic_covariate_predict(context, residuals, method, [bandwidth])
+            held_out, _ = dynamic_covariate_predict(context, residuals, method, [bandwidth_f], kernel_fn)
             reported = _candidate_metrics(y_obs_val, y_sat_val,
                 max.(y_sat_val .+ held_out, 0.0))
             # What each tuning objective sees.
             legacy = _joint_candidate_metrics(context, residuals, y_obs_train, y_sat_train,
-                method, [bandwidth], legacy_idx)
+                method, [bandwidth_f], kernel_fn, legacy_idx)
             fixed = _joint_candidate_metrics(context, residuals, y_obs_train, y_sat_train,
-                method, [bandwidth], fixed_idx, fixed_weights)
+                method, [bandwidth_f], kernel_fn, fixed_idx, fixed_weights)
             push!(rows, (; product, fold, method, bandwidth,
                 n_covariates=length(role_map),
                 rmse_reported=reported.RMSE, coverage_reported=reported.coverage,

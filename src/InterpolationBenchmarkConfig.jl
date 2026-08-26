@@ -81,6 +81,11 @@ Base.@kwdef struct InterpolationBenchmarkConfig
     # outer fold geometry. Ignored when `tuning_geometry === :loocv`.
     tuning_inner_k::Int = 0
     mgwr_max_tuning_iterations::Int = 5
+    # Adds an explicit global (unweighted) candidate to the GWR family's bandwidth search, so
+    # "this coefficient wants to be global" is a value the grid can express rather than
+    # something that only happens by accident when an adaptive bandwidth overruns the training
+    # set. See `_bandwidth_families`. `false` reproduces the historical purely-local search.
+    bw_include_global::Bool = true
     # Scale applied to the joint dynamic models' residual correction before it is added back to
     # the satellite field. GWR is unbiased and never shrinks, so the correction it produces is
     # the right shape at the wrong magnitude: `satellite_offset.csv` measures the optimal rescale
@@ -106,6 +111,45 @@ end
 """Fold seeds for the run: one repeat per seed, defaulting to a single repeat on `cfg.seed`."""
 benchmark_seeds(cfg::InterpolationBenchmarkConfig) =
     isempty(cfg.seeds) ? [cfg.seed] : cfg.seeds
+
+"""
+Bandwidth families every GWR-family method searches: adaptive neighbour counts, fixed km, and -
+when `cfg.bw_include_global` is set - an explicit global candidate. `adaptive_candidates` is
+passed in because the joint path filters its own grid against the training size first.
+
+Global is `(adaptive=false, bw=Inf)`. Every kernel in `GWR_KERNELS` returns exactly 1.0 at
+`bw=Inf` (see `src/kernel.jl`), so the fit is unweighted OLS over the training stations.
+Expressing it as a bandwidth rather than as its own code path means nothing downstream -
+`predict_selected`, the joint back-fit, the `_scan_row` schema - needs to know about it, and
+`gw_weight`'s `bw > n` branch is never reached during selection or at the final fit.
+
+Routing every method through one helper is also what keeps the family comparable: direct `gwr`
+used to search `cfg.mger.bw_adaptive` while the joint models searched a wider grid of their own,
+so a direct-vs-residual comparison was not at equal search budget. The legacy `--legacy-dem`
+path (`InterpolationBenchmarkDEM.jl`) is the one exception and keeps its own grid, because it is
+mutually exclusive with the joint path and is not part of the reported comparison.
+"""
+_bandwidth_families(cfg::InterpolationBenchmarkConfig, adaptive_candidates) = (
+    (true, collect(Float64, adaptive_candidates)),
+    (false, cfg.bw_include_global ? vcat(cfg.mger.bw_fixed_km, Inf) : cfg.mger.bw_fixed_km),
+)
+
+"""
+Smallest training-set size a candidate is actually fitted on during selection.
+
+Candidates are scored on the inner selection split, which holds out a whole spatial group, so
+the fit behind a scan row sees fewer stations than the outer training set the winner is later
+refitted on. An adaptive bandwidth above this count falls through `gw_weight`'s `dn > 1` branch
+to a near-global fit, which would make the scanned model and the refitted model different
+things under the same `bw`. `:loocv` geometry holds out one station instead of a group.
+"""
+_selection_train_minimum(n_train::Int, selection_groups) =
+    selection_groups === nothing ? n_train - 1 :
+        n_train - maximum(length(group) for group in selection_groups)
+
+"""Adaptive candidates that both the inner selection fit and the final fit can honour."""
+_usable_adaptive_candidates(candidates, n_train::Int, selection_groups) =
+    filter(<=(_selection_train_minimum(n_train, selection_groups)), candidates)
 
 function _validate_benchmark_config(cfg::InterpolationBenchmarkConfig, n_station::Int)
     2 <= cfg.k <= n_station || throw(ArgumentError("k must be between 2 and station count"))

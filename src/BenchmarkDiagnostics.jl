@@ -537,7 +537,10 @@ function bandwidth_saturation_table(scan::DataFrame)
     rows = NamedTuple[]
     keys_of_interest = [:scheme, :product, :fold, :mode, :method, :group, :kernel, :adaptive]
     for subgroup in groupby(unique(scan), keys_of_interest)
-        candidates = filter(row -> row.status == "success" && isfinite(row.bw), subgroup)
+        # `!isnan` rather than `isfinite`: the filter's job is excluding the `NaN` bw of the
+        # idw/adw/tps rows, and the GWR family's explicit global candidate is `bw = Inf`, which
+        # sorts last and so still reads as "chose the widest candidate offered".
+        candidates = filter(row -> row.status == "success" && !isnan(row.bw), subgroup)
         nrow(candidates) < 2 && continue
         selected = filter(row -> row.selected === true, candidates)
         nrow(selected) == 1 || continue
@@ -554,6 +557,12 @@ function bandwidth_saturation_table(scan::DataFrame)
         # Monotone toward the chosen endpoint means the search was clipped, not resolved.
         increasing = all(diff(errors) .> 0)
         decreasing = all(diff(errors) .< 0)
+        # Landing on the widest candidate only counts as clipping if a wider one could exist.
+        # The GWR family's top candidate is the explicit global fit (`bw = Inf`), which is the
+        # end of the bandwidth continuum, not the end of an arbitrary grid - selecting it is a
+        # resolved answer ("this coefficient wants to be global"), so it must not be reported
+        # as a grid that needs extending.
+        extensible_max = isfinite(last(widths))
         push!(rows, (;
             scheme=subgroup[1, :scheme], product=subgroup[1, :product],
             fold=subgroup[1, :fold], mode=subgroup[1, :mode],
@@ -562,7 +571,7 @@ function bandwidth_saturation_table(scan::DataFrame)
             n_candidates=nrow(candidates), bw_min=first(widths), bw_max=last(widths),
             bw_selected=chosen, at_grid_min=at_min, at_grid_max=at_max,
             monotone_increasing=increasing, monotone_decreasing=decreasing,
-            clipped_by_grid=(at_min && increasing) || (at_max && decreasing),
+            clipped_by_grid=(at_min && increasing) || (at_max && decreasing && extensible_max),
             RMSE_selected=selected.RMSE[1],
             RMSE_at_min=first(errors), RMSE_at_max=last(errors),
         ))

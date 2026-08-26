@@ -181,54 +181,134 @@ function select_dem_parameter!(
     response = dem_context.aggregate[valid]
     n = length(response)
 
+    # `cfg.mger.bw_fixed_km` is reused as the fixed-km family here, exactly like `cfg.mger.kernels`
+    # is already reused for the kernel sweep — `DEMExperimentConfig` needs no fixed-km field of
+    # its own; its existing `bandwidth_candidates` becomes the adaptive family. A kernel/family
+    # combination whose search fails outright is skipped rather than aborting the whole
+    # selection, so one bad combination can't take down the others.
     if method in ("gwr", "mixed_gwr")
         designs = method == "gwr" ? dem_context.all_local : dem_context.mixed
         local_design = designs.mixed_local_train[valid, :]
         global_design = method == "gwr" ? zeros(Float64, n, 0) :
             designs.global_train[valid, :]
         train_lonlat = dem_context.train_lonlat[valid, :]
-        bandwidth, scan = select_mixed_bandwidth(
-            local_design, global_design, response, train_lonlat,
-            dem_context.bandwidth_candidates; ridge=dem.ridge,
-            tolerance=dem.tolerance, max_iterations=dem.max_iterations,
+        bandwidth_families = (
+            (true, Float64.(dem_context.bandwidth_candidates)), (false, cfg.mger.bw_fixed_km),
         )
-        for row in eachrow(scan)
-            converged = Bool(row.converged)
-            push!(scan_rows, _scan_row(;
-                scheme, product, fold, mode, method,
-                group=method == "gwr" ? "all_dem_local" : "shared_local",
-                kernel=BISQUARE, adaptive=true, bw=row.bandwidth, n,
-                coverage=1.0, RMSE=row.RMSE, MAE=NaN,
-                status=row.status == "success" && converged ? "success" : "failed",
-                error=converged ? String(row.error) : "backfitting did not converge",
-                selected=row.bandwidth == bandwidth,
-            ))
+        group = method == "gwr" ? "all_dem_local" : "shared_local"
+        first_row = length(scan_rows) + 1
+        best_kernel = nothing
+        best_adaptive = true
+        best_bandwidth = 0.0
+        best_rmse = Inf
+        for kernel in cfg.mger.kernels
+            for (adaptive, candidates) in bandwidth_families
+                isempty(candidates) && continue
+                try
+                    bandwidth, scan = select_mixed_bandwidth(
+                        local_design, global_design, response, train_lonlat,
+                        candidates, _kernel_function(kernel); adaptive, ridge=dem.ridge,
+                        tolerance=dem.tolerance, max_iterations=dem.max_iterations,
+                    )
+                    for row in eachrow(scan)
+                        converged = Bool(row.converged)
+                        push!(scan_rows, _scan_row(;
+                            scheme, product, fold, mode, method, group,
+                            kernel, adaptive, bw=row.bandwidth, n,
+                            coverage=1.0, RMSE=row.RMSE, MAE=NaN,
+                            status=row.status == "success" && converged ? "success" : "failed",
+                            error=converged ? String(row.error) : "backfitting did not converge",
+                            selected=false,
+                        ))
+                    end
+                    row_rmse = only(scan.RMSE[scan.bandwidth .== bandwidth])
+                    if row_rmse < best_rmse
+                        best_kernel, best_adaptive, best_bandwidth, best_rmse =
+                            kernel, adaptive, bandwidth, row_rmse
+                    end
+                catch error
+                    error isa ArgumentError || rethrow()
+                end
+            end
         end
-        return (; bw=Float64(bandwidth), dem_model=true)
+        best_kernel === nothing &&
+            throw(ArgumentError("all DEM Mixed GWR bandwidth candidates failed for every kernel"))
+        for index in first_row:length(scan_rows)
+            row = scan_rows[index]
+            if row.kernel == best_kernel && row.adaptive == best_adaptive && row.bw == best_bandwidth
+                scan_rows[index] = merge(row, (; selected=true))
+            end
+        end
+        return (; bw=best_bandwidth, kernel=best_kernel, adaptive=best_adaptive, dem_model=true)
     elseif method == "mgwr"
         designs = dem_context.mixed
         local_designs = [X[valid, :] for X in designs.multiscale_train]
+        if isempty(local_designs)
+            return (; bandwidths=Float64[], kernel=first(cfg.mger.kernels), adaptive=true,
+                dem_model=true)
+        end
         global_design = designs.global_train[valid, :]
         train_lonlat = dem_context.train_lonlat[valid, :]
-        bandwidths, scan, converged = select_multiscale_bandwidths(
-            local_designs, global_design, response, train_lonlat,
-            dem_context.bandwidth_candidates; ridge=dem.ridge,
-            tolerance=dem.tolerance, max_iterations=dem.max_iterations,
+        bandwidth_families = (
+            (true, Float64.(dem_context.bandwidth_candidates)), (false, cfg.mger.bw_fixed_km),
         )
-        final_iteration = nrow(scan) == 0 ? 0 : maximum(scan.iteration)
-        for row in eachrow(scan)
-            group_name = designs.local_group_names[row.group_index]
-            selected = converged && row.iteration == final_iteration &&
-                row.bandwidth == bandwidths[row.group_index] && row.status == "success"
-            push!(scan_rows, _scan_row(;
-                scheme, product, fold, mode, method, group=group_name,
-                iteration=row.iteration, kernel=BISQUARE, adaptive=true,
-                bw=row.bandwidth, n, coverage=1.0, RMSE=row.RMSE, MAE=NaN,
-                status=String(row.status), error=String(row.error), selected,
-            ))
+        last_group = length(local_designs)
+        first_row = length(scan_rows) + 1
+        best_kernel = nothing
+        best_adaptive = true
+        best_bandwidths = Float64[]
+        best_final_iteration = 0
+        best_rmse = Inf
+        for kernel in cfg.mger.kernels
+            for (adaptive, candidates) in bandwidth_families
+                isempty(candidates) && continue
+                try
+                    bandwidths, scan, converged = select_multiscale_bandwidths(
+                        local_designs, global_design, response, train_lonlat,
+                        candidates, _kernel_function(kernel); adaptive, ridge=dem.ridge,
+                        tolerance=dem.tolerance, max_iterations=dem.max_iterations,
+                    )
+                    final_iteration = nrow(scan) == 0 ? 0 : maximum(scan.iteration)
+                    for row in eachrow(scan)
+                        group_name = designs.local_group_names[row.group_index]
+                        push!(scan_rows, _scan_row(;
+                            scheme, product, fold, mode, method, group=group_name,
+                            iteration=row.iteration, kernel, adaptive,
+                            bw=row.bandwidth, n, coverage=1.0, RMSE=row.RMSE, MAE=NaN,
+                            status=String(row.status), error=String(row.error), selected=false,
+                        ))
+                    end
+                    converged || continue
+                    # Compare combinations by the RMSE of the last group's row in the final
+                    # (converged) iteration — same convention as the joint-covariate path
+                    # (`select_joint_parameter!`), since the descent never computes one joint RMSE.
+                    final_row = only(filter(row -> row.iteration == final_iteration &&
+                        row.group_index == last_group && row.bandwidth == bandwidths[last_group] &&
+                        row.status == "success", eachrow(scan)))
+                    if final_row.RMSE < best_rmse
+                        best_kernel, best_adaptive, best_bandwidths, best_final_iteration, best_rmse =
+                            kernel, adaptive, bandwidths, final_iteration, final_row.RMSE
+                    end
+                catch error
+                    error isa ArgumentError || rethrow()
+                end
+            end
         end
-        converged || throw(ArgumentError("MGWR bandwidth backfitting did not converge"))
-        return (; bandwidths, dem_model=true)
+        best_kernel === nothing && throw(ArgumentError(
+            "MGWR bandwidth backfitting did not converge for any kernel/bandwidth-family combination",
+        ))
+        for index in first_row:length(scan_rows)
+            row = scan_rows[index]
+            group_index = findfirst(==(row.group), designs.local_group_names)
+            if row.kernel == best_kernel && row.adaptive == best_adaptive &&
+                row.iteration == best_final_iteration &&
+                group_index !== nothing && row.bw == best_bandwidths[group_index] &&
+                row.status == "success"
+                scan_rows[index] = merge(row, (; selected=true))
+            end
+        end
+        return (; bandwidths=best_bandwidths, kernel=best_kernel, adaptive=best_adaptive,
+            dem_model=true)
     end
     throw(ArgumentError("unsupported DEM residual method: $method"))
 end
@@ -282,10 +362,16 @@ function _dem_bandwidth_table(scans::DataFrame)
         row.mode == "residual" || continue
         row.method in ("gwr", "mixed_gwr", "mgwr") || continue
         row.selected || continue
+        adaptive = Bool(row.adaptive)
         push!(rows, (;
             scheme=String(row.scheme), product=String(row.product), fold=Int(row.fold),
             method=row.method == "gwr" ? "residual_gwr" : String(row.method),
-            variable_group=String(row.group), bandwidth_neighbors=Int(round(row.bw)),
+            variable_group=String(row.group), kernel=Int(row.kernel), adaptive,
+            # `bandwidth_neighbors` only means something for the adaptive family; a fixed-km
+            # winner is reported in full precision under `bandwidth` instead, since rounding it
+            # to an "Int neighbor count" would be meaningless.
+            bandwidth_neighbors=adaptive ? Int(round(row.bw)) : missing,
+            bandwidth=Float64(row.bw),
             iteration=Int(row.iteration), selection_RMSE=Float64(row.RMSE),
         ))
     end

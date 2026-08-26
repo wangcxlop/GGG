@@ -118,8 +118,9 @@ end
     Xglobal = reshape(elevation_z, :, 1)
     y = 1.5 .* elevation_z .+ 0.3 .* longitude_z
     Y = reshape(y, :, 1)
+    bisquare = DEMTerrainExperiment._bisquare_kernel
     mixed_prediction, mixed_converged = mixed_gwr_predict(
-        Xlocal, Xglobal, Y, lonlat, Xlocal, Xglobal, lonlat, 24;
+        Xlocal, Xglobal, Y, lonlat, Xlocal, Xglobal, lonlat, 24.0, bisquare;
         max_iterations=100,
     )
     @test all(mixed_converged)
@@ -131,7 +132,7 @@ end
     Y_missing[1, 2] = NaN
     loo_prediction, loo_converged = mixed_gwr_predict(
         Xlocal, empty_global, Y_missing, lonlat,
-        Xlocal, empty_global, lonlat, 24; exclude_self=true,
+        Xlocal, empty_global, lonlat, 24.0, bisquare; exclude_self=true,
     )
     @test all(loo_converged)
     @test all(isfinite, loo_prediction[:, 1])
@@ -140,7 +141,7 @@ end
 
     manual_prediction, manual_converged = mixed_gwr_predict(
         Xlocal[2:end, :], zeros(Float64, n - 1, 0), Y[2:end, :], lonlat[2:end, :],
-        Xlocal[1:1, :], zeros(Float64, 1, 0), lonlat[1:1, :], 24,
+        Xlocal[1:1, :], zeros(Float64, 1, 0), lonlat[1:1, :], 24.0, bisquare,
     )
     @test all(manual_converged)
     @test loo_prediction[1, 1] ≈ manual_prediction[1, 1]
@@ -148,7 +149,7 @@ end
     local_groups = Matrix{Float64}[ones(n, 1), spatial_z[:, 1:1], spatial_z[:, 2:2]]
     multiscale_prediction, multiscale_converged = multiscale_gwr_predict(
         local_groups, Xglobal, Y, lonlat, local_groups, Xglobal, lonlat,
-        [24, 24, 24]; max_iterations=200,
+        [24.0, 24.0, 24.0], bisquare; max_iterations=200,
     )
     @test all(multiscale_converged)
     @test all(isfinite, multiscale_prediction)
@@ -158,7 +159,7 @@ end
     multiscale_missing[1, 2] = NaN
     multiscale_loo, multiscale_loo_converged = multiscale_gwr_predict(
         local_groups, empty_global, multiscale_missing, lonlat,
-        local_groups, empty_global, lonlat, [24, 24, 24];
+        local_groups, empty_global, lonlat, [24.0, 24.0, 24.0], bisquare;
         exclude_self=true,
     )
     @test all(multiscale_loo_converged)
@@ -171,16 +172,16 @@ end
     changed_Y[1] += 1000
     single_loo, _ = multiscale_gwr_predict(
         single_group, empty_global, Y, lonlat,
-        single_group, empty_global, lonlat, [24]; exclude_self=true,
+        single_group, empty_global, lonlat, [24.0], bisquare; exclude_self=true,
     )
     changed_loo, _ = multiscale_gwr_predict(
         single_group, empty_global, changed_Y, lonlat,
-        single_group, empty_global, lonlat, [24]; exclude_self=true,
+        single_group, empty_global, lonlat, [24.0], bisquare; exclude_self=true,
     )
     @test single_loo[1] ≈ changed_loo[1]
     @test_throws ArgumentError multiscale_gwr_predict(
         local_groups, empty_global, Y, lonlat,
-        local_groups, empty_global, reverse(lonlat; dims=1), [24, 24, 24];
+        local_groups, empty_global, reverse(lonlat; dims=1), [24.0, 24.0, 24.0], bisquare;
         exclude_self=true,
     )
 
@@ -201,14 +202,14 @@ end
     ]
     recovered_bandwidths, _, bandwidth_converged = select_multiscale_bandwidths(
         scale_groups, zeros(scale_n, 0), scale_response, scale_lonlat,
-        [12, 24, 48, 80]; max_iterations=100,
+        [12.0, 24.0, 48.0, 80.0], bisquare; max_iterations=100,
     )
     @test bandwidth_converged
     @test recovered_bandwidths[2] > recovered_bandwidths[3]
 
     failed_prediction, failed_convergence = multiscale_gwr_predict(
         local_groups, Xglobal, Y, lonlat, local_groups, Xglobal, lonlat,
-        [24, 24, 24]; max_iterations=0,
+        [24.0, 24.0, 24.0], bisquare; max_iterations=0,
     )
     @test !all(failed_convergence)
     @test all(isnan, failed_prediction)
@@ -263,6 +264,7 @@ end
 end
 
 @testset "local hat operator matches weighted least squares" begin
+    bisquare = DEMTerrainExperiment._bisquare_kernel
     rng = MersenneTwister(2026)
     n, m = 40, 11
     lonlat = hcat(109.0 .+ 4 .* rand(rng, n), 30.0 .+ 4 .* rand(rng, n))
@@ -275,14 +277,14 @@ end
         Xtarget = hcat(ones(m), randn(rng, m, p - 1))
         for bandwidth in (10, 20, n)
             square = DEMTerrainExperiment._local_hat(
-                Xtrain, Xtrain, train_distances, bandwidth,
+                Xtrain, Xtrain, train_distances, Float64(bandwidth), bisquare,
             )
             @test square * y ≈ reference_local_prediction(
                 Xtrain, Xtrain, train_distances, y, bandwidth,
             )
 
             held_out = DEMTerrainExperiment._local_hat(
-                Xtrain, Xtrain, train_distances, bandwidth; exclude_self=true,
+                Xtrain, Xtrain, train_distances, Float64(bandwidth), bisquare; exclude_self=true,
             )
             @test all(iszero, diag(held_out))
             @test held_out * y ≈ reference_local_prediction(
@@ -290,7 +292,7 @@ end
             )
 
             rectangular = DEMTerrainExperiment._local_hat(
-                Xtrain, Xtarget, target_distances, bandwidth,
+                Xtrain, Xtarget, target_distances, Float64(bandwidth), bisquare,
             )
             @test size(rectangular) == (m, n)
             @test rectangular * y ≈ reference_local_prediction(
@@ -303,25 +305,30 @@ end
     # throwing — `_gwr_smoothers` is the one that throws, `_local_hat` is not.
     Xwide = hcat(ones(n), randn(rng, n, 5))
     @test all(iszero, DEMTerrainExperiment._local_hat(
-        Xwide, Xwide, train_distances, 2,
+        Xwide, Xwide, train_distances, 2.0, bisquare,
     ))
 
     # The ridge is applied to the normal equations, so a larger one shrinks the operator.
     Xtrain = hcat(ones(n), randn(rng, n, 2))
-    weak = DEMTerrainExperiment._local_hat(Xtrain, Xtrain, train_distances, 12; ridge=1e-8)
-    strong = DEMTerrainExperiment._local_hat(Xtrain, Xtrain, train_distances, 12; ridge=1.0)
+    weak = DEMTerrainExperiment._local_hat(
+        Xtrain, Xtrain, train_distances, 12.0, bisquare; ridge=1e-8,
+    )
+    strong = DEMTerrainExperiment._local_hat(
+        Xtrain, Xtrain, train_distances, 12.0, bisquare; ridge=1.0,
+    )
     @test !(weak ≈ strong)
     @test strong * y ≈ reference_local_prediction(
         Xtrain, Xtrain, train_distances, y, 12; ridge=1.0,
     )
 
     @test_throws DimensionMismatch DEMTerrainExperiment._local_hat(
-        Xtrain, randn(rng, m, 2), target_distances, 12,
+        Xtrain, randn(rng, m, 2), target_distances, 12.0, bisquare,
     )
     @test_throws DimensionMismatch DEMTerrainExperiment._local_hat(
-        Xtrain, Xtrain, target_distances, 12,
+        Xtrain, Xtrain, target_distances, 12.0, bisquare,
     )
     @test_throws DimensionMismatch DEMTerrainExperiment._local_hat(
-        Xtrain, hcat(ones(m), randn(rng, m, 2)), target_distances, 12; exclude_self=true,
+        Xtrain, hcat(ones(m), randn(rng, m, 2)), target_distances, 12.0, bisquare;
+        exclude_self=true,
     )
 end

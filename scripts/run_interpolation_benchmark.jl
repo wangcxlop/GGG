@@ -43,6 +43,27 @@ function benchmark_config(
             (repeats > 1 ? "_repeats$(repeats)" : ""),
     )
     mkpath(outdir)
+    # One adaptive grid for the whole GWR family - direct `gwr`, `hurdle_gwr`, residual `gwr`,
+    # `mixed_gwr` and `mgwr` all search it, so a comparison between them is at equal search
+    # budget. It used to be two: `mger.bw_adaptive` topped out at 120 while the joint models'
+    # grid reached 160, which direct `gwr` could never select.
+    #
+    # The floor matters most. The canonical grid starts at 30 nearest neighbours (~37 km with
+    # 237 Hubei stations) while IDW/ADW may use 8 (~18 km), and 72% of all selected bandwidths
+    # landed on a grid endpoint with the CV curve still running into it - the grid, not the
+    # data, was picking the bandwidth (`output/benchmark_diagnostics/*/bandwidth_saturation.csv`).
+    # `--local-grid` drops the GWR floor to IDW/ADW's locality so the two compare at equal
+    # bandwidth.
+    #
+    # 160 is gone from the ceiling. Its only real job was "effectively global": it exceeded the
+    # inner selection split's training size, so `gw_weight` fell through its `dn > 1` branch to
+    # a near-uniform fit during scoring and then refitted as the 160th-nearest-of-~190 at
+    # prediction time - the same `bw` naming two different models.
+    # `InterpolationBenchmarkConfig.bw_include_global` now offers global as an explicit
+    # candidate instead, and the 120 ceiling stays below the inner training size so the
+    # fallthrough branch is never reached.
+    bw_adaptive = local_grid ? [8.0, 12.0, 16.0, 20.0, 30.0, 50.0, 80.0, 120.0] :
+        (smoke ? [30.0, 80.0] : [30.0, 50.0, 80.0, 120.0])
     mger = MGERConfig(
         station_meta_path=joinpath(STUDY_DATA, "station_meta.csv"),
         obs_hourly_wide_path=joinpath(STUDY_DATA, "hubei_obs_hourly_2022_2025_JunSep.csv"),
@@ -66,13 +87,7 @@ function benchmark_config(
         outdir=outdir,
         kernels=smoke ? [GAUSSIAN, BISQUARE] :
             [GAUSSIAN, EXPONENTIAL, BISQUARE, TRICUBE, BOXCAR],
-        # The canonical grids start at 30 nearest neighbours (~37 km with 237 Hubei stations),
-        # while IDW/ADW may use 8 (~18 km) - and both families select their grid minimum in
-        # nearly every fold, so the floor, not the data, is picking the bandwidth. `--local-grid`
-        # extends the GWR floor down to IDW/ADW's locality so the two can be compared at equal
-        # bandwidth; see `output/benchmark_diagnostics/bandwidth_saturation.csv`.
-        bw_adaptive=local_grid ? [8.0, 12.0, 16.0, 20.0, 30.0, 50.0, 80.0, 120.0] :
-            (smoke ? [30.0, 80.0] : [30.0, 50.0, 80.0, 120.0]),
+        bw_adaptive=bw_adaptive,
         bw_fixed_km=local_grid ? [5.0, 10.0, 20.0, 30.0, 50.0] :
             (smoke ? [30.0, 50.0] : [10.0, 20.0, 30.0, 50.0]),
         rain_threshold=0.1,
@@ -119,8 +134,9 @@ function benchmark_config(
             ROOT, "data", "processed", "covariates",
             "station_ndvi_16day_2022_2024.csv",
         ),
-        bandwidth_candidates=local_grid ? [8, 12, 16, 20, 30, 50, 80, 120, 160] :
-            [30, 50, 80, 120, 160],
+        # Same grid as `mger.bw_adaptive` above: the joint models are part of the GWR family and
+        # are compared against the rest of it, so they must not search a wider one.
+        bandwidth_candidates=Int.(bw_adaptive),
         feature_time_offset_hours=9,
         max_ndvi_age_days=32,
         wet_threshold=0.1,

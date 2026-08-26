@@ -240,17 +240,26 @@ function _haversine_matrix(train_lonlat::Matrix{Float64}, target_lonlat::Matrix{
 end
 
 """
-Adaptive bisquare weights, written into `weights` and using `buffer` as scratch.
+General local GWR weights for one target, written into `weights` and using `buffer` as scratch
+when `adaptive`. `kernel(dist, bw)` is the weight formula (e.g. bisquare, gaussian, ...).
 
-Only the k-th smallest finite distance is needed, so `partialsort!` on a reused buffer
-replaces `sort(filter(isfinite, distances))`; it returns the same value in linear time
-and without allocating. `distances` is not modified.
+For an adaptive bandwidth, only the k-th smallest finite distance is needed, so `partialsort!`
+on a reused buffer replaces `sort(filter(isfinite, distances))`; it returns the same value in
+linear time and without allocating. For a fixed bandwidth, `bw` is applied directly with no
+neighbor-count conversion. `distances` is not modified.
 """
-function _adaptive_bisquare!(
-    weights::Vector{Float64}, distances::Vector{Float64}, neighbors::Int,
-    buffer::Vector{Float64},
+function _gw_local_weights!(
+    weights::Vector{Float64}, distances::Vector{Float64}, bw::Float64,
+    kernel::Function, buffer::Vector{Float64}; adaptive::Bool=true,
 )
     n = length(distances)
+    if !adaptive
+        @inbounds for i in 1:n
+            d = distances[i]
+            weights[i] = isfinite(d) ? kernel(d, bw) : 0.0
+        end
+        return weights
+    end
     finite_count = 0
     @inbounds for i in 1:n
         d = distances[i]
@@ -268,7 +277,7 @@ function _adaptive_bisquare!(
     # asks for an element that is not there. Both the old indexing and `partialsort!` below
     # raise `BoundsError` on that input, and no caller can reach it — the bandwidth grids
     # start at 8 and callers clamp with `min(bandwidth, n - 1)`.
-    k = clamp(neighbors, 2, finite_count)
+    k = clamp(Int(round(bw)), 2, finite_count)
     # `partialsort!` permutes `finite_distances` without dropping elements, so the
     # `maximum` fallback below still sees the same multiset.
     bandwidth = partialsort!(finite_distances, k)
@@ -279,11 +288,24 @@ function _adaptive_bisquare!(
         end
         return weights
     end
+    # `kernel` (not a hardcoded `d < bandwidth` cutoff) decides whether/how a distance beyond
+    # `bandwidth` still contributes: that's a no-op for bisquare/tricube/boxcar, which are zero
+    # there anyway, but gaussian/exponential have no hard cutoff and must keep tapering.
     @inbounds for i in 1:n
         d = distances[i]
-        weights[i] = isfinite(d) && d < bandwidth ? (1 - (d / bandwidth)^2)^2 : 0.0
+        weights[i] = isfinite(d) ? kernel(d, bandwidth) : 0.0
     end
     return weights
+end
+
+_bisquare_kernel(dist::Float64, bw::Float64) = dist > bw ? 0.0 : (1 - (dist / bw)^2)^2
+
+"""Adaptive bisquare weights; a thin, behaviour-preserving wrapper over [`_gw_local_weights!`](@ref)."""
+function _adaptive_bisquare!(
+    weights::Vector{Float64}, distances::Vector{Float64}, neighbors::Int,
+    buffer::Vector{Float64},
+)
+    _gw_local_weights!(weights, distances, Float64(neighbors), _bisquare_kernel, buffer; adaptive=true)
 end
 
 function _adaptive_bisquare(distances::Vector{Float64}, neighbors::Int)
@@ -411,7 +433,8 @@ end
 
 function _local_hat(
     Xtrain::Matrix{Float64}, Xtarget::Matrix{Float64}, distances::Matrix{Float64},
-    neighbors::Int; ridge::Float64=1e-8, exclude_self::Bool=false,
+    bw::Float64, kernel::Function; adaptive::Bool=true, ridge::Float64=1e-8,
+    exclude_self::Bool=false,
 )
     ntrain, p = size(Xtrain)
     ntarget = size(Xtarget, 1)
@@ -436,7 +459,7 @@ function _local_hat(
     @inbounds for target in 1:ntarget
         copyto!(d, view(distances, :, target))
         exclude_self && (d[target] = Inf)
-        _adaptive_bisquare!(w, d, neighbors, buffer)
+        _gw_local_weights!(w, d, bw, kernel, buffer; adaptive)
         n_valid = 0
         for i in 1:ntrain
             w[i] > 0 || continue
@@ -507,10 +530,10 @@ end
 
 function _mixed_fit_complete(
     Xlocal::Matrix{Float64}, Xglobal::Matrix{Float64}, y::Vector{Float64},
-    distances::Matrix{Float64}, bandwidth::Int;
+    distances::Matrix{Float64}, bw::Float64, kernel::Function; adaptive::Bool=true,
     ridge::Float64=1e-8, tolerance::Float64=1e-5, max_iterations::Int=200,
 )
-    local_hat = _local_hat(Xlocal, Xlocal, distances, bandwidth; ridge)
+    local_hat = _local_hat(Xlocal, Xlocal, distances, bw, kernel; adaptive, ridge)
     global_hat = _global_projection(Xglobal; ridge)
     result = _backfit_components(
         y, [local_hat], global_hat; tolerance, max_iterations,
@@ -521,20 +544,21 @@ end
 function _mixed_predict_complete(
     Xlocal_train::Matrix{Float64}, Xglobal_train::Matrix{Float64}, y::Vector{Float64},
     train_lonlat::Matrix{Float64}, Xlocal_target::Matrix{Float64},
-    Xglobal_target::Matrix{Float64}, target_lonlat::Matrix{Float64}, bandwidth::Int;
+    Xglobal_target::Matrix{Float64}, target_lonlat::Matrix{Float64}, bw::Float64,
+    kernel::Function; adaptive::Bool=true,
     ridge::Float64=1e-8, tolerance::Float64=1e-5, max_iterations::Int=200,
 )
     train_distances = _haversine_matrix(train_lonlat, train_lonlat)
     fitted = _mixed_fit_complete(
-        Xlocal_train, Xglobal_train, y, train_distances, bandwidth;
-        ridge, tolerance, max_iterations,
+        Xlocal_train, Xglobal_train, y, train_distances, bw, kernel;
+        adaptive, ridge, tolerance, max_iterations,
     )
     global_beta = isempty(Xglobal_train) ? Float64[] :
         (Xglobal_train' * Xglobal_train + ridge * I) \ (Xglobal_train' * (y - fitted.local_components[1]))
     partial = y - (isempty(Xglobal_train) ? zeros(length(y)) : Xglobal_train * global_beta)
     target_hat = _local_hat(
         Xlocal_train, Xlocal_target,
-        _haversine_matrix(train_lonlat, target_lonlat), bandwidth; ridge,
+        _haversine_matrix(train_lonlat, target_lonlat), bw, kernel; adaptive, ridge,
     )
     prediction = target_hat * partial
     isempty(Xglobal_target) || (prediction .+= Xglobal_target * global_beta)
@@ -552,18 +576,21 @@ end
 
 function select_mixed_bandwidth(
     Xlocal::Matrix{Float64}, Xglobal::Matrix{Float64}, y::Vector{Float64},
-    lonlat::Matrix{Float64}, candidates::Vector{Int}; ridge::Float64=1e-8,
+    lonlat::Matrix{Float64}, candidates::Vector{Float64}, kernel::Function;
+    adaptive::Bool=true, ridge::Float64=1e-8,
     tolerance::Float64=1e-5, max_iterations::Int=200,
 )
     distances = _haversine_matrix(lonlat, lonlat)
     global_hat = _global_projection(Xglobal; ridge)
     rows = NamedTuple[]
-    best_bandwidth = 0
+    best_bandwidth = 0.0
     best_rmse = Inf
     for bandwidth in candidates
-        bandwidth < length(y) || continue
+        # A fixed-km bandwidth has no relationship to the station count, so the sanity check
+        # against `length(y)` only applies to the adaptive neighbor-count case.
+        (!adaptive || bandwidth < length(y)) || continue
         try
-            local_hat = _local_hat(Xlocal, Xlocal, distances, bandwidth; ridge)
+            local_hat = _local_hat(Xlocal, Xlocal, distances, bandwidth, kernel; adaptive, ridge)
             identity_fit = _backfit_components(
                 Matrix{Float64}(I, length(y), length(y)), [local_hat], global_hat;
                 tolerance, max_iterations,
@@ -614,11 +641,12 @@ end
 
 function _multiscale_fit_complete(
     local_groups::Vector{Matrix{Float64}}, Xglobal::Matrix{Float64}, y::Vector{Float64},
-    distances::Matrix{Float64}, bandwidths::Vector{Int}; ridge::Float64=1e-8,
+    distances::Matrix{Float64}, bandwidths::Vector{Float64}, kernel::Function;
+    adaptive::Bool=true, ridge::Float64=1e-8,
     tolerance::Float64=1e-5, max_iterations::Int=200,
 )
     length(local_groups) == length(bandwidths) || throw(DimensionMismatch("bandwidth count differs"))
-    hats = [_local_hat(X, X, distances, bandwidth; ridge)
+    hats = [_local_hat(X, X, distances, bandwidth, kernel; adaptive, ridge)
         for (X, bandwidth) in zip(local_groups, bandwidths)]
     global_hat = _global_projection(Xglobal; ridge)
     result = _backfit_components(y, hats, global_hat; tolerance, max_iterations)
@@ -627,11 +655,14 @@ end
 
 function select_multiscale_bandwidths(
     local_groups::Vector{Matrix{Float64}}, Xglobal::Matrix{Float64}, y::Vector{Float64},
-    lonlat::Matrix{Float64}, candidates::Vector{Int}; ridge::Float64=1e-8,
+    lonlat::Matrix{Float64}, candidates::Vector{Float64}, kernel::Function;
+    adaptive::Bool=true, ridge::Float64=1e-8,
     tolerance::Float64=1e-5, max_iterations::Int=200,
 )
-    isempty(local_groups) && return Int[], DataFrame(), true
-    usable = filter(<(length(y)), candidates)
+    isempty(local_groups) && return Float64[], DataFrame(), true
+    # A fixed-km bandwidth has no relationship to the station count, so the sanity check
+    # against `length(y)` only applies to the adaptive neighbor-count case.
+    usable = adaptive ? filter(<(length(y)), candidates) : candidates
     isempty(usable) && throw(ArgumentError("no usable multiscale bandwidth candidates"))
     distances = _haversine_matrix(lonlat, lonlat)
     global_hat = _global_projection(Xglobal; ridge)
@@ -647,12 +678,12 @@ function select_multiscale_bandwidths(
             for other in eachindex(components)
                 other == group_index || (partial .-= components[other])
             end
-            best_bw, best_rmse, best_hat = 0, Inf, nothing
+            best_bw, best_rmse, best_hat = 0.0, Inf, nothing
             for bandwidth in usable
                 try
                     hat = _local_hat(
                         local_groups[group_index], local_groups[group_index], distances,
-                        bandwidth; ridge,
+                        bandwidth, kernel; adaptive, ridge,
                     )
                     rmse = _linear_loocv_rmse(hat, partial)
                     push!(rows, (; iteration, group_index, bandwidth, RMSE=rmse,
@@ -688,13 +719,14 @@ end
 function _multiscale_predict_complete(
     local_train::Vector{Matrix{Float64}}, Xglobal_train::Matrix{Float64}, y::Vector{Float64},
     train_lonlat::Matrix{Float64}, local_target::Vector{Matrix{Float64}},
-    Xglobal_target::Matrix{Float64}, target_lonlat::Matrix{Float64}, bandwidths::Vector{Int};
+    Xglobal_target::Matrix{Float64}, target_lonlat::Matrix{Float64}, bandwidths::Vector{Float64},
+    kernel::Function; adaptive::Bool=true,
     ridge::Float64=1e-8, tolerance::Float64=1e-5, max_iterations::Int=200,
 )
     train_distances = _haversine_matrix(train_lonlat, train_lonlat)
     fitted = _multiscale_fit_complete(
-        local_train, Xglobal_train, y, train_distances, bandwidths;
-        ridge, tolerance, max_iterations,
+        local_train, Xglobal_train, y, train_distances, bandwidths, kernel;
+        adaptive, ridge, tolerance, max_iterations,
     )
     fitted.converged || return fill(NaN, size(target_lonlat, 1)), false, fitted.iterations
     local_sum = reduce(+, fitted.local_components)
@@ -710,7 +742,7 @@ function _multiscale_predict_complete(
         end
         target_hat = _local_hat(
             local_train[group_index], local_target[group_index], target_distances,
-            bandwidths[group_index]; ridge,
+            bandwidths[group_index], kernel; adaptive, ridge,
         )
         prediction .+= target_hat * partial
     end
@@ -720,7 +752,8 @@ end
 function mixed_gwr_predict(
     Xlocal_train::Matrix{Float64}, Xglobal_train::Matrix{Float64}, Ytrain::Matrix{Float64},
     train_lonlat::Matrix{Float64}, Xlocal_target::Matrix{Float64},
-    Xglobal_target::Matrix{Float64}, target_lonlat::Matrix{Float64}, bandwidth::Int;
+    Xglobal_target::Matrix{Float64}, target_lonlat::Matrix{Float64}, bandwidth::Float64,
+    kernel::Function; adaptive::Bool=true,
     ridge::Float64=1e-8, tolerance::Float64=1e-5, max_iterations::Int=200,
     exclude_self::Bool=false,
 )
@@ -749,15 +782,18 @@ function mixed_gwr_predict(
             local_target_valid = Xlocal_target[target_indices, :]
             global_target_valid = Xglobal_target[target_indices, :]
             target_lonlat_valid = target_lonlat[target_indices, :]
-            adjusted_bandwidth = min(bandwidth, length(indices) - 1)
+            # Clamping to the valid station count only makes sense for an adaptive neighbor
+            # count; a fixed-km bandwidth must be applied as given.
+            adjusted_bandwidth = adaptive ? min(bandwidth, length(indices) - 1) : bandwidth
             local_hat = _local_hat(
                 local_train_valid, local_train_valid,
-                _haversine_matrix(lonlat_valid, lonlat_valid), adjusted_bandwidth; ridge,
+                _haversine_matrix(lonlat_valid, lonlat_valid), adjusted_bandwidth, kernel;
+                adaptive, ridge,
             )
             target_hat = _local_hat(
                 local_train_valid, local_target_valid,
-                _haversine_matrix(lonlat_valid, target_lonlat_valid), adjusted_bandwidth;
-                ridge, exclude_self,
+                _haversine_matrix(lonlat_valid, target_lonlat_valid), adjusted_bandwidth, kernel;
+                adaptive, ridge, exclude_self,
             )
             global_hat = _global_projection(global_train_valid; ridge)
             (; local_train_valid, global_train_valid, global_target_valid,
@@ -788,7 +824,8 @@ function multiscale_gwr_predict(
     local_train::Vector{Matrix{Float64}}, Xglobal_train::Matrix{Float64},
     Ytrain::Matrix{Float64}, train_lonlat::Matrix{Float64},
     local_target::Vector{Matrix{Float64}}, Xglobal_target::Matrix{Float64},
-    target_lonlat::Matrix{Float64}, bandwidths::Vector{Int}; ridge::Float64=1e-8,
+    target_lonlat::Matrix{Float64}, bandwidths::Vector{Float64}, kernel::Function;
+    adaptive::Bool=true, ridge::Float64=1e-8,
     tolerance::Float64=1e-5, max_iterations::Int=200, exclude_self::Bool=false,
 )
     if exclude_self
@@ -819,17 +856,19 @@ function multiscale_gwr_predict(
             local_target_valid = [X[target_indices, :] for X in local_target]
             global_target_valid = Xglobal_target[target_indices, :]
             target_lonlat_valid = target_lonlat[target_indices, :]
-            adjusted_bandwidths = min.(bandwidths, length(indices) - 1)
+            # Clamping to the valid station count only makes sense for an adaptive neighbor
+            # count; a fixed-km bandwidth must be applied as given.
+            adjusted_bandwidths = adaptive ? min.(bandwidths, length(indices) - 1) : bandwidths
             train_distances = _haversine_matrix(lonlat_valid, lonlat_valid)
-            train_hats = [_local_hat(X, X, train_distances, bw; ridge)
+            train_hats = [_local_hat(X, X, train_distances, bw, kernel; adaptive, ridge)
                 for (X, bw) in zip(local_valid, adjusted_bandwidths)]
             global_hat = _global_projection(global_valid; ridge)
             target_hats = if exclude_self
-                [_local_hat(X, X, train_distances, bw; ridge, exclude_self=true)
+                [_local_hat(X, X, train_distances, bw, kernel; adaptive, ridge, exclude_self=true)
                     for (X, bw) in zip(local_valid, adjusted_bandwidths)]
             else
                 target_distances = _haversine_matrix(lonlat_valid, target_lonlat_valid)
-                [_local_hat(X, Xt, target_distances, bw; ridge)
+                [_local_hat(X, Xt, target_distances, bw, kernel; adaptive, ridge)
                     for (X, Xt, bw) in zip(local_valid, local_target_valid, adjusted_bandwidths)]
             end
             (; local_valid, global_valid, global_target_valid, target_indices,
@@ -1251,10 +1290,14 @@ function run_dem_experiment(
                 continue
             end
             aggregate_lonlat = lonlat[train_idx[valid_aggregate], :]
+            # This experiment predates kernel selection; it keeps the historical adaptive-bisquare
+            # behaviour explicitly rather than sweeping kernels, since it is not the benchmark's
+            # `mixed_gwr`/`mgwr` tuning path.
+            candidates_f = Float64.(usable_candidates)
             baseline_X = designs.mixed_local_train[valid_aggregate, 1:3]
             baseline_bw, baseline_scan = select_mixed_bandwidth(
                 baseline_X, zeros(Float64, train_count, 0), aggregate[valid_aggregate],
-                aggregate_lonlat, usable_candidates; ridge=cfg.ridge,
+                aggregate_lonlat, candidates_f, _bisquare_kernel; ridge=cfg.ridge,
                 tolerance=cfg.tolerance, max_iterations=cfg.max_iterations,
             )
             for row in eachrow(baseline_scan)
@@ -1266,7 +1309,7 @@ function run_dem_experiment(
                 designs.mixed_local_train[:, 1:3], zeros(Float64, length(train_idx), 0),
                 Yobs[train_idx, :] - Ysat[train_idx, :], lonlat[train_idx, :],
                 designs.mixed_local_target[:, 1:3], zeros(Float64, length(val_idx), 0),
-                lonlat[val_idx, :], baseline_bw; ridge=cfg.ridge,
+                lonlat[val_idx, :], baseline_bw, _bisquare_kernel; ridge=cfg.ridge,
                 tolerance=cfg.tolerance, max_iterations=cfg.max_iterations,
             )
             oof[(product, "residual_gwr")][val_idx, :] = baseline_prediction
@@ -1280,7 +1323,7 @@ function run_dem_experiment(
             mixed_bw, mixed_scan = select_mixed_bandwidth(
                 designs.mixed_local_train[valid_aggregate, :],
                 designs.global_train[valid_aggregate, :], aggregate[valid_aggregate],
-                aggregate_lonlat, usable_candidates; ridge=cfg.ridge,
+                aggregate_lonlat, candidates_f, _bisquare_kernel; ridge=cfg.ridge,
                 tolerance=cfg.tolerance, max_iterations=cfg.max_iterations,
             )
             for row in eachrow(mixed_scan)
@@ -1291,8 +1334,9 @@ function run_dem_experiment(
             mixed_prediction, mixed_converged = mixed_gwr_predict(
                 designs.mixed_local_train, designs.global_train,
                 Yobs[train_idx, :] - Ysat[train_idx, :], lonlat[train_idx, :],
-                designs.mixed_local_target, designs.global_target, lonlat[val_idx, :], mixed_bw;
-                ridge=cfg.ridge, tolerance=cfg.tolerance, max_iterations=cfg.max_iterations,
+                designs.mixed_local_target, designs.global_target, lonlat[val_idx, :], mixed_bw,
+                _bisquare_kernel; ridge=cfg.ridge, tolerance=cfg.tolerance,
+                max_iterations=cfg.max_iterations,
             )
             oof[(product, "mixed_gwr")][val_idx, :] = mixed_prediction
             _append_metrics!(metric_rows, product, fold, "mixed_gwr",
@@ -1304,7 +1348,7 @@ function run_dem_experiment(
             local_valid = [X[valid_aggregate, :] for X in designs.multiscale_train]
             multiscale_bw, multiscale_scan, bandwidth_converged = select_multiscale_bandwidths(
                 local_valid, designs.global_train[valid_aggregate, :], aggregate[valid_aggregate],
-                aggregate_lonlat, usable_candidates; ridge=cfg.ridge,
+                aggregate_lonlat, candidates_f, _bisquare_kernel; ridge=cfg.ridge,
                 tolerance=cfg.tolerance, max_iterations=cfg.max_iterations,
             )
             for row in eachrow(multiscale_scan)
@@ -1321,7 +1365,8 @@ function run_dem_experiment(
             multiscale_prediction, multiscale_converged = multiscale_gwr_predict(
                 designs.multiscale_train, designs.global_train,
                 Yobs[train_idx, :] - Ysat[train_idx, :], lonlat[train_idx, :],
-                designs.multiscale_target, designs.global_target, lonlat[val_idx, :], multiscale_bw;
+                designs.multiscale_target, designs.global_target, lonlat[val_idx, :],
+                multiscale_bw, _bisquare_kernel;
                 ridge=cfg.ridge, tolerance=cfg.tolerance, max_iterations=cfg.max_iterations,
             )
             oof[(product, "multiscale_gwr")][val_idx, :] = multiscale_prediction
