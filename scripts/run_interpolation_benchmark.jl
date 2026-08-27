@@ -62,6 +62,19 @@ function benchmark_config(
     # `InterpolationBenchmarkConfig.bw_include_global` now offers global as an explicit
     # candidate instead, and the 120 ceiling stays below the inner training size so the
     # fallthrough branch is never reached.
+    #
+    # The floor is now frozen, and the reason is a result rather than a budget. The
+    # `--local-grid` full nested run (2026-08-26) dropped the floor to 8 neighbours / 5 km and
+    # the saturation did not resolve - it relocated: 92/171 GWR-family selections sit on the new
+    # floor, every one of them at `at_grid_min`, with `bw=8` chosen 42 times and `bw=5` 50 times
+    # (`output/benchmark_diagnostics/*_localgrid_*/bandwidth_saturation.csv`). Nor is the curve
+    # flat there - the floor beats the next-widest candidate by a median 0.56% relative RMSE.
+    # The inner CV simply keeps preferring more local, so a lower floor would be selected again.
+    # We stop here because below this the fit stops being identifiable, not because the search
+    # ran out of room: 8 neighbours has to support up to 4 covariates plus an intercept, and
+    # 5 km is already well under Hubei's ~28 km mean station spacing. Read a floor-pinned
+    # selection as "this cell wants an interpolator, not a regression", which is what the
+    # GWR-family-versus-adw gap says too.
     bw_adaptive = local_grid ? [8.0, 12.0, 16.0, 20.0, 30.0, 50.0, 80.0, 120.0] :
         (smoke ? [30.0, 80.0] : [30.0, 50.0, 80.0, 120.0])
     mger = MGERConfig(

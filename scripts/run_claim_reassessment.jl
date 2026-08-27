@@ -25,7 +25,8 @@ using .BenchmarkDiagnostics
 
 const STUDY_DATA = joinpath(ROOT, "data", "processed", "study_area")
 const DEFAULT_RUN = joinpath(
-    ROOT, "output", "interpolation_benchmark_full_joint_covariates_nested_localgrid",
+    ROOT, "output",
+    "interpolation_benchmark_full_joint_covariates_nested_localgrid_mgwrintercept_only",
 )
 # The claim is defined on the balanced-spatial partition only (see `_one_metric`).
 const SCHEME = "balanced_spatial"

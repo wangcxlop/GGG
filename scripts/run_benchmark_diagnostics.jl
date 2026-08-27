@@ -19,7 +19,8 @@ using .BenchmarkDiagnostics
 
 const STUDY_DATA = joinpath(ROOT, "data", "processed", "study_area")
 const DEFAULT_RUN = joinpath(
-    ROOT, "output", "interpolation_benchmark_full_joint_covariates_nested",
+    ROOT, "output",
+    "interpolation_benchmark_full_joint_covariates_nested_localgrid_mgwrintercept_only",
 )
 const NULLS = ["zero", "train_clim", "hour_field_mean"]
 
@@ -47,10 +48,9 @@ end
 function main(args=ARGS)
     run_dir = isempty(args) ? DEFAULT_RUN : abspath(args[1])
     isdir(run_dir) || error("benchmark output directory not found: $run_dir")
-    # Diagnostics for a non-default run go to their own subdirectory, so diagnosing a second
+    # Diagnostics always go to their own subdirectory, so diagnosing a second
     # run never overwrites the first one's numbers.
-    outdir = joinpath(ROOT, "output", "benchmark_diagnostics")
-    run_dir == DEFAULT_RUN || (outdir = joinpath(outdir, basename(run_dir)))
+    outdir = joinpath(ROOT, "output", "benchmark_diagnostics", basename(run_dir))
     mkpath(outdir)
 
     println("Reading benchmark run: $run_dir")
