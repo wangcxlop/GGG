@@ -10,7 +10,14 @@ include(joinpath(ROOT, "src", "InterpolationBenchmark.jl"))
 
 const STUDY_DATA = joinpath(ROOT, "data", "processed", "study_area")
 
-"""Deterministic seed list for repeated cross-validation, so the sweep itself is reproducible."""
+"""
+Seed list for repeated cross-validation: one repeat per entry.
+
+These no longer choose the fold partitions. Under the default `:hilbert` initialisation repeat `i`
+uses rotation `i-1` of the Hilbert frame, so the partitions are seed-free and `length(seeds)` is
+just the repeat count. The seeds still drive the genuinely stochastic steps inside each repeat -
+paired bootstrap, DEM permutation tests, joint variable selection - and the `:random` CV scheme.
+"""
 repeat_seeds(repeats::Int) = repeats <= 1 ? Int[] : [20260627 + 1000 * i for i in 0:(repeats - 1)]
 
 function benchmark_config(
@@ -190,6 +197,10 @@ function benchmark_config(
         dem=dem,
         joint_covariates=joint,
         joint_selection=joint_selection,
+        # The joint path without nested selection reads a full-data spec, which the config
+        # validator refuses unless the run admits it is exploratory. --no-nested-covariates is
+        # exactly that admission, so it is the only way this turns on.
+        exploratory_only=!legacy_dem && !nested_covariates,
         k=5,
         seed=20260627,
         seeds=repeat_seeds(repeats),
@@ -243,15 +254,19 @@ function main(args=ARGS)
     mode = isempty(args) ? :smoke : Symbol(lowercase(args[1]))
     with_random = "--with-random" in args
     legacy_dem = "--legacy-dem" in args
-    # :full defaults to the leak-free nested per-fold covariate selection (closes the
+    # Both modes default to the leak-free nested per-fold covariate selection (closes the
     # full-data-reused-across-every-fold leak); --no-nested-covariates reproduces the old
     # fixed full-data comparison path, and --legacy-dem never defaults into nested selection.
+    #
+    # :smoke used to default the other way, which meant the cheap path everyone actually runs
+    # exercised different selection code from the one that produces results. It now runs the
+    # same path, so a smoke run is a real rehearsal.
     nested_covariates = if "--nested-covariates" in args
         true
     elseif "--no-nested-covariates" in args
         false
     else
-        mode == :full && !legacy_dem
+        !legacy_dem
     end
     repeats = parse_repeats(args)
     local_grid = "--local-grid" in args

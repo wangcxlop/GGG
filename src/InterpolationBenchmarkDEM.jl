@@ -18,13 +18,15 @@ function load_aligned_terrain(path::String, ids::Vector{String})
 end
 
 function _tag_dem_table!(
-    table::DataFrame, scheme::String, product::String, fold::Int, phase::String,
+    table::DataFrame, scheme::String, product::String, fold::Int, phase::String, repeat::Int=1,
 )
     table[!, :scheme] = fill(scheme, nrow(table))
     :product in propertynames(table) || (table[!, :product] = fill(product, nrow(table)))
+    table[!, :repeat] = fill(repeat, nrow(table))
     table[!, :fold] = fill(fold, nrow(table))
     table[!, :phase] = fill(phase, nrow(table))
-    select!(table, :scheme, :product, :fold, :phase, Not([:scheme, :product, :fold, :phase]))
+    select!(table, :scheme, :product, :repeat, :fold, :phase,
+        Not([:scheme, :product, :repeat, :fold, :phase]))
     return table
 end
 
@@ -39,7 +41,7 @@ end
 
 function _dem_role_audit(
     screen::DataFrame, spatial::DataFrame; scheme::String, product::String,
-    fold::Int, phase::String, selection_status::String, error::String="",
+    fold::Int, phase::String, selection_status::String, error::String="", repeat::Int=1,
 )
     rows = NamedTuple[]
     for group in terrain_groups()
@@ -51,7 +53,7 @@ function _dem_role_audit(
             "not_selected"
         model_included = selected && role in ("local", "global")
         push!(rows, (;
-            scheme, product, fold, phase, variable_group=group,
+            scheme, product, repeat, fold, phase, variable_group=group,
             predictor_columns=join(string.(terrain_columns(group)), "+"),
             selected_pre_vif=Bool(screen_row.selected_pre_vif), selected,
             model_included,
@@ -67,7 +69,7 @@ end
 function screen_dem_subset(
     terrain::DataFrame, lonlat::Matrix{Float64}, times::Vector{DateTime},
     y_obs::Matrix{Float64}, y_sat::Matrix{Float64}, dem::DEMExperimentConfig;
-    scheme::String, product::String, fold::Int, phase::String, seed::Int,
+    scheme::String, product::String, fold::Int, phase::String, seed::Int, repeat::Int=1,
 )
     response, counts = mean_wet_residual(
         y_obs, y_sat; threshold=dem.wet_threshold, min_hours=dem.min_wet_hours,
@@ -75,7 +77,7 @@ function screen_dem_subset(
     valid_count = count(isfinite, response)
     finite_counts = isempty(counts) ? [0] : counts
     qc = DataFrame([(
-        scheme=scheme, product=product, fold=fold, phase=phase,
+        scheme=scheme, product=product, repeat=repeat, fold=fold, phase=phase,
         training_station_count=nrow(terrain), valid_residual_station_count=valid_count,
         wet_threshold=dem.wet_threshold, min_wet_hours=dem.min_wet_hours,
         min_station_wet_hours=minimum(finite_counts),
@@ -119,7 +121,7 @@ function screen_dem_subset(
     end
     role_table = _dem_role_audit(
         screen, spatial; scheme, product, fold, phase, selection_status,
-        error=selection_error,
+        error=selection_error, repeat,
     )
     role_map = Dict{String,String}()
     for row in eachrow(role_table)
@@ -130,11 +132,11 @@ function screen_dem_subset(
         selection_status = "no_role_resolved"
         role_table.selection_status .= selection_status
     end
-    _tag_dem_table!(screen, scheme, product, fold, phase)
-    _tag_dem_table!(vif, scheme, product, fold, phase)
-    _tag_dem_table!(monthly_table, scheme, product, fold, phase)
-    _tag_dem_table!(spatial, scheme, product, fold, phase)
-    _tag_dem_table!(spatial_scan, scheme, product, fold, phase)
+    _tag_dem_table!(screen, scheme, product, fold, phase, repeat)
+    _tag_dem_table!(vif, scheme, product, fold, phase, repeat)
+    _tag_dem_table!(monthly_table, scheme, product, fold, phase, repeat)
+    _tag_dem_table!(spatial, scheme, product, fold, phase, repeat)
+    _tag_dem_table!(spatial_scan, scheme, product, fold, phase, repeat)
     return (;
         response, counts, qc, screen, vif, monthly=monthly_table, spatial,
         spatial_scan, roles=role_table, role_map, selection_status,
@@ -281,7 +283,10 @@ function select_dem_parameter!(
                     converged || continue
                     # Compare combinations by the RMSE of the last group's row in the final
                     # (converged) iteration — same convention as the joint-covariate path
-                    # (`select_joint_parameter!`), since the descent never computes one joint RMSE.
+                    # (`select_joint_parameter!`). Convergence means a whole sweep left
+                    # `bandwidths` unchanged, so that row was scored with every other group at its
+                    # converged value: it is a whole-configuration score, and every group's winning
+                    # row in the final iteration carries the same RMSE.
                     final_row = only(filter(row -> row.iteration == final_iteration &&
                         row.group_index == last_group && row.bandwidth == bandwidths[last_group] &&
                         row.status == "success", eachrow(scan)))

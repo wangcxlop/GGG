@@ -1,4 +1,4 @@
-using Test, CSV, DataFrames, Random
+using Test, CSV, DataFrames, LinearAlgebra, Random
 
 if !isdefined(Main, :JointCovariateModels)
     include(joinpath(@__DIR__, "..", "src", "JointCovariateModels.jl"))
@@ -227,4 +227,21 @@ end
     changed = copy(y); changed[7] += 1.0e6
     second_prediction = JCM._global_predict(X, changed, X, 1e-8; leave_one_out=true)
     @test first_prediction[7] ≈ second_prediction[7]
+end
+
+@testset "local weighted solve returns the ridge WLS coefficients" begin
+    rng = MersenneTwister(37)
+    n, m, ridge = 20, 4, 1e-8
+    Xtrain = hcat(ones(n), randn(rng, n), randn(rng, n))
+    Xtarget = hcat(ones(m), randn(rng, m), randn(rng, m))
+    y = randn(rng, n)
+    # Every weight is positive, so each target selects the whole training set and the
+    # prediction must reproduce the closed-form weighted ridge solution exactly.
+    weights = rand(rng, m, n) .+ 0.5
+    prediction = JCM._local_predict(Xtrain, y, Xtarget, weights, ridge)
+    for target in 1:m
+        w = weights[target, :]
+        beta = (Xtrain' * (w .* Xtrain) + ridge * I) \ (Xtrain' * (w .* y))
+        @test prediction[target] ≈ dot(Xtarget[target, :], beta)
+    end
 end

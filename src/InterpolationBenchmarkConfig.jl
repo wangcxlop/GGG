@@ -1,7 +1,7 @@
 const BENCHMARK_METHODS = [
     "raw", "zero", "train_clim", "hour_field_mean",
     "idw", "adw", "tps", "gwr",
-    "residual_gwr", "mixed_gwr", "mgwr",
+    "residual_gwr", "mixed_gwr", "mgwr", "auto",
 ]
 const TRADITIONAL_METHODS = ["idw", "adw", "tps"]
 # Hyperparameter-free reference predictors, estimated from training stations only. They are
@@ -32,6 +32,28 @@ const BENCHMARK_RUNS = [
     ("residual", "gwr"), ("residual", "mixed_gwr"), ("residual", "mgwr"),
 ]
 
+"""Method name a `(mode, method)` run reports under."""
+_output_method(mode::AbstractString, method::AbstractString) =
+    method in ("mixed_gwr", "mgwr") ? String(method) :
+        (mode == "direct" ? String(method) : "residual_$(method)")
+
+const AUTO_METHOD = "auto"
+# The runs `auto` may choose between: the GWR family only.
+#
+# `auto` exists because nothing else in the benchmark selects a *model*. Every method is fitted
+# and reported, which is honest right up until a conclusion names a winner — at which point the
+# winner was picked by reading held-out scores, the same selection-on-test that
+# `run_multikernel_spatial_kfold_pipeline`'s own docstring identifies on the MGER side. `auto`
+# makes that choice inside the training fold instead, so its held-out numbers estimate "use the
+# best GWR-family model" rather than "use whichever one won once we had looked".
+#
+# The traditional baselines are deliberately excluded. They are what the GWR claim is assessed
+# *against*, so an `auto` free to pick `adw` would leave `assess_gwr_claim`'s "beat every
+# baseline" gate comparing `adw` with itself.
+const AUTO_CANDIDATE_RUNS = [
+    ("direct", "gwr"), ("residual", "gwr"), ("residual", "mixed_gwr"), ("residual", "mgwr"),
+]
+
 """Convert the benchmark's `Int` kernel index into the weight-formula `Function` the
 `mixed_gwr`/`mgwr` local-hat machinery (`DEMTerrainExperiment`/`JointCovariateModels`) expects.
 `GWR_KERNELS` isn't exported, so it needs `MixedGWR.` qualification here."""
@@ -46,12 +68,29 @@ Base.@kwdef struct InterpolationBenchmarkConfig
     # once on the full station set (`joint_covariates.spec_path`). Exactly one of the two must
     # be set when `joint_covariates` is enabled.
     joint_selection::Union{Nothing,JointSelectionConfig} = nothing
+    # Acknowledges that this run's numbers are not admissible as a result.
+    #
+    # `joint_covariates.spec_path` names a variable set and local/global role map screened over
+    # every station (`JointVariableSelection`'s `"full_data"` scheme), which is then reused inside
+    # every training fold - so the outer held-out stations helped choose the covariates their own
+    # predictions are built from. The run already labels the mode and zeroes `bootstrap_reps`, but
+    # labelling is not a guard: `metrics_pooled.csv` still comes out looking like every other run's.
+    #
+    # `_validate_benchmark_config` therefore refuses `spec_path` unless this is set, so the leaky
+    # path stays reachable for exploration and cannot be reached by accident.
+    exploratory_only::Bool = false
     k::Int = 5
     seed::Int = 20260627
     # Repeated cross-validation: one independent fold partition per seed. Empty means a
     # single repeat using `seed`, which reproduces the historical single-split behaviour.
     seeds::Vector{Int} = Int[]
-    fold_center_init::Symbol = :kmeanspp
+    # How `balanced_spatial` picks its initial fold centers. `:hilbert` is seed-free: the stations
+    # are ordered along a Hilbert curve of the local-km frame, cut into `k` equal runs, and the run
+    # centroids seed the capacity-constrained Lloyd loop. Repeat `i` uses rotation `i-1` of that
+    # frame, so repeated cross-validation is indexed by a declared rotation rather than by an
+    # arbitrary RNG draw, and rotation 0 is the canonical partition. `:kmeanspp` and `:farthest`
+    # remain reachable and still read `seed`, so earlier runs reproduce exactly.
+    fold_center_init::Symbol = :hilbert
     cv_schemes::Vector{Symbol} = [:balanced_spatial, :random]
     idw_powers::Vector{Float64} = [1.0, 1.5, 2.0, 2.5, 3.0]
     neighbor_candidates::Vector{Union{Nothing,Int}} = Union{Nothing,Int}[8, 16, 32, 64, nothing]
@@ -155,8 +194,8 @@ function _validate_benchmark_config(cfg::InterpolationBenchmarkConfig, n_station
     2 <= cfg.k <= n_station || throw(ArgumentError("k must be between 2 and station count"))
     length(unique(benchmark_seeds(cfg))) == length(benchmark_seeds(cfg)) ||
         throw(ArgumentError("seeds must be unique"))
-    cfg.fold_center_init in (:kmeanspp, :farthest) ||
-        throw(ArgumentError("fold_center_init must be :kmeanspp or :farthest"))
+    cfg.fold_center_init in (:hilbert, :kmeanspp, :farthest) ||
+        throw(ArgumentError("fold_center_init must be :hilbert, :kmeanspp, or :farthest"))
     all(s -> s in (:balanced_spatial, :random, :strip), cfg.cv_schemes) ||
         throw(ArgumentError("cv_schemes must contain :balanced_spatial, :random, or :strip"))
     length(unique(cfg.cv_schemes)) == length(cfg.cv_schemes) ||
@@ -202,6 +241,12 @@ function _validate_benchmark_config(cfg::InterpolationBenchmarkConfig, n_station
         xor(joint.spec_path === nothing, cfg.joint_selection === nothing) || throw(ArgumentError(
             "joint covariates require exactly one of spec_path (fixed full-data selection) or " *
             "joint_selection (nested per-fold selection)",
+        ))
+        joint.spec_path === nothing || cfg.exploratory_only || throw(ArgumentError(
+            "joint covariates selected once on the full station set (spec_path) let the outer " *
+            "held-out fold influence which covariates and local/global roles its own predictions " *
+            "use. Use joint_selection for nested per-fold selection, or set exploratory_only=true " *
+            "to acknowledge that this run's metrics are not a reportable result",
         ))
         joint.spec_path === nothing || isfile(joint.spec_path) ||
             throw(ArgumentError("joint specification does not exist"))

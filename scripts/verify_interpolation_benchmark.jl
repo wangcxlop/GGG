@@ -34,7 +34,15 @@ function main(args=ARGS)
     @assert !any(status.status .== "failed") "one or more fold/method runs failed"
     partial = filter(:status => ==("partial"), status)
     @assert all(partial.prediction_coverage .> 0) "partial runs must retain valid predictions"
-    @assert Set(status.method) == Set(filter(!=("raw"), METHODS))
+    # `auto` is reported alongside the fitted methods but is never *run* on this legacy DEM
+    # path: `inner_selection_prediction` carries no `dem_context`, so it records "skipped" rather
+    # than a failure. Asserting the reason keeps a genuine auto breakage from hiding here.
+    @assert Set(status.method) == Set(vcat(filter(!=("raw"), METHODS), "auto"))
+    auto_status = filter(:method => ==("auto"), status)
+    @assert nrow(auto_status) > 0 "auto rows missing from run status"
+    @assert all(auto_status.status .== "skipped") "auto should not run on the legacy DEM path"
+    @assert all(row -> occursin("legacy DEM path", row.error), eachrow(auto_status))
+    @assert !isfile(joinpath(outdir, "auto_selection.csv")) "auto must not select on the DEM path"
     @assert all(name -> name in names(status),
         ["dem_variable_count", "dem_selection_status", "dem_variables", "dem_roles"])
     residual_status = filter(:method => in(["residual_gwr", "mixed_gwr", "mgwr"]), status)

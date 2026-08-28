@@ -6,6 +6,15 @@ means, so a stratified tuning subsample (see [`_tuning_time_sample`](@ref)) esti
 over the full hour set rather than over the subsample's own wet-heavy mixture. `n` and
 `coverage` stay raw cell counts either way: they only gate whether the candidate produced
 predictions at all (`min_tuning_coverage`), which reweighting would silently redefine.
+
+`require_satellite` is now `true` for direct candidates too, where it used to be
+`mode == "residual"`. The reported metric is computed on `_common_method_mask`, which includes
+`raw` (the satellite field) among `MASK_METHODS` — so a cell with a missing satellite value is
+never scored, whatever method produced it. Tuning a direct method over the wider obs-only mask
+therefore selected against a population the results table does not contain, the same
+selection/reporting estimand mismatch that `tuning_geometry` fixed in the spatial dimension.
+Holding it fixed across modes is also what lets `auto` compare a direct candidate against a
+residual one at all (see `AUTO_CANDIDATE_RUNS`).
 """
 function _candidate_metrics(
     y_obs::Matrix{Float64}, y_sat::Matrix{Float64}, prediction::Matrix{Float64};
@@ -80,10 +89,19 @@ function select_mgwr_bandwidths!(
     # Each (kernel, adaptive/fixed bandwidth-family) combination runs its own independent
     # per-group coordinate descent to convergence (identical logic to the historical
     # bisquare-only, adaptive-only search, just parameterised); combinations are then compared
-    # by the RMSE of the last group scored in their converged sweep — the descent never computes
-    # one joint RMSE for the whole config, so this is the best single number available per
-    # combination (same convention as `select_joint_parameter!`'s mgwr branch). A combination
-    # that has no candidates, or fails to converge, is skipped rather than aborting the search.
+    # by the RMSE of the last group scored in their converged sweep.
+    #
+    # That is a whole-configuration score, not a per-group one, so the comparison is like for
+    # like. The descent only stops once a full sweep leaves `bandwidths` unchanged, which means
+    # every group in that sweep was scored with all the others already sitting at their converged
+    # values — so all of a combination's winning rows in the final iteration carry the identical
+    # RMSE, and taking the last is the same as taking any. (An earlier version of this comment
+    # claimed the descent "never computes one joint RMSE" and that this was merely the best number
+    # available; that was wrong, and `select_joint_parameter!` states the correct reasoning.)
+    #
+    # A combination that has no candidates, or fails to converge, is skipped rather than aborting
+    # the search — and a non-converged sweep is exactly the case where the last-group row would
+    # *not* be a joint score, which is why `converged || continue` guards the comparison.
     best_result = nothing
     bandwidth_families = _bandwidth_families(
         cfg, _usable_adaptive_candidates(cfg.mger.bw_adaptive, n_train, selection_groups),
@@ -273,6 +291,7 @@ function select_interpolation_parameter!(
     train_lonlat::Matrix{Float64}, y_obs::Matrix{Float64}, y_sat::Matrix{Float64};
     dem_context=nothing, joint_context=nothing, hurdle_context=nothing,
     selection_groups=nothing, joint_selection_contexts=nothing, repeat_seed::Int=cfg.seed,
+    repeat_index::Int=1,
 )
     (mode, method) in BENCHMARK_RUNS ||
         throw(ArgumentError("unsupported benchmark method/mode pair: $method/$mode"))
@@ -286,7 +305,8 @@ function select_interpolation_parameter!(
     # it to build the joint inner contexts); computing it here keeps direct callers working.
     if selection_groups === nothing && cfg.tuning_geometry === :inner_spatial
         selection_groups = selection_folds(
-            cfg, scheme, string.(1:size(train_lonlat, 1)), train_lonlat, fold, repeat_seed,
+            cfg, scheme, string.(1:size(train_lonlat, 1)), train_lonlat, fold, repeat_seed;
+            repeat_index,
         )
     end
     if joint_context !== nothing && mode == "residual" && method in ("gwr", "mixed_gwr", "mgwr")
@@ -338,7 +358,7 @@ function select_interpolation_parameter!(
                 prediction = mode == "direct" ? max.(interpolated, 0.0) : max.(y_sat .+ interpolated, 0.0)
                 metrics = _candidate_metrics(
                     y_obs, y_sat, prediction;
-                    require_satellite=mode == "residual", time_weights,
+                    require_satellite=true, time_weights,
                 )
                 push!(scan_rows, _scan_row(;
                     scheme, product, fold, mode, method, power, neighbors, metrics...,
@@ -363,7 +383,7 @@ function select_interpolation_parameter!(
                 prediction = mode == "direct" ? max.(interpolated, 0.0) : max.(y_sat .+ interpolated, 0.0)
                 metrics = _candidate_metrics(
                     y_obs, y_sat, prediction;
-                    require_satellite=mode == "residual", time_weights,
+                    require_satellite=true, time_weights,
                 )
                 push!(scan_rows, _scan_row(;
                     scheme, product, fold, mode, method, smooth, metrics...,
@@ -393,7 +413,7 @@ function select_interpolation_parameter!(
                         prediction = mode == "direct" ? max.(interpolated, 0.0) : max.(y_sat .+ interpolated, 0.0)
                         metrics = _candidate_metrics(
                             y_obs, y_sat, prediction;
-                            require_satellite=mode == "residual", time_weights,
+                            require_satellite=true, time_weights,
                         )
                         push!(scan_rows, _scan_row(;
                             scheme, product, fold, mode, method, kernel, adaptive, bw, metrics...,
@@ -486,4 +506,48 @@ function select_interpolation_parameter!(
         throw(ArgumentError("unknown method: $method"))
     end
     return _select_candidate!(scan_rows, first_row, cfg.min_tuning_coverage)
+end
+
+"""
+Pick one GWR-family method for a fold, using only the inner selection split.
+
+`contenders` is one `(; method, prediction)` per candidate, where `prediction` is that method's
+already-selected hyperparameters re-predicted across the inner split by
+[`inner_selection_prediction`](@ref) — so every entry is an out-of-fold prediction over the same
+training stations and the same tuning hours.
+
+The comparison is made on the intersection of the contenders' masks. Each is scored by the same
+`_candidate_metrics` the scan uses, after blanking every cell outside the shared mask, so a method
+cannot come out ahead by having failed on the cells it found hardest. `shared_mask_coverage` on
+the returned row is the share of scoreable cells that survived that intersection; a low value
+means some contender was patchy and the comparison rests on less than the full record. It is
+not the same quantity as `run_status.csv`'s `prediction_coverage`, which is measured on the
+outer held-out stations.
+
+Returns `nothing` when there is no shared mask to score on — the caller then leaves `auto`
+unpredicted for the fold rather than guessing, and `run_status.csv` records it.
+"""
+function select_auto_method(
+    contenders::Vector, y_obs::Matrix{Float64}, y_sat::Matrix{Float64};
+    time_weights::Union{Nothing,Vector{Float64}}=nothing,
+)
+    isempty(contenders) && return nothing
+    shared = .!isnan.(y_obs) .& .!isnan.(y_sat)
+    for contender in contenders
+        shared = shared .& .!isnan.(contender.prediction)
+    end
+    any(shared) || return nothing
+    scored = [merge((; contender.method), _candidate_metrics(
+        y_obs, y_sat, ifelse.(shared, contender.prediction, NaN); time_weights,
+    )) for contender in contenders]
+    # Method name breaks ties so a fold's choice does not depend on `BENCHMARK_RUNS` ordering.
+    order = sortperm(scored; by=row -> (row.RMSE, row.MAE, row.method))
+    best = scored[order[1]]
+    runner_up = length(order) > 1 ? scored[order[2]] : nothing
+    return (;
+        chosen=best.method, chosen_rmse=best.RMSE, chosen_mae=best.MAE,
+        runner_up=runner_up === nothing ? "" : runner_up.method,
+        runner_up_rmse=runner_up === nothing ? NaN : runner_up.RMSE,
+        n=best.n, shared_mask_coverage=best.coverage, n_contenders=length(contenders),
+    )
 end

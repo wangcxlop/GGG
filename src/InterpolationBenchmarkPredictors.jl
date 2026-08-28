@@ -38,6 +38,7 @@ accumulator (same pattern as `scan_rows`) for the degeneracy report described at
 function build_hurdle_context(
     times::Vector{DateTime}, cfg::InterpolationBenchmarkConfig,
     diagnostics::Vector{NamedTuple}; scheme::String, product::String, fold::Int,
+    repeat::Int=1,
 )
     wet_threshold = cfg.mger.rain_threshold
     # `HurdleGWRConfig` requires `first(intensity_breaks) == wet_threshold`, sorted and unique.
@@ -45,7 +46,7 @@ function build_hurdle_context(
     # binned the same way the categorical scores are.
     breaks = sort(unique(vcat(wet_threshold, filter(>(wet_threshold), cfg.event_thresholds))))
     return (; times, wet_threshold, intensity_breaks=breaks, diagnostics,
-        scheme, product, fold)
+        scheme, product, fold, repeat)
 end
 
 """Adapt the benchmark's `(adaptive, bw)` convention to HurdleGWR's `SpatialBandwidth`."""
@@ -96,7 +97,7 @@ function _hurdle_diagnostic_row(prediction, context; kernel::Int, adaptive::Bool
     share(code) = total == 0 ? NaN : count(==(code), fallback) / total
     return (;
         scheme=context.scheme, product=context.product, fold=context.fold,
-        kernel, adaptive, bw,
+        repeat=context.repeat, kernel, adaptive, bw,
         n_target=length(prediction.used_global_amount),
         used_global_amount_fraction=mean(prediction.used_global_amount),
         mean_effective_stations=mean(prediction.effective_stations),
@@ -300,4 +301,63 @@ function predict_selected(
         throw(ArgumentError("unknown method: $method"))
     end
     return mode == "direct" ? max.(interpolated, 0.0) : max.(y_sat_target .+ interpolated, 0.0)
+end
+
+"""
+Refit a method's already-selected hyperparameters across the inner selection split and stitch the
+held-out inner predictions into one `n_train × n_time` matrix.
+
+This is what makes `auto` a fair comparison rather than a scan-row lookup. Each method's
+`selected` scan row already carries an inner-split RMSE, but those numbers are scored on slightly
+different cell sets: a method is only required to reach `min_tuning_coverage`, and in the full run
+the selected candidates' coverage ranges 0.98-1.00, with `mgwr` — the method most likely to win —
+sitting lowest. Comparing RMSEs computed over different denominators would quietly reward whichever
+method dropped the hardest cells, on margins of about a percent. Re-predicting here lets the caller
+score every contender on the intersection of their masks.
+
+Deliberately no `dem_context`: the legacy DEM path is mutually exclusive with the joint path and is
+not part of the reported comparison, so `auto` does not run there. `joint_contexts` is
+`joint_selection_contexts` — one `JointFoldContext` per inner group, already built for the scan, and
+matched here by `target_positions` rather than by position so a reordering cannot silently misalign
+a context with the wrong stations.
+
+`time_indices` restricts the result to the tuning hours, so `auto` compares methods over exactly
+the hours the scan scored them on. The two model families need it applied at different points: a
+`JointFoldContext` indexes hours internally and `predict_selected` hands it the full residual
+matrix, so the joint methods predict every hour and are subset afterwards, while everything else
+can be given pre-sliced inputs and never touches the other hours at all. Predicting the full
+record for the joint methods and slicing costs roughly 5-10% of their scan, which is why this
+does not thread a `time_indices` keyword through `predict_selected` and risk the reported
+prediction path for it.
+"""
+function inner_selection_prediction(
+    selected, method::String, mode::String, train_lonlat::Matrix{Float64},
+    y_obs_train::Matrix{Float64}, y_sat_train::Matrix{Float64},
+    selection_groups::Vector{Vector{Int}}; joint_contexts=nothing,
+    time_indices::Union{Nothing,Vector{Int}}=nothing,
+)
+    is_joint = joint_contexts !== nothing &&
+        hasproperty(selected, :joint_model) && selected.joint_model
+    columns = time_indices === nothing ? collect(axes(y_obs_train, 2)) : time_indices
+    obs = is_joint ? y_obs_train : y_obs_train[:, columns]
+    sat = is_joint ? y_sat_train : y_sat_train[:, columns]
+    n_train = size(obs, 1)
+    out_of_fold = _selection_oof(selection_groups, n_train, size(obs, 2), function (inner_train, group)
+        joint_context = if joint_contexts === nothing
+            nothing
+        else
+            entry = findfirst(candidate -> candidate.target_positions == group, joint_contexts)
+            entry === nothing && throw(ArgumentError(
+                "no joint selection context matches inner group $(group)",
+            ))
+            joint_contexts[entry].context
+        end
+        return predict_selected(
+            selected, method, mode,
+            train_lonlat[inner_train, :], train_lonlat[group, :],
+            obs[inner_train, :], sat[inner_train, :], sat[group, :];
+            joint_context,
+        )
+    end)
+    return is_joint ? out_of_fold[:, columns] : out_of_fold
 end

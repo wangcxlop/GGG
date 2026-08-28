@@ -418,7 +418,7 @@ function _local_predict(
         count(valid) >= p + 1 || continue
         X = Xtrain[valid, :]; values = y[valid]; selected_weights = w[valid]
         beta = try
-            (X' * (selected_weights .* X) + ridge * I) 
+            (X' * (selected_weights .* X) + ridge * I) \
                 (X' * (selected_weights .* values))
         catch
             continue

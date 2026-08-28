@@ -30,6 +30,7 @@ const DEFAULT_RUN = joinpath(
 )
 # The claim is defined on the balanced-spatial partition only (see `_one_metric`).
 const SCHEME = "balanced_spatial"
+
 # `hurdle_gwr` is no longer produced by the benchmark, but it is kept here so older run
 # directories that still contain it can be re-assessed; methods absent from disk are skipped.
 const ASSESSED_METHODS = [
@@ -78,13 +79,48 @@ which every method inherits from direct `gwr`'s failures.
 evaluable_cells(y_obs::Matrix{Float64}, y_sat::Matrix{Float64}) =
     .!isnan.(y_obs) .& .!isnan.(y_sat)
 
+"""
+Locate a run's scheme directory under either output layout.
+
+A single-partition run keeps `<run>/<scheme>/`; a repeated run nests under
+`<run>/repeat_NN/<scheme>/` (`_repeat_dir`). Only the first partition writes `oof_*.csv`
+(`run_interpolation_benchmark` guards them on `repeat_index == 1` because they are large), so a
+re-assessment is inherently a first-partition exercise and says so rather than searching further.
+"""
+function scheme_directory(run_dir::AbstractString)
+    flat = joinpath(run_dir, SCHEME)
+    isdir(flat) && return flat
+    nested = joinpath(run_dir, "repeat_01", SCHEME)
+    isdir(nested) && return nested
+    error("no $SCHEME directory in $run_dir (looked for $flat and $nested)")
+end
+
+"""
+Per-station distance to the nearest station outside its own fold.
+
+`append_stratified_metrics!` needs this for the `nearest_train_km` stratum. The benchmark computes
+it in the fold loop and does not write it out, so it is rebuilt here from `split_common.csv`
+rather than passing `NaN` and leaving a whole stratum empty in the rebuilt table.
+"""
+function nearest_train_km(fold_of::Vector{Int}, lonlat::Matrix{Float64})
+    distance = fill(NaN, length(fold_of))
+    for fold in sort(unique(fold_of))
+        validation = findall(==(fold), fold_of)
+        training = findall(!=(fold), fold_of)
+        (isempty(validation) || isempty(training)) && continue
+        distance[validation] = vec(minimum(
+            haversine_distance_matrix(lonlat[training, :], lonlat[validation, :]), dims=1,
+        ))
+    end
+    return distance
+end
+
 function main(args=ARGS)
     run_dir = isempty(args) ? DEFAULT_RUN : abspath(args[1])
     isdir(run_dir) || error("benchmark output directory not found: $run_dir")
     outdir = joinpath(ROOT, "output", "benchmark_diagnostics", basename(run_dir))
     mkpath(outdir)
 
-    metrics = CSV.read(joinpath(run_dir, "metrics_pooled.csv"), DataFrame)
     mger = study_config(outdir)
     products, ids, product_data = load_global_common_product_data(mger)
     # Only `bootstrap_reps` and `seed` are read out of the config here; both must match the run
@@ -97,11 +133,19 @@ function main(args=ARGS)
     # Product strings stay UPPERCASE: the bootstrap RNG seed hashes the product name
     # (`seed + 1000 * baseline_index + sum(codeunits(product))`), so feeding it the lowercase
     # directory name would silently change every draw.
+    scheme_dir = scheme_directory(run_dir)
     predictions = Dict(product => load_predictions(
-        joinpath(run_dir, SCHEME, lowercase(product)), ids) for product in products)
+        joinpath(scheme_dir, lowercase(product)), ids) for product in products)
     masks = Dict(product => read_mask_matrix(
-        joinpath(run_dir, SCHEME, lowercase(product), "common_evaluation_mask.csv"), ids)
+        joinpath(scheme_dir, lowercase(product), "common_evaluation_mask.csv"), ids)
         for product in products)
+    # Rebuilt for the `nearest_train_km` stratum of the metrics table assembled below.
+    station_meta = load_station_meta(mger.station_meta_path;
+        station_id_col=mger.station_id_col, lon_col=mger.lon_col, lat_col=mger.lat_col)
+    lonlat = build_X_lonlat(station_meta, ids)
+    fold_map = read_fold_map(joinpath(scheme_dir, "split_common.csv"))
+    fold_of = [fold_map[id] for id in ids]
+    nearest_distance = nearest_train_km(fold_of, lonlat)
     evaluable = Dict(product => evaluable_cells(
         product_data[product].Y_obs, product_data[product].Y_sat) for product in products)
 
@@ -112,6 +156,19 @@ function main(args=ARGS)
     for method in ASSESSED_METHODS
         method_products = String[]
         own = Dict{String,Float64}()
+        # Rebuilt per method rather than read from `metrics_pooled.csv`, and kept separate from
+        # every other method's rows. Both matter:
+        #
+        # 1. Estimand. The bootstrap gate is computed on a pairwise mask while the pooled table was
+        #    scored on the shared `MASK_METHODS` mask, so a claim row used to mix two different
+        #    sample masks - the significance test answering one question and the heavy/moderate/
+        #    year/event gates beside it answering another. Everything now runs on `claim_mask`.
+        # 2. Isolation. The accumulated `bootstrap_rows` used to be handed to every call, and only
+        #    `assess_gwr_claim`'s internal `row.method == method` filter kept the earlier methods'
+        #    rows out of the completeness check. Passing this method's rows alone removes the
+        #    dependence on that filter holding.
+        method_metric_rows = NamedTuple[]
+        method_bootstrap_rows = NamedTuple[]
         for product in products
             haskey(predictions[product], method) || continue
             data = product_data[product]
@@ -120,30 +177,54 @@ function main(args=ARGS)
             own[product] = count(
                 evaluable[product] .& .!isnan.(predictions[product][method])) / n_evaluable
             push!(method_products, product)
+            # One mask for the whole claim row: evaluable cells this method and all three
+            # baselines predicted. Every gate in the row is then scored on the same cells, and
+            # `pairwise_mask=true` below becomes a no-op restriction rather than a second mask.
+            claim_mask = evaluable[product] .& .!isnan.(predictions[product][method])
+            for baseline in TRADITIONAL_METHODS
+                claim_mask = claim_mask .& .!isnan.(predictions[product][baseline])
+            end
+            claim_mask = BitMatrix(claim_mask)
             push!(coverage_rows, (;
                 scheme=SCHEME, product, method, n_evaluable, own_coverage=own[product],
                 # Same denominator as `own_coverage`, so the two are directly comparable; the
                 # gap between them is what the other MASK_METHODS cost this method.
                 shared_mask_of_evaluable=count(mask) / n_evaluable,
                 shared_mask_of_grid=count(mask) / length(mask),
+                claim_mask_of_evaluable=count(claim_mask) / n_evaluable,
             ))
-            append!(bootstrap_rows, paired_bootstrap_rows(
-                cfg, SCHEME, product, data.times, data.Y_obs, predictions[product], mask;
+            for scored_method in vcat(TRADITIONAL_METHODS, [method])
+                append_stratified_metrics!(
+                    method_metric_rows, SCHEME, product, scored_method, data.times, data.Y_obs,
+                    predictions[product][scored_method], claim_mask, nearest_distance,
+                    cfg.event_thresholds; repeat=1, seed=cfg.seed,
+                )
+            end
+            append!(method_bootstrap_rows, paired_bootstrap_rows(
+                cfg, SCHEME, product, data.times, data.Y_obs, predictions[product], claim_mask;
                 method, pairwise_mask=true,
             ))
             println("  $method / $product: own coverage " *
                 "$(round(own[product]; digits=4)), shared mask " *
-                "$(round(count(mask) / n_evaluable; digits=4)) of evaluable")
+                "$(round(count(mask) / n_evaluable; digits=4)) of evaluable, claim mask " *
+                "$(round(count(claim_mask) / n_evaluable; digits=4))")
         end
         isempty(method_products) && continue
         push!(claim_frames, assess_gwr_claim(
-            metrics, DataFrame(bootstrap_rows), method_products;
+            DataFrame(method_metric_rows), DataFrame(method_bootstrap_rows), method_products;
             method, own_coverage=own,
         ))
+        append!(bootstrap_rows, method_bootstrap_rows)
     end
 
     # `assess_gwr_claim` reports `supported_product_count` / `overall_claim_supported` per call,
     # so each frame's summary columns already refer to that method's own three products.
+    #
+    # What it does NOT do is correct for testing five methods. Holm runs within a stratum across
+    # the three baselines only (`paired_bootstrap_rows`), so reading down this table and reporting
+    # whichever GWR variant came out supported is a post-hoc maximum over five correlated tests on
+    # the held-out fold. The benchmark's `auto` method exists to answer "which model should be
+    # used" without that; this table answers "how did each one do", which is a different question.
     claims = vcat(claim_frames...)
     comparisons = DataFrame(bootstrap_rows)
     CSV.write(joinpath(outdir, "claim_assessment_by_method.csv"), claims)

@@ -767,6 +767,20 @@ function write_validation_scope(
 	min_scan_coverage::Float64,
 	kernel_candidates::Vector{Int}=Int[],
 )
+	# The held-out geometry decides what the run can claim. `:random` interleaves validation
+	# stations with training ones, so it supports "stations not used in fitting" but NOT
+	# spatial generalisation to gauge-free ground; only `:spatial_block` holds out contiguous
+	# area. Asserting the spatial claim under `:random` is a scientific overclaim, not a
+	# naming slip, so the string is derived rather than fixed.
+	supported_claim = if fold_scheme === :spatial_block
+		"gauge-network-assisted spatial bias correction/interpolation for stations in held-out spatial blocks"
+	elseif fold_scheme === :random
+		"gauge-network-assisted bias correction/interpolation for stations not used in fitting, " *
+			"held out at random and therefore interleaved with training stations; generalisation " *
+			"to gauge-free regions is NOT supported by this split"
+	else
+		"gauge-network-assisted bias correction/interpolation for stations not used in fitting"
+	end
 	rows = [
 		(key="validation_target", value="held-out station locations at matched observation/satellite timestamps"),
 		(key="training_signal", value="same-timestamp observed-minus-satellite residuals from training stations"),
@@ -786,7 +800,7 @@ function write_validation_scope(
 		(key="parameter_scan_use_loocv_eval", value=string(use_loocv_eval)),
 		(key="cv_scheme", value=cv_scheme),
 		(key="fold_scheme", value=fold_scheme === nothing ? "none" : string(fold_scheme)),
-		(key="supported_claim", value="gauge-network-assisted spatial bias correction/interpolation for stations not used in fitting"),
+		(key="supported_claim", value=supported_claim),
 		(key="unsupported_claim", value="standalone satellite correction or temporal forecast without concurrent training-station observations"),
 	]
 	CSV.write(joinpath(outdir, "validation_scope.csv"), DataFrame(rows))
@@ -796,11 +810,13 @@ end
 """
     split_stations_train_val(station_ids::Vector{String}; train_frac::Float64=0.8, rng::AbstractRNG=Random.GLOBAL_RNG)
 
-Split stations into training and validation sets for spatial cross-validation.
+Split stations into training and validation sets by a random shuffle.
 Returns: (train_ids, val_ids)
 
-This approach tests generalization to new/unseen locations, which is appropriate
-for spatial prediction tasks.
+The held-out stations are new/unseen *locations*, so this tests generalisation to stations that
+were not fitted. It is NOT a spatial split: the shuffle never reads `lonlat`, so held-out
+stations sit interleaved with training ones and a validation station typically has a training
+neighbour a few km away. For held-out *area*, use `split_stations_spatial_block_kfold`.
 """
 
 # 按站点进行空间训练/验证集划分 
@@ -1048,7 +1064,7 @@ function run_spatial_kfold_pipeline(
 			)
 			CSV.write(joinpath(fold_dir, "split_$(product)_spatialcv.csv"), split_df)
 
-			println("[$product] Spatial 5-fold CV ($fold_scheme) fold $fold_idx/$k: $(length(train_ids)) train sites, $(length(val_ids)) val sites")
+			println("[$product] $cv_scheme fold $fold_idx/$k: $(length(train_ids)) train sites, $(length(val_ids)) val sites")
 			result = evaluate_spatial_holdout(
 				product, ids, times, Y_obs, Y_sat, lonlat, train_ids, val_ids, cfg;
 				scan_path=joinpath(fold_dir, "scan_$(product)_spatialcv.csv"),
@@ -1290,11 +1306,12 @@ end
 """
     run_pipeline(cfg::MGERConfig; spatial_cv::Bool=true, train_frac::Float64=0.8, rng::AbstractRNG=Random.GLOBAL_RNG)
 
-Run MGER_FINAL pipeline with optional spatial cross-validation.
+Run MGER_FINAL pipeline with an optional held-out station split.
 
 # Arguments
 - cfg: MGERConfig with pipeline parameters
-- spatial_cv: If true, use train/validation split by sites (spatial holdout)
+- spatial_cv: If true, hold out a random `1 - train_frac` share of stations (see
+  `split_stations_train_val` - a random station holdout, not a spatial one)
 - train_frac: Fraction of stations to use for training (default 0.8)
 - rng: Random number generator for reproducible splits
 
@@ -1307,9 +1324,12 @@ function run_pipeline(cfg::MGERConfig; spatial_cv::Bool=true, train_frac::Float6
 	if !spatial_cv && !cfg.use_loocv_eval
 		error("Refusing spatial_cv=false with use_loocv_eval=false: this would report full-fit in-sample metrics as if they were validation results. Run spatial_cv=true for independent evaluation; that path also writes corr_*_fullfit_insample.csv product files.")
 	end
+	# `spatial_cv=true` is a random 80/20 station holdout - `split_stations_train_val` shuffles
+	# the id list and never reads coordinates - so the label must not say "spatial".
+	cv_scheme = spatial_cv ? "random_station_holdout" : "loocv_eval_all_stations"
 	write_validation_scope(
 		cfg.outdir;
-		cv_scheme=spatial_cv ? "single_station_holdout" : "loocv_eval_all_stations",
+		cv_scheme=cv_scheme,
 		use_loocv_eval=cfg.use_loocv_eval,
 		fold_scheme=nothing,
 		slope_ridge_candidates=cfg.slope_ridge_candidates,
@@ -1375,7 +1395,7 @@ function run_pipeline(cfg::MGERConfig; spatial_cv::Bool=true, train_frac::Float6
 				pairwise(Haversine(6378.388), points_train, points_val)
 			end
 
-			println("[$product] Spatial CV: $(length(train_ids)) train sites, $(length(val_ids)) val sites")
+			println("[$product] $cv_scheme: $(length(train_ids)) train sites, $(length(val_ids)) val sites")
 
 			# Parameter scan on training data only
 			scan_df, best = scan_params(
