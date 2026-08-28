@@ -9,6 +9,12 @@ const METHODS = [
 
 function verify(mode::Symbol)
     mode in (:smoke, :full) || error("mode must be smoke or full")
+    # STALE: `run_interpolation_benchmark.jl` appends a `_mgwr<grouping>` suffix for any grouping
+    # other than the historical `:split`, and the default is now `:intercept_only`. A default run
+    # therefore lands in `..._nested_mgwrintercept_only` and this script reports every output as
+    # missing. Pre-existing drift from the grouping-default change, not fixed here because the
+    # right fix (teach this script the runner's naming, or have the runner record its outdir) is a
+    # decision about the verification scripts.
     outdir = joinpath(ROOT, "output", (mode == :smoke ?
         "interpolation_benchmark_smoke_joint_covariates" :
         "interpolation_benchmark_full_joint_covariates") * "_nested")

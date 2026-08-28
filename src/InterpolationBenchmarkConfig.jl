@@ -95,6 +95,12 @@ Base.@kwdef struct InterpolationBenchmarkConfig
     idw_powers::Vector{Float64} = [1.0, 1.5, 2.0, 2.5, 3.0]
     neighbor_candidates::Vector{Union{Nothing,Int}} = Union{Nothing,Int}[8, 16, 32, 64, nothing]
     tps_smooth_candidates::Vector{Float64} = [1e-4, 1e-3, 1e-2, 1e-1, 1.0]
+    # Gates two different quantities under one threshold. In `_select_candidate!` it is the
+    # share of *inner-tuning* cells a candidate scored, and rejects the candidate; in
+    # `_benchmark_status_row` the same number is compared against a fold's *outer prediction*
+    # coverage to mark a run "partial". Those are different estimands over different samples and
+    # there is no reason they should share a value - separating them is a config change with a
+    # numbers impact, so it is recorded rather than done.
     min_tuning_coverage::Float64 = 0.95
     tuning_max_times::Int = 336
     # `:stratified` weights the tuning subsample so its RMSE estimates the pooled RMSE the

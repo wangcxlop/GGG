@@ -196,6 +196,14 @@ function load_era5_panel(
     return (; values=matrices, qc)
 end
 
+# One of four different spatial-fold builders in the project, and the simplest: a sort-and-slice
+# along the longer axis. The others are `split_stations_balanced_spatial_kfold`
+# (InterpolationBenchmarkFolds.jl - Hilbert-seeded capacity-constrained Lloyd),
+# `DEMTerrainExperiment._balanced_spatial_folds` (farthest-point-seeded Lloyd) and
+# `MGERPipeline.split_stations_spatial_block_kfold` (contiguous lon/lat blocks). They are genuinely
+# different partitioning algorithms rather than copies, so they are not merged; but which one a
+# given selection path uses is historical, not reasoned, and that is worth knowing before reading
+# across their results.
 function balanced_spatial_folds(
     station_ids::Vector{String}, lonlat::Matrix{Float64}; k::Int=5,
 )

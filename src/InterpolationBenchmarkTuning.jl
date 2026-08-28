@@ -79,6 +79,12 @@ out by hand, so how a failed candidate is recorded lived in eight places at once
 
 The joint scans pass their own `status`/`error` through `score`, because there a coverage
 shortfall is a recorded failure rather than a thrown one.
+
+Note what this catch cannot distinguish: a candidate that genuinely could not be fitted, and a
+programming error inside the scoring path. Both become a `status="failed"` row, and if every
+candidate hits the same bug the caller reports it as "no kernel/bandwidth combination converged".
+That is exactly how an `UndefVarError` presented itself during this refactor. The recorded `error`
+column carries the real message, so check it before believing a non-convergence report.
 """
 function _scan_candidate!(score, scan_rows::Vector{NamedTuple}; fields...)
     try

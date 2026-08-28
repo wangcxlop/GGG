@@ -6,6 +6,14 @@ using Statistics
 export haversine_distance_matrix, local_km_coordinates
 export idw_predict, adw_predict, tps_predict, tps_loo_predict
 
+# Station distances are NOT computed against one radius project-wide. This value (the WGS72
+# equatorial radius) is also used by MGERPipeline, DEMTerrainExperiment and
+# PrecipitationCorrection, but JointCovariateModels and ERA5VariableSelection use the mean-Earth
+# 6371.0088 instead. Each component is internally consistent, so nothing is wrong within a given
+# model; the two families are simply not on the same metric, which matters when comparing a
+# GWR-family bandwidth in km against a joint-covariate one. Left as-is deliberately: unifying
+# them moves every published number. Fix it in a commit that re-runs the benchmark, not in a
+# refactor.
 const EARTH_RADIUS_KM = 6378.388
 
 function _check_inputs(
