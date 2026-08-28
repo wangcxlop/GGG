@@ -37,6 +37,36 @@ Scripts under `scripts/run_*.jl` and `scripts/verify_*.jl` are the actual entry 
 julia --project=. scripts/run_mger_smoke_202206.jl
 ```
 
+Run the interpolation benchmark multithreaded, but **not** with `-t auto`. Its dominant loop is
+`dynamic_covariate_predict`, which fits one hour per task, and each of those tasks allocates
+~1.6 MB — two n×n local-hat matrices among it. Past a handful of threads the large-object
+allocation contends worse than the extra cores help, so the loop gets *slower*. Measured on this
+24-core box, one full-mode call over 334 tuning hours:
+
+| Julia threads | 4 | 8 | 24 |
+|---|---|---|---|
+| loop wall time | **167 ms** | 201 ms | 274 ms |
+
+`-t 4` also beat `-t auto` end to end on the smoke benchmark (314 s vs 393 s), with byte-identical
+output — the results do not depend on the thread count, only the wall clock does.
+
+```sh
+julia -t 4 --project=. scripts/run_interpolation_benchmark.jl full --nested-covariates
+```
+
+Four is not a magic number: it is where this machine's allocation contention starts to bite.
+Re-derive it on new hardware with `scripts/profile_hour_fit.jl`, which prints the per-hour cost
+and the loop's speedup at the thread count it is given. Do not run single-threaded — that is
+~3x slower than the best setting.
+
+Do **not** set `BLAS.set_num_threads`. It looks like free speed — the GWR hot path is gemv and
+p×p solves, where BLAS threading only contends with the Julia-level threading above — but `tps`
+factorizes a dense (n+3)×(n+3) system that is well past OpenBLAS's threading threshold, and a
+threaded LU accumulates in a different order. Pinning BLAS to one thread was measured to move
+`tps`'s RMSE in the last three or four digits, which propagates into `metrics_pooled.csv`,
+`paired_comparisons.csv` and `claim_assessment.csv`. Every other method was byte-identical. The
+run's BLAS thread count is therefore part of what makes published numbers reproducible.
+
 ## Architecture
 
 ### Two tiers of `src/`

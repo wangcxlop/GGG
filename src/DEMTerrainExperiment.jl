@@ -226,15 +226,26 @@ function terrain_screen(
     return DataFrame(rows), DataFrame(vif_rows), active
 end
 
+# The per-row `deg2rad` and `cos(lat)` are hoisted out of the double loop: they depend on `i`
+# (or `j`) alone, and the old body recomputed each row's pair once per column. Same values, same
+# order of operations per entry - `a` is still `sin(dlat/2)^2 + cos(lat1)*cos(lat2)*sin(dlon/2)^2`
+# built from the identical `Float64`s - so the matrix is bit-for-bit what it was.
 function _haversine_matrix(train_lonlat::Matrix{Float64}, target_lonlat::Matrix{Float64})
-    result = Matrix{Float64}(undef, size(train_lonlat, 1), size(target_lonlat, 1))
+    ntrain, ntarget = size(train_lonlat, 1), size(target_lonlat, 1)
+    result = Matrix{Float64}(undef, ntrain, ntarget)
     radius = 6378.388
-    for j in axes(target_lonlat, 1), i in axes(train_lonlat, 1)
-        lon1, lat1 = deg2rad(train_lonlat[i, 1]), deg2rad(train_lonlat[i, 2])
+    train_lon = [deg2rad(train_lonlat[i, 1]) for i in 1:ntrain]
+    train_lat = [deg2rad(train_lonlat[i, 2]) for i in 1:ntrain]
+    train_coslat = cos.(train_lat)
+    @inbounds for j in 1:ntarget
         lon2, lat2 = deg2rad(target_lonlat[j, 1]), deg2rad(target_lonlat[j, 2])
-        dlon, dlat = lon2 - lon1, lat2 - lat1
-        a = sin(dlat / 2)^2 + cos(lat1) * cos(lat2) * sin(dlon / 2)^2
-        result[i, j] = 2radius * asin(sqrt(clamp(a, 0.0, 1.0)))
+        coslat2 = cos(lat2)
+        for i in 1:ntrain
+            lat1 = train_lat[i]
+            dlon, dlat = lon2 - train_lon[i], lat2 - lat1
+            a = sin(dlat / 2)^2 + train_coslat[i] * coslat2 * sin(dlon / 2)^2
+            result[i, j] = 2radius * asin(sqrt(clamp(a, 0.0, 1.0)))
+        end
     end
     return result
 end
@@ -321,24 +332,53 @@ function _adaptive_bisquare(distances::Vector{Float64}, neighbors::Int)
     )
 end
 
+"""
+Per-target local weights for [`_gwr_smoothers`](@ref): the surviving neighbour indices and their
+weights, for every target.
+
+Split out because these depend on `distances`, `neighbors` and `exclude_self` alone — never on
+the design matrix. `spatial_variability_test` rebuilds a smoother a thousand times over the same
+geometry with only `X` permuted, and used to recompute this, including a sort per target, every
+single time.
+
+The `p + 1` sufficiency check lives here too, so it is raised from the caller's own task rather
+than from inside a threaded permutation loop, where it would surface wrapped.
+"""
+function _gwr_local_weights(
+    distances::Matrix{Float64}, neighbors::Int, p::Int; exclude_self::Bool=true,
+)
+    n = size(distances, 1)
+    size(distances) == (n, n) || throw(DimensionMismatch("GWR smoother requires square distances"))
+    entries = Vector{Tuple{Vector{Int},Vector{Float64}}}(undef, n)
+    d = Vector{Float64}(undef, n)
+    buffer = Vector{Float64}(undef, n)
+    w = Vector{Float64}(undef, n)
+    for target in 1:n
+        copyto!(d, view(distances, :, target))
+        exclude_self && (d[target] = Inf)
+        _adaptive_bisquare!(w, d, neighbors, buffer)
+        valid = w .> 0
+        count(valid) >= p + 1 || throw(ArgumentError("insufficient local observations for bandwidth $neighbors"))
+        indices = findall(valid)
+        entries[target] = (indices, w[indices])
+    end
+    return entries
+end
+
 function _gwr_smoothers(
     X::Matrix{Float64}, distances::Matrix{Float64}, neighbors::Int;
-    ridge::Float64=1e-8, exclude_self::Bool=true,
+    ridge::Float64=1e-8, exclude_self::Bool=true, local_weights=nothing,
 )
     n, p = size(X)
     size(distances) == (n, n) || throw(DimensionMismatch("GWR smoother requires square distances"))
+    entries = local_weights === nothing ?
+        _gwr_local_weights(distances, neighbors, p; exclude_self) : local_weights
     smoothers = [zeros(Float64, n, n) for _ in 1:p]
     for target in 1:n
-        d = copy(@view distances[:, target])
-        exclude_self && (d[target] = Inf)
-        w = _adaptive_bisquare(d, neighbors)
-        valid = w .> 0
-        count(valid) >= p + 1 || throw(ArgumentError("insufficient local observations for bandwidth $neighbors"))
-        Xv = X[valid, :]
-        wv = w[valid]
+        indices, wv = entries[target]
+        Xv = X[indices, :]
         A = Xv' * (wv .* Xv) + ridge * I
         B = A \ (Xv' .* wv')
-        indices = findall(valid)
         for coefficient in 1:p
             smoothers[coefficient][target, indices] = B[coefficient, :]
         end
@@ -402,20 +442,33 @@ function spatial_variability_test(
     group_indices = [findall(==(group), design_groups) for group in groups]
     observed_statistics = [sum(var(@view observed_beta[:, index]) for index in indices)
         for indices in group_indices]
-    exceed = zeros(Int, length(groups))
-    for _ in 1:permutations
-        permutation = randperm(rng, length(y))
+    # The permutations are drawn up front, from the same `rng` in the same order, so
+    # `permutations_drawn[i]` is exactly what iteration `i` used to draw for itself. That leaves
+    # the bodies independent, and each one is a full O(n^2 p) smoother rebuild - the dominant cost
+    # of the whole test. `hits` is written one row per permutation and reduced afterwards;
+    # summing booleans is exact and order-free, so `exceed` is unchanged.
+    permutations_drawn = [randperm(rng, length(y)) for _ in 1:permutations]
+    # Weights depend on the geometry and bandwidth only, never on the permuted design, so they are
+    # built once here instead of once per permutation.
+    local_weights = _gwr_local_weights(distances, best.bandwidth, size(X, 2); exclude_self=false)
+    # `Matrix{Bool}`, not a `BitMatrix`: a BitArray packs 64 entries into one word, so two threads
+    # writing different rows of the same column would read-modify-write the same word and lose
+    # updates. One byte per entry makes the concurrent writes independent.
+    hits = fill(false, permutations, length(groups))
+    Threads.@threads :greedy for permutation_index in 1:permutations
+        permutation = permutations_drawn[permutation_index]
         Xpermuted = X[permutation, :]
         ypermuted = y[permutation]
         permuted_smoothers = _gwr_smoothers(
-            Xpermuted, distances, best.bandwidth; ridge, exclude_self=false,
+            Xpermuted, distances, best.bandwidth; ridge, exclude_self=false, local_weights,
         )
         for group_index in eachindex(groups)
             statistic = sum(var(permuted_smoothers[index] * ypermuted)
                 for index in group_indices[group_index])
-            exceed[group_index] += statistic >= observed_statistics[group_index]
+            hits[permutation_index, group_index] = statistic >= observed_statistics[group_index]
         end
     end
+    exceed = vec(sum(hits, dims=1))
     rows = NamedTuple[]
     pvalues = [(count + 1) / (permutations + 1) for count in exceed]
     for group in groups
@@ -435,6 +488,23 @@ function spatial_variability_test(
     end
     scan[!, :product] = fill(product, nrow(scan))
     return DataFrame(rows), scan
+end
+
+"""
+Rows `rows` and columns `columns` of a supplied distance matrix, without copying when the
+selection is the whole matrix.
+
+The gather is a 286 KB allocation at fold scale and it is by far the most common case that
+nothing is actually being dropped - every station is valid for most hours. `dynamic_covariate_predict`
+fits one hour per task across every core, and at that width the large-object allocations, not the
+arithmetic, are what stop the loop scaling: it runs fastest on four threads and gets *slower* on
+twenty-four. A view would still allocate a wrapper and would push a non-`Matrix` type through
+`_local_hat`; returning the matrix itself keeps both the type and the values exactly as they were.
+"""
+function _distance_subset(distances::Matrix{Float64}, rows, columns)
+    length(rows) == size(distances, 1) && length(columns) == size(distances, 2) &&
+        return distances
+    return distances[rows, columns]
 end
 
 function _local_hat(
@@ -755,6 +825,17 @@ function _multiscale_predict_complete(
     return prediction, true, fitted.iterations
 end
 
+"""
+`train_distances`/`target_distances` let a caller that fits many response columns over the same
+station geometry hand in the haversine matrices instead of having them rebuilt here.
+
+The contract is "the distances of the coordinate arguments exactly as passed":
+`train_distances[i, j]` is the distance between `train_lonlat[i, :]` and `train_lonlat[j, :]`, and
+`target_distances[i, j]` between `train_lonlat[i, :]` and `target_lonlat[j, :]`. The per-column
+`indices`/`target_indices` subsetting below is then applied to the matrix the same way it is
+applied to the coordinates, so the submatrix is elementwise what `_haversine_matrix` would have
+returned for the subset. `nothing` (the default) computes them here, as before.
+"""
 function mixed_gwr_predict(
     Xlocal_train::Matrix{Float64}, Xglobal_train::Matrix{Float64}, Ytrain::Matrix{Float64},
     train_lonlat::Matrix{Float64}, Xlocal_target::Matrix{Float64},
@@ -762,6 +843,8 @@ function mixed_gwr_predict(
     kernel::Function; adaptive::Bool=true,
     ridge::Float64=1e-8, tolerance::Float64=1e-5, max_iterations::Int=200,
     exclude_self::Bool=false,
+    train_distances::Union{Nothing,Matrix{Float64}}=nothing,
+    target_distances::Union{Nothing,Matrix{Float64}}=nothing,
 )
     if exclude_self
         size(train_lonlat) == size(target_lonlat) ||
@@ -771,7 +854,11 @@ function mixed_gwr_predict(
     end
     prediction = fill(NaN, size(Xlocal_target, 1), size(Ytrain, 2))
     converged = trues(size(Ytrain, 2))
-    cache = Dict{String,NamedTuple}()
+    # Keyed on the index vector itself. `Vector{Int}` hashes and compares by content, so the
+    # cache behaves exactly as it did on the joined string - without building a ~1.5 KB
+    # `String` per time column, which on the joint path (one column per call) was the whole
+    # cost of a cache that could never hit.
+    cache = Dict{Vector{Int},NamedTuple}()
     for time in axes(Ytrain, 2)
         valid = isfinite.(@view Ytrain[:, time])
         if count(valid) <= size(Xlocal_train, 2) + size(Xglobal_train, 2) + 2
@@ -779,8 +866,7 @@ function mixed_gwr_predict(
             continue
         end
         indices = findall(valid)
-        key = join(indices, ',')
-        operators = get!(cache, key) do
+        operators = get!(cache, indices) do
             local_train_valid = Xlocal_train[indices, :]
             global_train_valid = Xglobal_train[indices, :]
             lonlat_valid = train_lonlat[indices, :]
@@ -791,14 +877,20 @@ function mixed_gwr_predict(
             # Clamping to the valid station count only makes sense for an adaptive neighbor
             # count; a fixed-km bandwidth must be applied as given.
             adjusted_bandwidth = adaptive ? min(bandwidth, length(indices) - 1) : bandwidth
+            train_distances_valid = train_distances === nothing ?
+                _haversine_matrix(lonlat_valid, lonlat_valid) :
+                _distance_subset(train_distances, indices, indices)
+            target_distances_valid = target_distances === nothing ?
+                _haversine_matrix(lonlat_valid, target_lonlat_valid) :
+                _distance_subset(target_distances, indices, target_indices)
             local_hat = _local_hat(
                 local_train_valid, local_train_valid,
-                _haversine_matrix(lonlat_valid, lonlat_valid), adjusted_bandwidth, kernel;
+                train_distances_valid, adjusted_bandwidth, kernel;
                 adaptive, ridge,
             )
             target_hat = _local_hat(
                 local_train_valid, local_target_valid,
-                _haversine_matrix(lonlat_valid, target_lonlat_valid), adjusted_bandwidth, kernel;
+                target_distances_valid, adjusted_bandwidth, kernel;
                 adaptive, ridge, exclude_self,
             )
             global_hat = _global_projection(global_train_valid; ridge)
@@ -833,6 +925,8 @@ function multiscale_gwr_predict(
     target_lonlat::Matrix{Float64}, bandwidths::Vector{Float64}, kernel::Function;
     adaptive::Bool=true, ridge::Float64=1e-8,
     tolerance::Float64=1e-5, max_iterations::Int=200, exclude_self::Bool=false,
+    train_distances::Union{Nothing,Matrix{Float64}}=nothing,
+    target_distances::Union{Nothing,Matrix{Float64}}=nothing,
 )
     if exclude_self
         isempty(Xglobal_train) ||
@@ -844,7 +938,11 @@ function multiscale_gwr_predict(
     end
     prediction = fill(NaN, size(target_lonlat, 1), size(Ytrain, 2))
     converged = trues(size(Ytrain, 2))
-    cache = Dict{String,NamedTuple}()
+    # Keyed on the index vector itself. `Vector{Int}` hashes and compares by content, so the
+    # cache behaves exactly as it did on the joined string - without building a ~1.5 KB
+    # `String` per time column, which on the joint path (one column per call) was the whole
+    # cost of a cache that could never hit.
+    cache = Dict{Vector{Int},NamedTuple}()
     for time in axes(Ytrain, 2)
         valid = isfinite.(@view Ytrain[:, time])
         min_required = sum(size(X, 2) for X in local_train) + size(Xglobal_train, 2) + 2
@@ -853,8 +951,7 @@ function multiscale_gwr_predict(
             continue
         end
         indices = findall(valid)
-        key = join(indices, ',')
-        operators = get!(cache, key) do
+        operators = get!(cache, indices) do
             local_valid = [X[indices, :] for X in local_train]
             global_valid = Xglobal_train[indices, :]
             lonlat_valid = train_lonlat[indices, :]
@@ -865,16 +962,23 @@ function multiscale_gwr_predict(
             # Clamping to the valid station count only makes sense for an adaptive neighbor
             # count; a fixed-km bandwidth must be applied as given.
             adjusted_bandwidths = adaptive ? min.(bandwidths, length(indices) - 1) : bandwidths
-            train_distances = _haversine_matrix(lonlat_valid, lonlat_valid)
-            train_hats = [_local_hat(X, X, train_distances, bw, kernel; adaptive, ridge)
+            # Same `train_distances`/`target_distances` contract as `mixed_gwr_predict`; see its
+            # docstring. Local names differ from the keywords so the `do` block does not capture.
+            train_distances_valid = train_distances === nothing ?
+                _haversine_matrix(lonlat_valid, lonlat_valid) :
+                _distance_subset(train_distances, indices, indices)
+            train_hats = [_local_hat(X, X, train_distances_valid, bw, kernel; adaptive, ridge)
                 for (X, bw) in zip(local_valid, adjusted_bandwidths)]
             global_hat = _global_projection(global_valid; ridge)
             target_hats = if exclude_self
-                [_local_hat(X, X, train_distances, bw, kernel; adaptive, ridge, exclude_self=true)
+                [_local_hat(X, X, train_distances_valid, bw, kernel;
+                    adaptive, ridge, exclude_self=true)
                     for (X, bw) in zip(local_valid, adjusted_bandwidths)]
             else
-                target_distances = _haversine_matrix(lonlat_valid, target_lonlat_valid)
-                [_local_hat(X, Xt, target_distances, bw, kernel; adaptive, ridge)
+                target_distances_valid = target_distances === nothing ?
+                    _haversine_matrix(lonlat_valid, target_lonlat_valid) :
+                    _distance_subset(target_distances, indices, target_indices)
+                [_local_hat(X, Xt, target_distances_valid, bw, kernel; adaptive, ridge)
                     for (X, Xt, bw) in zip(local_valid, local_target_valid, adjusted_bandwidths)]
             end
             (; local_valid, global_valid, global_target_valid, target_indices,

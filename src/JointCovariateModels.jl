@@ -530,6 +530,8 @@ function _multiscale_predict_damped(
     local_target::Vector{Matrix{Float64}}, global_target::Matrix{Float64},
     target_lonlat::Matrix{Float64}, bandwidths::Vector{Float64}, kernel::Function, cfg;
     adaptive::Bool=true, exclude_self::Bool=false,
+    train_distances::Union{Nothing,Matrix{Float64}}=nothing,
+    target_distances::Union{Nothing,Matrix{Float64}}=nothing,
 )
     length(local_train) == length(local_target) == length(bandwidths) ||
         throw(DimensionMismatch(
@@ -537,9 +539,13 @@ function _multiscale_predict_damped(
             "must match the bandwidth count ($(length(bandwidths)))",
         ))
     y = vec(response)
-    train_distances = DEMTerrainExperiment._haversine_matrix(train_lonlat, train_lonlat)
+    # Supplied by `dynamic_covariate_predict`, which holds the station geometry fixed across every
+    # hour it fits and so builds these once instead of once per hour. Same contract as
+    # `mixed_gwr_predict`: the distances of `train_lonlat`/`target_lonlat` exactly as passed.
+    train_d::Matrix{Float64} = train_distances === nothing ?
+        DEMTerrainExperiment._haversine_matrix(train_lonlat, train_lonlat) : train_distances
     train_hats = [DEMTerrainExperiment._local_hat(
-        X, X, train_distances, bandwidth, kernel; adaptive, ridge=cfg.ridge, exclude_self,
+        X, X, train_d, bandwidth, kernel; adaptive, ridge=cfg.ridge, exclude_self,
     ) for (X, bandwidth) in zip(local_train, bandwidths)]
     global_hat = DEMTerrainExperiment._global_projection(global_train; ridge=cfg.ridge)
     local_components = [zeros(length(y)) for _ in local_train]
@@ -547,27 +553,50 @@ function _multiscale_predict_damped(
     previous = fill(NaN, length(y))
     converged = false
     relaxation = cfg.relaxation
+    # Scratch for the sweep loop, allocated once instead of once per group per sweep. The sweep
+    # count runs to the hundreds and this loop is the benchmark's innermost hot spot, so the
+    # allocations were thousands of short-lived vectors per hour-fit, inside a threaded region
+    # where the resulting GC pauses stop every thread at once.
+    #
+    # The arithmetic is deliberately left in exactly its original order and grouping, including
+    # `component_sum` starting from zero (which is what `reduce(+, ...; init=zeros(...))` did) and
+    # the `norm` of a materialised difference, so every value is bit-for-bit unchanged.
+    n_obs = length(y)
+    partial = Vector{Float64}(undef, n_obs)
+    update = Vector{Float64}(undef, n_obs)
+    component_sum = Vector{Float64}(undef, n_obs)
+    global_update = Vector{Float64}(undef, n_obs)
+    fitted = Vector{Float64}(undef, n_obs)
+    difference = Vector{Float64}(undef, n_obs)
     for _ in 1:cfg.max_iterations
         for group in eachindex(local_train)
-            partial = y - global_component
+            partial .= y .- global_component
             for other in eachindex(local_components)
                 other == group || (partial .-= local_components[other])
             end
-            update = train_hats[group] * partial
+            mul!(update, train_hats[group], partial)
             local_components[group] .= relaxation .* update .+
                 (1 - relaxation) .* local_components[group]
         end
-        local_sum = reduce(+, local_components; init=zeros(length(y)))
-        global_update = global_hat * (y - local_sum)
+        fill!(component_sum, 0.0)
+        for component in local_components
+            component_sum .+= component
+        end
+        partial .= y .- component_sum
+        mul!(global_update, global_hat, partial)
         global_component .= relaxation .* global_update .+
             (1 - relaxation) .* global_component
-        fitted = local_sum + global_component
+        fitted .= component_sum .+ global_component
         # A diverging sweep makes `change` NaN, which fails the tolerance test silently and then
         # burns the whole iteration budget. Bail as soon as the iterate leaves the reals, the way
         # the undamped sibling does.
         all(isfinite, fitted) || return fill(NaN, size(target_lonlat, 1), 1), falses(1)
-        change = all(isfinite, previous) ?
-            norm(fitted - previous) / max(norm(previous), eps()) : Inf
+        change = if all(isfinite, previous)
+            difference .= fitted .- previous
+            norm(difference) / max(norm(previous), eps())
+        else
+            Inf
+        end
         previous .= fitted
         if change < cfg.tolerance
             converged = true
@@ -584,14 +613,15 @@ function _multiscale_predict_damped(
             (global_train' * (y - local_sum))
     prediction = isempty(global_target) ? zeros(size(target_lonlat, 1)) :
         global_target * global_beta
-    target_distances = DEMTerrainExperiment._haversine_matrix(train_lonlat, target_lonlat)
+    target_d::Matrix{Float64} = target_distances === nothing ?
+        DEMTerrainExperiment._haversine_matrix(train_lonlat, target_lonlat) : target_distances
     for group in eachindex(local_train)
         partial = y - (isempty(global_train) ? zeros(length(y)) : global_train * global_beta)
         for other in eachindex(local_components)
             other == group || (partial .-= local_components[other])
         end
         target_hat = DEMTerrainExperiment._local_hat(
-            local_train[group], local_target[group], target_distances,
+            local_train[group], local_target[group], target_d,
             bandwidths[group], kernel; adaptive, ridge=cfg.ridge,
         )
         prediction .+= target_hat * partial
@@ -609,8 +639,28 @@ function dynamic_covariate_predict(
         throw(ArgumentError("unsupported joint model $method"))
     target_count = leave_one_out ? size(residuals, 1) : size(context.target_lonlat, 1)
     prediction = fill(NaN, target_count, length(time_indices))
-    converged = falses(length(time_indices))
-    Threads.@threads for output_time in eachindex(time_indices)
+    # `Vector{Bool}`, not a `BitVector`. The loop below writes one entry per iteration from
+    # many threads, and a BitVector packs 64 entries per word, so those writes would be
+    # read-modify-writes of a shared word and would drop each other. That race predates the
+    # scheduling change below but was mostly hidden by contiguous per-thread chunks; interleaved
+    # scheduling would make it routine. One byte per entry makes each write independent.
+    converged = fill(false, length(time_indices))
+    # The station geometry is a property of the fold context, not of the hour: only which rows are
+    # `valid` changes below. Building the two haversine matrices here rather than inside the loop
+    # replaces ~2*N^2 transcendental evaluations per hour with one row/column gather. The
+    # submatrix of a distance matrix is elementwise the distance matrix of the submatrix, so the
+    # values handed to `_local_hat` are unchanged.
+    full_train_distances =
+        DEMTerrainExperiment._haversine_matrix(context.train_lonlat, context.train_lonlat)
+    full_target_distances = leave_one_out ? full_train_distances :
+        DEMTerrainExperiment._haversine_matrix(context.train_lonlat, context.target_lonlat)
+    # `:greedy`, not the default chunked schedule. Hour cost here spans orders of magnitude - a
+    # dry or underdetermined hour falls straight through the `count(valid) > min_required` guard
+    # below, while a wet one runs hundreds of back-fitting sweeps - and precipitation is strongly
+    # autocorrelated in time, so splitting the range into contiguous per-thread chunks drops whole
+    # storms onto single threads. Iterations write only their own column of `prediction` and
+    # `converged` and read nothing another iteration writes, so the schedule cannot change a value.
+    Threads.@threads :greedy for output_time in eachindex(time_indices)
         time = time_indices[output_time]
         train_design = _design_at(context, method, time; target=false)
         target_design = leave_one_out ? train_design :
@@ -628,14 +678,22 @@ function dynamic_covariate_predict(
         local_train = [Matrix{Float64}(X[valid, :]) for X in train_design.local_groups]
         global_train = Matrix{Float64}(train_design.global_design[valid, :])
         train_lonlat = context.train_lonlat[valid, :]
+        # Subset the fold's distance matrices the same way the coordinates are subset, so the
+        # models below receive exactly the matrices they would have rebuilt for themselves - and
+        # skip the copy entirely on the common hour where nothing is dropped. See
+        # `DEMTerrainExperiment._distance_subset` for why these copies are worth avoiding.
+        all_valid = all(valid)
+        train_distances = all_valid ? full_train_distances : full_train_distances[valid, valid]
         if leave_one_out
             local_target = local_train
             global_target = global_train
             target_lonlat = train_lonlat
+            target_distances = train_distances
         else
             local_target = target_design.local_groups
             global_target = target_design.global_design
             target_lonlat = context.target_lonlat
+            target_distances = all_valid ? full_target_distances : full_target_distances[valid, :]
         end
         # Clamping to the valid station count only makes sense for an adaptive neighbor count; a
         # fixed-km bandwidth must be applied as given.
@@ -655,6 +713,7 @@ function dynamic_covariate_predict(
                     train_lonlat, local_train, zeros(Float64, count(valid), 0),
                     train_lonlat, adjusted, kernel, context.config;
                     adaptive, exclude_self=true,
+                    train_distances, target_distances=train_distances,
                 )
                 local_prediction .+= global_loo
                 local_prediction, ok
@@ -666,6 +725,7 @@ function dynamic_covariate_predict(
                     tolerance=context.config.tolerance,
                     max_iterations=context.config.max_iterations,
                     exclude_self=true,
+                    train_distances, target_distances=train_distances,
                 )
                 local_prediction .+= global_loo
                 local_prediction, ok
@@ -675,6 +735,7 @@ function dynamic_covariate_predict(
                 local_train, global_train, response, train_lonlat,
                 local_target, global_target, target_lonlat, adjusted, kernel, context.config;
                 adaptive, exclude_self=leave_one_out,
+                train_distances, target_distances,
             )
         else
             mixed_gwr_predict(
@@ -683,6 +744,7 @@ function dynamic_covariate_predict(
                 adaptive, ridge=context.config.ridge, tolerance=context.config.tolerance,
                 max_iterations=context.config.max_iterations,
                 exclude_self=leave_one_out,
+                train_distances, target_distances,
             )
         end
         values = vec(values_matrix)

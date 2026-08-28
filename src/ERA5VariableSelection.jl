@@ -559,11 +559,28 @@ function _panel_sufficient_statistics(panel, selected::Vector{Symbol}, lonlat::M
     return (; A, b, rows, ys, coords, eligible, p)
 end
 
-function _local_coefficients(stats, distances, neighbors, cfg; block_order=collect(eachindex(stats.A)))
+"""One `_adaptive_weights` row per target, for reuse across a permutation test.
+
+The weights are a function of `distances` and `neighbors` only — the block permutation reorders
+which sufficient statistic each spatial slot contributes, never the weight on that slot. Building
+them once removes a sort and two allocations per target from every one of the ~1000 permutations.
+"""
+_local_weight_rows(distances, neighbors, n::Int) =
+    [_adaptive_weights(view(distances, target, :), neighbors) for target in 1:n]
+
+function _local_coefficients(stats, distances, neighbors, cfg;
+    block_order=collect(eachindex(stats.A)), weight_rows=nothing)
     n = length(stats.A); coefficients = fill(NaN, n, stats.p)
+    rows = weight_rows === nothing ? _local_weight_rows(distances, neighbors, n) : weight_rows
+    lhs = Matrix{Float64}(undef, stats.p, stats.p); rhs = Vector{Float64}(undef, stats.p)
     for target in 1:n
-        weights = _adaptive_weights(view(distances, target, :), neighbors)
-        lhs, rhs = cfg.ridge .* Matrix{Float64}(I, stats.p, stats.p), zeros(stats.p)
+        weights = rows[target]
+        # Reused across targets rather than reallocated; refilled to exactly what
+        # `cfg.ridge .* Matrix{Float64}(I, p, p)` and `zeros(p)` produced.
+        fill!(lhs, 0.0); fill!(rhs, 0.0)
+        for i in 1:stats.p
+            lhs[i, i] = cfg.ridge
+        end
         for spatial_index in 1:n
             source = block_order[spatial_index]
             lhs .+= weights[spatial_index] .* stats.A[source]
@@ -626,17 +643,28 @@ function panel_spatial_variability_test(
         return (; bandwidth_scan, variability, bandwidth=missing)
     end
     bandwidth = available.neighbors[argmin(available.loocv_rmse)]
-    coefficients = _local_coefficients(stats, distances, bandwidth, cfg)
+    weight_rows = _local_weight_rows(distances, bandwidth, length(stats.A))
+    coefficients = _local_coefficients(stats, distances, bandwidth, cfg; weight_rows)
     observed = [var(coefficients[:, 3 + j]) for j in eachindex(selected)]
-    exceed = zeros(Int, length(selected))
-    for _ in 1:cfg.spatial_permutations
-        order = station_block_permutation(length(stats.A), rng)
-        permuted = _local_coefficients(stats, distances, bandwidth, cfg; block_order=order)
+    # Drawn up front, from the same `rng` in the same order, so `orders[i]` is exactly what
+    # iteration `i` drew for itself; the bodies are then independent and each is a full
+    # O(n^2 p^2) coefficient-surface rebuild. `hits` is one row per permutation, reduced
+    # afterwards - summing booleans is exact and order-free, so `exceed` is unchanged.
+    orders = [station_block_permutation(length(stats.A), rng)
+        for _ in 1:cfg.spatial_permutations]
+    # `Matrix{Bool}`, not a `BitMatrix`: a BitArray packs 64 entries into one word, so two threads
+    # writing different rows of the same column would read-modify-write the same word and lose
+    # updates. One byte per entry makes the concurrent writes independent.
+    hits = fill(false, cfg.spatial_permutations, length(selected))
+    Threads.@threads :greedy for permutation_index in 1:cfg.spatial_permutations
+        permuted = _local_coefficients(stats, distances, bandwidth, cfg;
+            block_order=orders[permutation_index], weight_rows)
         for j in eachindex(selected)
             value = var(permuted[:, 3 + j])
-            exceed[j] += isfinite(value) && value >= observed[j]
+            hits[permutation_index, j] = isfinite(value) && value >= observed[j]
         end
     end
+    exceed = vec(sum(hits, dims=1))
     pvalues = cfg.spatial_permutations > 0 ?
         (exceed .+ 1) ./ (cfg.spatial_permutations + 1) : fill(NaN, length(selected))
     qvalues = all(isfinite, pvalues) ? _bh_adjust(pvalues) : fill(NaN, length(selected))

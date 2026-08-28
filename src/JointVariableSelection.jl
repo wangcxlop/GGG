@@ -436,11 +436,24 @@ function _panel_stats(panel, groups::Vector{String}, lonlat::Matrix{Float64}, cf
     return (; A, b, rows, ys, row_weights, coords, p, group_indices, eligible)
 end
 
-function _coefficients(stats, distances, neighbors, cfg; order=collect(eachindex(stats.A)))
+function _coefficients(stats, distances, neighbors, cfg;
+    order=collect(eachindex(stats.A)), weight_rows=nothing)
     n = length(stats.A); result = fill(NaN, n, stats.p)
+    # Weights are a function of the geometry and bandwidth alone - `order` reorders which
+    # sufficient statistic each spatial slot contributes, never the weight on that slot - so a
+    # permutation test builds them once and hands them in. See
+    # `ERA5VariableSelection._local_weight_rows`.
+    rows = weight_rows === nothing ?
+        ERA5VariableSelection._local_weight_rows(distances, neighbors, n) : weight_rows
+    lhs = Matrix{Float64}(undef, stats.p, stats.p); rhs = Vector{Float64}(undef, stats.p)
     for target in 1:n
-        spatial_weights = ERA5VariableSelection._adaptive_weights(view(distances, target, :), neighbors)
-        lhs = cfg.ridge .* Matrix{Float64}(I, stats.p, stats.p); rhs = zeros(stats.p)
+        spatial_weights = rows[target]
+        # Refilled to exactly what `cfg.ridge .* Matrix{Float64}(I, p, p)` / `zeros(p)` produced,
+        # rather than reallocated per target.
+        fill!(lhs, 0.0); fill!(rhs, 0.0)
+        for i in 1:stats.p
+            lhs[i, i] = cfg.ridge
+        end
         for spatial_index in 1:n
             source = order[spatial_index]
             lhs .+= spatial_weights[spatial_index] .* stats.A[source]
@@ -503,17 +516,29 @@ function joint_spatial_variability_test(
         return (; scan, result, bandwidth=missing)
     end
     bandwidth = available.neighbors[argmin(available.loocv_rmse)]
-    coefficients = _coefficients(stats, distances, bandwidth, cfg)
+    weight_rows = ERA5VariableSelection._local_weight_rows(
+        distances, bandwidth, length(stats.A))
+    coefficients = _coefficients(stats, distances, bandwidth, cfg; weight_rows)
     observed = [sum(var(coefficients[:, index]) for index in stats.group_indices[group]) for group in groups]
-    exceed = zeros(Int, length(groups))
-    for _ in 1:cfg.spatial_permutations
-        order = station_block_permutation(length(stats.A), rng)
-        permuted = _coefficients(stats, distances, bandwidth, cfg; order)
+    # Drawn up front, from the same `rng` in the same order, so `orders[i]` is exactly what
+    # iteration `i` drew for itself; the bodies are then independent and each is a full
+    # O(n^2 p^2) coefficient-surface rebuild. `hits` is one row per permutation, reduced
+    # afterwards - summing booleans is exact and order-free, so `exceed` is unchanged.
+    orders = [station_block_permutation(length(stats.A), rng)
+        for _ in 1:cfg.spatial_permutations]
+    # `Matrix{Bool}`, not a `BitMatrix`: a BitArray packs 64 entries into one word, so two threads
+    # writing different rows of the same column would read-modify-write the same word and lose
+    # updates. One byte per entry makes the concurrent writes independent.
+    hits = fill(false, cfg.spatial_permutations, length(groups))
+    Threads.@threads :greedy for permutation_index in 1:cfg.spatial_permutations
+        permuted = _coefficients(stats, distances, bandwidth, cfg;
+            order=orders[permutation_index], weight_rows)
         for (group_index, group) in enumerate(groups)
             value = sum(var(permuted[:, index]) for index in stats.group_indices[group])
-            exceed[group_index] += isfinite(value) && value >= observed[group_index]
+            hits[permutation_index, group_index] = isfinite(value) && value >= observed[group_index]
         end
     end
+    exceed = vec(sum(hits, dims=1))
     pvalues = (exceed .+ 1) ./ (cfg.spatial_permutations + 1)
     qvalues = DEMTerrainExperiment.bh_adjust(pvalues)
     for (index, group) in enumerate(groups)

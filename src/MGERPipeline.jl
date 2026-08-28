@@ -304,7 +304,10 @@ function st_gwr_predict_nanaware(
 	ntime = size(Y, 2)
 	Ypred = fill(NaN, n_target, ntime)
 
-	@inbounds Threads.@threads for i in 1:n_target
+	# `:greedy` rather than the default chunked schedule: `n_target` is a fold's held-out station
+	# count (tens), so equal chunks leave threads idle on the ragged last round. Each iteration
+	# writes only `Ypred[i, :]`, so the schedule cannot change a value.
+	@inbounds Threads.@threads :greedy for i in 1:n_target
 		xp1 = Xpred[i, 1]
 		xp2 = Xpred[i, 2]
 		xp3 = Xpred[i, 3]
