@@ -20,14 +20,8 @@ end
 function _tag_dem_table!(
     table::DataFrame, scheme::String, product::String, fold::Int, phase::String, repeat::Int=1,
 )
-    table[!, :scheme] = fill(scheme, nrow(table))
-    :product in propertynames(table) || (table[!, :product] = fill(product, nrow(table)))
-    table[!, :repeat] = fill(repeat, nrow(table))
-    table[!, :fold] = fill(fold, nrow(table))
-    table[!, :phase] = fill(phase, nrow(table))
-    select!(table, :scheme, :product, :repeat, :fold, :phase,
-        Not([:scheme, :product, :repeat, :fold, :phase]))
-    return table
+    return _tag_selection_table!(table, :scheme => scheme, :product => product,
+        :repeat => repeat, :fold => fold, :phase => phase)
 end
 
 function _failed_screen_table(product::String, error::String)

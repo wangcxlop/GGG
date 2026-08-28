@@ -153,6 +153,29 @@ Base.@kwdef struct InterpolationBenchmarkConfig
     bootstrap_reps::Int = 2000
 end
 
+"""
+Stamp identifying columns onto the front of a diagnostic table, in the order given.
+
+The DEM and joint screening paths both write per-fold diagnostic tables that have to be traceable
+back to the cell that produced them; they differ only in which columns that takes (`phase` on the
+DEM side, `seed` on the joint side, and the two order `repeat`/`fold` oppositely). Column order is
+the argument order, and it is part of the CSV contract, so it stays with the caller.
+
+`keep_existing` names columns the caller is only supplying a default for: `product` is already a
+column of some screening outputs, and there the table's own value wins.
+"""
+function _tag_selection_table!(
+    table::DataFrame, columns::Pair{Symbol}...; keep_existing=(:product,),
+)
+    for (column, value) in columns
+        column in keep_existing && column in propertynames(table) && continue
+        table[!, column] = fill(value, nrow(table))
+    end
+    ordered = [column for (column, _) in columns]
+    select!(table, ordered..., Not(ordered))
+    return table
+end
+
 """Fold seeds for the run: one repeat per seed, defaulting to a single repeat on `cfg.seed`."""
 benchmark_seeds(cfg::InterpolationBenchmarkConfig) =
     isempty(cfg.seeds) ? [cfg.seed] : cfg.seeds

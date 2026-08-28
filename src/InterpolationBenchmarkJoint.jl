@@ -317,14 +317,8 @@ end
 function _tag_joint_table!(
     table::DataFrame, scheme::String, product::String, fold::Int, repeat::Int, seed::Int,
 )
-    table[!, :scheme] = fill(scheme, nrow(table))
-    :product in propertynames(table) || (table[!, :product] = fill(product, nrow(table)))
-    table[!, :fold] = fill(fold, nrow(table))
-    table[!, :repeat] = fill(repeat, nrow(table))
-    table[!, :seed] = fill(seed, nrow(table))
-    select!(table, :scheme, :product, :fold, :repeat, :seed,
-        Not([:scheme, :product, :fold, :repeat, :seed]))
-    return table
+    return _tag_selection_table!(table, :scheme => scheme, :product => product,
+        :fold => fold, :repeat => repeat, :seed => seed)
 end
 
 """
