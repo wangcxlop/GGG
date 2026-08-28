@@ -23,6 +23,46 @@ function _run_status_role_fields(
     return (; uses_dem, uses_joint, selected_roles, effective_role_map, effective_roles)
 end
 
+"""Non-NaN share of the held-out cells a method could have predicted."""
+_prediction_coverage(eligible, prediction) =
+    count(eligible) == 0 ? 0.0 :
+        count(eligible .& .!isnan.(prediction)) / count(eligible)
+
+"""
+One row of `run_status.csv`.
+
+The fold loop assembles this row in three places - a method that predicted, a method that raised,
+and `auto` - which differ only in `status`, `error` and `prediction_coverage`. Passing `nothing`
+for both contexts gives the all-"not_applicable" provenance `auto` reports: it fits no covariate
+model of its own and delegates provenance to whichever method it chose, whose own row carries it.
+Keeping that a `nothing` argument rather than a separate literal is what stops the three copies
+drifting apart, which is also why `covariate_selection_mode` still reads "not_applicable" there
+and `auto` stays out of `covariate_model_status.csv`.
+"""
+function _benchmark_status_row(
+    dem_context, joint_context, joint_inputs, nested_joint::Bool;
+    scheme, product, fold, repeat::Int, seed::Int, mode::String, method::String,
+    output_method::String, status::String, error::String, prediction_coverage::Float64,
+)
+    (; uses_dem, uses_joint, selected_roles, effective_roles) =
+        _run_status_role_fields(dem_context, joint_context, mode, method, output_method)
+    return (;
+        scheme, product, fold, repeat, seed, method=output_method, status, error,
+        prediction_coverage,
+        dem_variable_count=uses_dem ? dem_context.dem_variable_count : 0,
+        dem_selection_status=uses_dem ? dem_context.selection_status : "not_applicable",
+        dem_variables=uses_dem ? join(dem_context.variables, ",") : "",
+        dem_roles=uses_dem ? dem_context.dem_roles : "",
+        covariate_selection_mode=uses_joint ?
+            (nested_joint ? "nested_per_fold" : "fixed_full_data") : "not_applicable",
+        covariate_variable_count=uses_joint ? length(joint_context.variables) : 0,
+        covariate_variables=uses_joint ? join(joint_context.variables, ",") : "",
+        covariate_selected_roles=selected_roles,
+        covariate_effective_roles=effective_roles,
+        covariate_spec_sha256=uses_joint ? something(joint_inputs.spec_sha256, "") : "",
+    )
+end
+
 function run_interpolation_benchmark(cfg::InterpolationBenchmarkConfig)
     mkpath(cfg.mger.outdir)
     station_meta = load_station_meta(cfg.mger.station_meta_path;
@@ -253,55 +293,24 @@ function run_interpolation_benchmark(cfg::InterpolationBenchmarkConfig)
                         )
                         predictions[output_method][val_idx, :] = fold_predictions[output_method]
                         fold_selected[output_method] = selected
-                        (; uses_dem, uses_joint, selected_roles, effective_role_map, effective_roles) =
-                            _run_status_role_fields(dem_context, joint_context, mode, method, output_method)
                         eligible = .!isnan.(y_obs[val_idx, :]) .& .!isnan.(y_sat_val)
-                        coverage = count(eligible) == 0 ? 0.0 :
-                            count(eligible .& .!isnan.(fold_predictions[output_method])) / count(eligible)
-                        push!(run_status_rows, (;
+                        coverage = _prediction_coverage(eligible, fold_predictions[output_method])
+                        push!(run_status_rows, _benchmark_status_row(
+                            dem_context, joint_context, joint_inputs, nested_joint;
                             scheme, product, fold, repeat=repeat_index, seed=repeat_seed,
-                            method=output_method,
+                            mode, method, output_method,
                             status=coverage >= cfg.min_tuning_coverage ? "success" : "partial",
                             error=coverage >= cfg.min_tuning_coverage ? "" :
                                 "prediction coverage below minimum",
                             prediction_coverage=coverage,
-                            dem_variable_count=uses_dem ? dem_context.dem_variable_count : 0,
-                            dem_selection_status=uses_dem ? dem_context.selection_status :
-                                "not_applicable",
-                            dem_variables=uses_dem ? join(dem_context.variables, ",") : "",
-                            dem_roles=uses_dem ? dem_context.dem_roles : "",
-                            covariate_selection_mode=uses_joint ?
-                                (nested_joint ? "nested_per_fold" : "fixed_full_data") :
-                                "not_applicable",
-                            covariate_variable_count=uses_joint ? length(joint_context.variables) : 0,
-                            covariate_variables=uses_joint ? join(joint_context.variables, ",") : "",
-                            covariate_selected_roles=selected_roles,
-                            covariate_effective_roles=effective_roles,
-                            covariate_spec_sha256=uses_joint ?
-                                something(joint_inputs.spec_sha256, "") : "",
                         ))
                     catch e
                         fold_predictions[output_method] = fill(NaN, length(val_idx), size(y_obs, 2))
-                        (; uses_dem, uses_joint, selected_roles, effective_role_map, effective_roles) =
-                            _run_status_role_fields(dem_context, joint_context, mode, method, output_method)
-                        push!(run_status_rows, (;
+                        push!(run_status_rows, _benchmark_status_row(
+                            dem_context, joint_context, joint_inputs, nested_joint;
                             scheme, product, fold, repeat=repeat_index, seed=repeat_seed,
-                            method=output_method, status="failed",
+                            mode, method, output_method, status="failed",
                             error=sprint(showerror, e), prediction_coverage=0.0,
-                            dem_variable_count=uses_dem ? dem_context.dem_variable_count : 0,
-                            dem_selection_status=uses_dem ? dem_context.selection_status :
-                                "not_applicable",
-                            dem_variables=uses_dem ? join(dem_context.variables, ",") : "",
-                            dem_roles=uses_dem ? dem_context.dem_roles : "",
-                            covariate_selection_mode=uses_joint ?
-                                (nested_joint ? "nested_per_fold" : "fixed_full_data") :
-                                "not_applicable",
-                            covariate_variable_count=uses_joint ? length(joint_context.variables) : 0,
-                            covariate_variables=uses_joint ? join(joint_context.variables, ",") : "",
-                            covariate_selected_roles=selected_roles,
-                            covariate_effective_roles=effective_roles,
-                            covariate_spec_sha256=uses_joint ?
-                                something(joint_inputs.spec_sha256, "") : "",
                         ))
                     end
                 end
@@ -381,22 +390,12 @@ function run_interpolation_benchmark(cfg::InterpolationBenchmarkConfig)
                 # held-out cells it could have predicted - so the column means one thing across the
                 # table. `auto_selection.csv` carries the inner-split mask coverage separately.
                 auto_eligible = .!isnan.(y_obs[val_idx, :]) .& .!isnan.(y_sat_val)
-                auto_coverage = count(auto_eligible) == 0 ? 0.0 :
-                    count(auto_eligible .& .!isnan.(fold_predictions[AUTO_METHOD])) /
-                        count(auto_eligible)
-                push!(run_status_rows, (;
+                auto_coverage = _prediction_coverage(auto_eligible, fold_predictions[AUTO_METHOD])
+                push!(run_status_rows, _benchmark_status_row(
+                    nothing, nothing, joint_inputs, nested_joint;
                     scheme, product, fold, repeat=repeat_index, seed=repeat_seed,
-                    method=AUTO_METHOD, status=auto_status, error=auto_error,
-                    prediction_coverage=auto_coverage,
-                    dem_variable_count=0, dem_selection_status="not_applicable",
-                    dem_variables="", dem_roles="",
-                    # `auto` fits no covariate model of its own - it delegates to whichever method
-                    # it chose, whose own row carries the covariate provenance. Marking it
-                    # not_applicable also keeps it out of `covariate_model_status.csv`.
-                    covariate_selection_mode="not_applicable",
-                    covariate_variable_count=0, covariate_variables="",
-                    covariate_selected_roles="", covariate_effective_roles="",
-                    covariate_spec_sha256="",
+                    mode="", method=AUTO_METHOD, output_method=AUTO_METHOD,
+                    status=auto_status, error=auto_error, prediction_coverage=auto_coverage,
                 ))
 
                 fold_mask = _common_method_mask(Matrix{Float64}(y_obs[val_idx, :]), fold_predictions)
