@@ -7,6 +7,9 @@ using LinearAlgebra
 using Random
 using Statistics
 
+# Shared bookkeeping for every variable-selection path; see src/SelectionScaffolding.jl.
+using Main.SelectionScaffolding
+
 export ERA5SelectionConfig, ERA5_VARIABLES, align_feature_time, load_era5_panel
 export balanced_spatial_folds, prepare_dynamic_panel, station_block_permutation
 export dynamic_panel_screen, panel_spatial_variability_test, run_era5_variable_selection
@@ -645,22 +648,6 @@ function panel_spatial_variability_test(
     return (; bandwidth_scan, variability, bandwidth)
 end
 
-function _annotate!(table::DataFrame, product::String, scheme::String, fold::Int)
-    insertcols!(table, 1, :product => fill(product, nrow(table)),
-        :scheme => fill(scheme, nrow(table)), :fold => fill(fold, nrow(table)))
-    return table
-end
-
-function _append_table!(target::DataFrame, source::DataFrame)
-    if ncol(target) == 0
-        for column in propertynames(source)
-            target[!, column] = similar(source[!, column], 0)
-        end
-    end
-    nrow(source) > 0 && append!(target, source; cols=:union)
-    return target
-end
-
 function run_era5_variable_selection(
     cfg::ERA5SelectionConfig, products::Vector{String}, station_ids::Vector{String},
     times::Vector{DateTime}, Yobs::Matrix{Float64}, satellite::AbstractDict,
@@ -679,14 +666,13 @@ function run_era5_variable_selection(
     bandwidth_all, variability_all, role_all, status_all = DataFrame(), DataFrame(), DataFrame(), DataFrame()
     specifications = DataFrame(product=String[], variable=String[], selected=Bool[], role=String[],
         association_qvalue=Float64[], spatial_qvalue=Union{Missing,Float64}[], status=String[])
-    schemes = [("full_data", 0, collect(1:n))]
-    append!(schemes, [("spatial_cv", fold, findall(!=(fold), folds)) for fold in 1:cfg.k])
+    schemes = selection_schemes(n, folds, cfg.k)
     for product in products
         Ysat = Float64.(satellite[product])
         for (scheme, fold, train_indices) in schemes
             run_seed = cfg.seed + 1000 * findfirst(==(product), products) + 10 * fold
             panel = prepare_dynamic_panel(Yobs, Ysat, era5, train_indices, times, cfg)
-            qc = copy(panel.qc); _annotate!(qc, product, scheme, fold); _append_table!(qc_all, qc)
+            qc = copy(panel.qc); annotate_selection!(qc, product, scheme, fold); append_selection!(qc_all, qc)
             if panel.qc.status[1] != "ok"
                 for variable in ERA5_VARIABLES
                     push!(role_all, (product=product, scheme=scheme, fold=fold,
@@ -702,17 +688,17 @@ function run_era5_variable_selection(
             end
             screen = dynamic_panel_screen(panel, times, cfg; rng=MersenneTwister(run_seed))
             for table in (screen.association, screen.monthly, screen.vif)
-                _annotate!(table, product, scheme, fold)
+                annotate_selection!(table, product, scheme, fold)
             end
-            _append_table!(association_all, screen.association)
-            _append_table!(monthly_all, screen.monthly)
-            _append_table!(vif_all, screen.vif)
+            append_selection!(association_all, screen.association)
+            append_selection!(monthly_all, screen.monthly)
+            append_selection!(vif_all, screen.vif)
             spatial = panel_spatial_variability_test(panel, screen.selected, lonlat[train_indices, :], cfg;
                 rng=MersenneTwister(run_seed + 1))
-            _annotate!(spatial.bandwidth_scan, product, scheme, fold)
-            _annotate!(spatial.variability, product, scheme, fold)
-            _append_table!(bandwidth_all, spatial.bandwidth_scan)
-            _append_table!(variability_all, spatial.variability)
+            annotate_selection!(spatial.bandwidth_scan, product, scheme, fold)
+            annotate_selection!(spatial.variability, product, scheme, fold)
+            append_selection!(bandwidth_all, spatial.bandwidth_scan)
+            append_selection!(variability_all, spatial.variability)
             role_map = Dict(Symbol(row.variable) => (role=row.role, q=row.qvalue, status=row.status)
                 for row in eachrow(spatial.variability))
             association_q = Dict(Symbol(row.variable) => row.qvalue for row in eachrow(screen.association))

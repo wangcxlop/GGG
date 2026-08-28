@@ -24,10 +24,12 @@ Kept as a function rather than a `Dict` const so this file stays re-includable. 
 small and acyclic: everything else in `src/` is a leaf.
 """
 function standalone_module_dependencies(name::AbstractString)
-    name == "NDVIVariableSelection" && return ["ERA5VariableSelection"]
+    name == "ERA5VariableSelection" && return ["SelectionScaffolding"]
+    name == "NDVIVariableSelection" && return ["SelectionScaffolding", "ERA5VariableSelection"]
     name == "JointCovariateModels" && return ["DEMTerrainExperiment"]
     name == "JointVariableSelection" &&
-        return ["DEMTerrainExperiment", "ERA5VariableSelection", "NDVIVariableSelection"]
+        return ["SelectionScaffolding", "DEMTerrainExperiment", "ERA5VariableSelection",
+                "NDVIVariableSelection"]
     return String[]
 end
 

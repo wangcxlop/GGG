@@ -7,6 +7,9 @@ using LinearAlgebra
 using Random
 using Statistics
 
+# Shared bookkeeping for every variable-selection path; see src/SelectionScaffolding.jl.
+using Main.SelectionScaffolding
+
 # All three are loaded through src/load_modules.jl before this file, so each is shared
 # rather than recompiled into this module. See src/load_modules.jl.
 using Main.DEMTerrainExperiment
@@ -576,22 +579,6 @@ function select_joint_covariates(
     )
 end
 
-function _annotate!(table::DataFrame, product::String, scheme::String, fold::Int)
-    insertcols!(table, 1, :product => fill(product, nrow(table)),
-        :scheme => fill(scheme, nrow(table)), :fold => fill(fold, nrow(table)))
-    return table
-end
-
-function _append!(target::DataFrame, source::DataFrame)
-    if ncol(target) == 0
-        for column in propertynames(source)
-            target[!, column] = similar(source[!, column], 0)
-        end
-    end
-    nrow(source) > 0 && append!(target, source; cols=:union)
-    return target
-end
-
 function run_joint_variable_selection(
     cfg::JointSelectionConfig, products::Vector{String}, station_ids::Vector{String},
     times::Vector{DateTime}, Yobs::Matrix{Float64}, satellite::AbstractDict,
@@ -628,8 +615,7 @@ function run_joint_variable_selection(
         independent_selected=Bool[], independent_qvalue=Float64[], joint_vif_retained=Bool[],
         role=String[], final_included=Bool[], exclusion_reason=String[],
     )
-    schemes = [("full_data", 0, collect(1:n))]
-    append!(schemes, [("spatial_cv", fold, findall(!=(fold), folds)) for fold in 1:cfg.k])
+    schemes = selection_schemes(n, folds, cfg.k)
     for (product_index, product) in enumerate(products)
         Ysat = Float64.(satellite[product])
         for (scheme, fold, train_indices) in schemes
@@ -641,10 +627,10 @@ function run_joint_variable_selection(
                 train_indices, station_ids, times, lonlat, cfg, run_seed, dem_seed,
             )
             candidates = selection.candidates
-            _annotate!(candidates, product, scheme, fold); _append!(candidate_all, candidates)
+            annotate_selection!(candidates, product, scheme, fold); append_selection!(candidate_all, candidates)
             if isempty(selection.active)
                 qc = selection.qc
-                _annotate!(qc, product, scheme, fold); _append!(qc_all, qc)
+                annotate_selection!(qc, product, scheme, fold); append_selection!(qc_all, qc)
                 push!(status_all, (product=product, scheme=scheme, fold=fold,
                     status="ok", reason="no_independent_candidates"))
                 for row in eachrow(candidates)
@@ -661,18 +647,18 @@ function run_joint_variable_selection(
                 end
                 continue
             end
-            qc = copy(selection.qc); _annotate!(qc, product, scheme, fold); _append!(qc_all, qc)
+            qc = copy(selection.qc); annotate_selection!(qc, product, scheme, fold); append_selection!(qc_all, qc)
             scales = copy(selection.scales)
-            _annotate!(scales, product, scheme, fold); _append!(scale_all, scales)
+            annotate_selection!(scales, product, scheme, fold); append_selection!(scale_all, scales)
             weight_audit = copy(selection.weight_audit)
             weight_audit.station_id = station_ids[weight_audit.global_station_index]
-            _annotate!(weight_audit, product, scheme, fold); _append!(weight_all, weight_audit)
+            annotate_selection!(weight_audit, product, scheme, fold); append_selection!(weight_all, weight_audit)
             vif = selection.vif; retained = selection.retained
-            _annotate!(vif, product, scheme, fold); _append!(vif_all, vif)
-            _annotate!(selection.spatial_scan, product, scheme, fold)
-            _append!(bandwidth_all, selection.spatial_scan)
-            _annotate!(selection.spatial_result, product, scheme, fold)
-            _append!(spatial_all, selection.spatial_result)
+            annotate_selection!(vif, product, scheme, fold); append_selection!(vif_all, vif)
+            annotate_selection!(selection.spatial_scan, product, scheme, fold)
+            append_selection!(bandwidth_all, selection.spatial_scan)
+            annotate_selection!(selection.spatial_result, product, scheme, fold)
+            append_selection!(spatial_all, selection.spatial_result)
             role_status_map = Dict(String(row.variable_group) => (role=String(row.role), status=String(row.status))
                 for row in eachrow(selection.spatial_result))
             for row in eachrow(candidates)
