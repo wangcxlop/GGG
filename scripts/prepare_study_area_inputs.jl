@@ -1,9 +1,10 @@
 #!/usr/bin/env julia
 
 const ROOT = normpath(joinpath(@__DIR__, ".."))
-include(joinpath(ROOT, "src", "StudyArea.jl"))
+include(joinpath(ROOT, "src", "load_modules.jl"))
+load_standalone_modules("StudyArea")
 
-using .StudyArea
+using Main.StudyArea
 
 const PROCESSED = joinpath(ROOT, "data", "processed")
 const STUDY_DATA = joinpath(PROCESSED, "study_area")

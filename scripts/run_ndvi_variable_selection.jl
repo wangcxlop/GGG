@@ -5,9 +5,10 @@ const ROOT = normpath(joinpath(@__DIR__, ".."))
 using MixedGWR
 using DataFrames, Dates
 
-include(joinpath(ROOT, "src", "MGERPipeline.jl"))
-include(joinpath(ROOT, "src", "NDVIVariableSelection.jl"))
-using .NDVIVariableSelection
+include(joinpath(ROOT, "src", "load_modules.jl"))
+load_pipeline("MGERPipeline")
+load_standalone_modules("NDVIVariableSelection")
+using Main.NDVIVariableSelection
 
 const STUDY_DATA = joinpath(ROOT, "data", "processed", "study_area")
 const NDVI_PATH = joinpath(

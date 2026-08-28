@@ -1,8 +1,7 @@
 using Test, CSV, DataFrames, LinearAlgebra, Random
 
-if !isdefined(Main, :JointCovariateModels)
-    include(joinpath(@__DIR__, "..", "src", "JointCovariateModels.jl"))
-end
+include(joinpath(@__DIR__, "..", "src", "load_modules.jl"))
+load_standalone_modules("JointCovariateModels")
 const JCM = Main.JointCovariateModels
 
 function joint_model_fixture(; seed=91)

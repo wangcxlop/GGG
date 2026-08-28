@@ -1,8 +1,7 @@
 using CSV, DataFrames, Downloads, Test
 
-if !isdefined(@__MODULE__, :AppEEARSNDVI)
-    include(joinpath(@__DIR__, "..", "src", "AppEEARSNDVI.jl"))
-end
+include(joinpath(@__DIR__, "..", "src", "load_modules.jl"))
+load_standalone_modules("AppEEARSNDVI")
 
 @testset "Downloads response compatibility" begin
     ok = Downloads.Response(nothing, "https://example.test", 200, "OK", Pair{String,String}[])

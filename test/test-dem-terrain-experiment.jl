@@ -4,10 +4,9 @@ using LinearAlgebra
 using Random
 using Statistics
 
-if !isdefined(@__MODULE__, :DEMTerrainExperiment)
-    include(joinpath(@__DIR__, "..", "src", "DEMTerrainExperiment.jl"))
-end
-using .DEMTerrainExperiment
+include(joinpath(@__DIR__, "..", "src", "load_modules.jl"))
+load_standalone_modules("DEMTerrainExperiment")
+using Main.DEMTerrainExperiment
 
 @testset "DEM terrain screening helpers" begin
     @test bh_adjust([0.01, 0.04, 0.03]) ≈ [0.03, 0.04, 0.04]

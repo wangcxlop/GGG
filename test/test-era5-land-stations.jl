@@ -1,9 +1,8 @@
 using CSV, DataFrames, Dates, JSON, Test
 
-if !isdefined(@__MODULE__, :ERA5LandStations)
-    include(joinpath(@__DIR__, "..", "src", "ERA5LandStations.jl"))
-end
-using .ERA5LandStations
+include(joinpath(@__DIR__, "..", "src", "load_modules.jl"))
+load_standalone_modules("ERA5LandStations")
+using Main.ERA5LandStations
 
 @testset "ERA5-Land station requests" begin
     request = build_era5_land_request(110.312, 31.25)

@@ -1,10 +1,9 @@
 using Test
 using CSV, DataFrames, Dates, Random, Statistics
 
-if !isdefined(Main, :ERA5VariableSelection)
-    include(joinpath(@__DIR__, "..", "src", "ERA5VariableSelection.jl"))
-end
-using .ERA5VariableSelection
+include(joinpath(@__DIR__, "..", "src", "load_modules.jl"))
+load_standalone_modules("ERA5VariableSelection")
+using Main.ERA5VariableSelection
 
 function synthetic_era5_panel(n::Int, nt::Int; local_effect::Bool=false, seed::Int=41)
     rng = MersenneTwister(seed)

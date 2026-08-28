@@ -1,34 +1,24 @@
 using CSV, DataFrames, Dates, LinearAlgebra, Random, Statistics
 using MixedGWR
 
-if !isdefined(@__MODULE__, :MGERConfig)
-    include(joinpath(@__DIR__, "MGERPipeline.jl"))
-end
-if !isdefined(@__MODULE__, :TraditionalInterpolation)
-    include(joinpath(@__DIR__, "TraditionalInterpolation.jl"))
-end
+# Every standalone module is loaded through the shared loader, which puts exactly one copy of
+# each into `Main`. Loading a module file twice compiles a second, type-incompatible copy of it -
+# `DEMTerrainExperiment.jl` used to be included here and again inside `JointVariableSelection`
+# and `JointCovariateModels`. See src/load_modules.jl.
+include(joinpath(@__DIR__, "load_modules.jl"))
+load_pipeline("MGERPipeline")
+load_standalone_modules(
+    "TraditionalInterpolation", "DEMTerrainExperiment", "JointCovariateModels",
+    "ERA5VariableSelection", "NDVIVariableSelection", "JointVariableSelection",
+)
+
 using .TraditionalInterpolation
-if !isdefined(@__MODULE__, :DEMTerrainExperiment)
-    include(joinpath(@__DIR__, "DEMTerrainExperiment.jl"))
-end
 using .DEMTerrainExperiment: DEMExperimentConfig, terrain_screen, spatial_variability_test
 using .DEMTerrainExperiment: mean_wet_residual, monthly_correlation_rows
 using .DEMTerrainExperiment: terrain_model_designs, terrain_groups, terrain_columns
 using .DEMTerrainExperiment: mixed_gwr_predict, multiscale_gwr_predict
 using .DEMTerrainExperiment: select_mixed_bandwidth, select_multiscale_bandwidths
-if !isdefined(@__MODULE__, :JointCovariateModels)
-    include(joinpath(@__DIR__, "JointCovariateModels.jl"))
-end
 using .JointCovariateModels
-if !isdefined(@__MODULE__, :ERA5VariableSelection)
-    include(joinpath(@__DIR__, "ERA5VariableSelection.jl"))
-end
-if !isdefined(@__MODULE__, :NDVIVariableSelection)
-    include(joinpath(@__DIR__, "NDVIVariableSelection.jl"))
-end
-if !isdefined(@__MODULE__, :JointVariableSelection)
-    include(joinpath(@__DIR__, "JointVariableSelection.jl"))
-end
 using .JointVariableSelection: JointSelectionConfig, select_joint_covariates
 
 # The benchmark's implementation is split across concern-specific files (config, fold-splitting,

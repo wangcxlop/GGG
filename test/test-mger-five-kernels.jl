@@ -6,7 +6,8 @@ using CSV, DataFrames, Dates
 const ROOT = normpath(joinpath(@__DIR__, ".."))
 
 using MixedGWR
-include(joinpath(ROOT, "src", "MGERPipeline.jl"))
+include(joinpath(ROOT, "src", "load_modules.jl"))
+load_pipeline("MGERPipeline")
 
 const TEST_KERNELS = [GAUSSIAN, EXPONENTIAL, BISQUARE, TRICUBE, BOXCAR]
 const TEST_KERNEL_NAMES = ["gaussian", "exponential", "bisquare", "tricube", "boxcar"]

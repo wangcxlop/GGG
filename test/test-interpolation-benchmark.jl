@@ -7,7 +7,8 @@ using Random
 const BENCHMARK_TEST_ROOT = normpath(joinpath(@__DIR__, ".."))
 
 using MixedGWR
-include(joinpath(BENCHMARK_TEST_ROOT, "src", "InterpolationBenchmark.jl"))
+include(joinpath(BENCHMARK_TEST_ROOT, "src", "load_modules.jl"))
+load_pipeline("InterpolationBenchmark")
 
 function _write_benchmark_wide(path, times, ids, values)
     df = DataFrame(time=times)

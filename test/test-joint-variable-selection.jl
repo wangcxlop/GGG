@@ -1,8 +1,7 @@
 using Test, DataFrames, Dates, Random
 
-if !isdefined(Main, :JointVariableSelection)
-    include(joinpath(@__DIR__, "..", "src", "JointVariableSelection.jl"))
-end
+include(joinpath(@__DIR__, "..", "src", "load_modules.jl"))
+load_standalone_modules("JointVariableSelection")
 const JVS = Main.JointVariableSelection
 
 @testset "joint hierarchical NDVI weights" begin

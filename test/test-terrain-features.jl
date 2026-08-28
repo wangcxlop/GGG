@@ -1,9 +1,8 @@
 using Test
 
-if !isdefined(@__MODULE__, :TerrainFeatures)
-    include(joinpath(@__DIR__, "..", "src", "TerrainFeatures.jl"))
-end
-using .TerrainFeatures
+include(joinpath(@__DIR__, "..", "src", "load_modules.jl"))
+load_standalone_modules("TerrainFeatures")
+using Main.TerrainFeatures
 
 @testset "terrain feature helpers" begin
     @test collect(aspect_components(90, 10)) ≈ [1.0, 0.0] atol=1e-12

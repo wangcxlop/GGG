@@ -12,9 +12,10 @@ const ROOT = normpath(joinpath(@__DIR__, ".."))
 using MixedGWR
 using CSV, DataFrames, Dates, Statistics
 
-include(joinpath(ROOT, "src", "MGERPipeline.jl"))
-include(joinpath(ROOT, "src", "BenchmarkDiagnostics.jl"))
-using .BenchmarkDiagnostics
+include(joinpath(ROOT, "src", "load_modules.jl"))
+load_pipeline("MGERPipeline")
+load_standalone_modules("BenchmarkDiagnostics")
+using Main.BenchmarkDiagnostics
 
 const STUDY_DATA = joinpath(ROOT, "data", "processed", "study_area")
 const DEFAULT_RUN = joinpath(

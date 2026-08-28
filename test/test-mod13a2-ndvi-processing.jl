@@ -2,10 +2,9 @@ using Test
 using Dates
 using DataFrames
 
-if !isdefined(@__MODULE__, :MOD13A2NDVIProcessing)
-    include(joinpath(@__DIR__, "..", "src", "MOD13A2NDVIProcessing.jl"))
-end
-using .MOD13A2NDVIProcessing
+include(joinpath(@__DIR__, "..", "src", "load_modules.jl"))
+load_standalone_modules("MOD13A2NDVIProcessing")
+using Main.MOD13A2NDVIProcessing
 
 const TEST_NDVI_COLUMN = Symbol("MOD13A2_061__1_km_16_days_NDVI")
 const TEST_DOY_COLUMN =

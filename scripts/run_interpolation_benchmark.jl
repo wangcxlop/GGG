@@ -5,7 +5,8 @@ const ROOT = normpath(joinpath(@__DIR__, ".."))
 using MixedGWR
 using DataFrames, Dates
 
-include(joinpath(ROOT, "src", "InterpolationBenchmark.jl"))
+include(joinpath(ROOT, "src", "load_modules.jl"))
+load_pipeline("InterpolationBenchmark")
 
 const STUDY_DATA = joinpath(ROOT, "data", "processed", "study_area")
 
