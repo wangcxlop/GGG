@@ -590,8 +590,7 @@ function run_interpolation_benchmark(cfg::InterpolationBenchmarkConfig)
     _dem_enabled(cfg) && _screen_dem_full_data!(dem_store, cfg, terrain, lonlat, products, product_data)
 
     seeds = benchmark_seeds(cfg)
-    # Repeated cross-validation: one independent fold partition per repeat. The body is left at its
-    # original indentation to keep the diff reviewable.
+    # Repeated cross-validation: one independent fold partition per repeat.
     #
     # `repeat_seed` and the partition index are deliberately separate. Under the default
     # `:hilbert` initialisation the partition comes from `rotation = repeat_index - 1` and no RNG
@@ -599,74 +598,74 @@ function run_interpolation_benchmark(cfg::InterpolationBenchmarkConfig)
     # (paired bootstrap, DEM permutation tests, joint variable selection) and the `:random`
     # scheme, which is random by definition.
     for (repeat_index, repeat_seed) in enumerate(seeds)
-    repeat_root = _repeat_dir(cfg.mger.outdir, repeat_index, length(seeds))
-    for scheme_symbol in cfg.cv_schemes
-        scheme = string(scheme_symbol)
-        scheme_dir = joinpath(repeat_root, scheme)
-        mkpath(scheme_dir)
-        folds = benchmark_folds(
-            scheme_symbol, ids, lonlat; k=cfg.k, seed=repeat_seed,
-            center_init=cfg.fold_center_init, rotation=repeat_index - 1,
-        )
-        _write_split(joinpath(scheme_dir, "split_common.csv"), ids, folds, scheme_symbol)
-        id_map = Dict(id => index for (index, id) in enumerate(ids))
+        repeat_root = _repeat_dir(cfg.mger.outdir, repeat_index, length(seeds))
+        for scheme_symbol in cfg.cv_schemes
+            scheme = string(scheme_symbol)
+            scheme_dir = joinpath(repeat_root, scheme)
+            mkpath(scheme_dir)
+            folds = benchmark_folds(
+                scheme_symbol, ids, lonlat; k=cfg.k, seed=repeat_seed,
+                center_init=cfg.fold_center_init, rotation=repeat_index - 1,
+            )
+            _write_split(joinpath(scheme_dir, "split_common.csv"), ids, folds, scheme_symbol)
+            id_map = Dict(id => index for (index, id) in enumerate(ids))
 
-        for product in products
-            data = product_data[product]
-            y_obs = data.Y_obs
-            y_sat = data.Y_sat
-            predictions = Dict(method => fill(NaN, size(y_obs)) for method in BENCHMARK_METHODS)
-            predictions["raw"] .= y_sat
-            nearest_train_distance = fill(NaN, length(ids))
+            for product in products
+                data = product_data[product]
+                y_obs = data.Y_obs
+                y_sat = data.Y_sat
+                predictions = Dict(method => fill(NaN, size(y_obs)) for method in BENCHMARK_METHODS)
+                predictions["raw"] .= y_sat
+                nearest_train_distance = fill(NaN, length(ids))
 
-            for fold in 1:cfg.k
-                _run_benchmark_fold!(
-                    cfg, fold, folds, id_map, ids, products, product,
-                    data, lonlat, y_obs, y_sat, terrain, joint_inputs, nested_joint,
-                    scheme, scheme_symbol, repeat_index, repeat_seed,
-                    predictions, nearest_train_distance,
-                    dem_store, joint_store, joint_scaling_tables, joint_qc_tables,
-                    all_metric_rows, all_scan_rows, run_status_rows, auto_selection_rows,
-                    hurdle_rows, selection_fallback_cells,
-                )
-            end
-
-            common_mask = _common_method_mask(y_obs, predictions)
-            if !any(common_mask)
-                failures = ["fold=$(row.fold) method=$(row.method): $(row.error)" for
-                    row in run_status_rows if row.scheme == scheme && row.product == product &&
-                    row.status != "success"]
-                error("[$scheme/$product] no common valid OOF samples across all methods; " *
-                    join(failures, " | "))
-            end
-            product_dir = joinpath(scheme_dir, lowercase(product))
-            mkpath(product_dir)
-            for method in BENCHMARK_METHODS
-                # The per-station OOF tables are large; only the first repeat writes them.
-                repeat_index == 1 && write_wide(
-                    joinpath(product_dir, "oof_$(method).csv"), data.times, ids, predictions[method],
-                )
-                append_stratified_metrics!(
-                    all_metric_rows, scheme, product, method, data.times, y_obs,
-                    predictions[method], common_mask, nearest_train_distance, cfg.event_thresholds;
-                    repeat=repeat_index, seed=repeat_seed,
-                )
-            end
-            if repeat_index == 1
-                mask_df = DataFrame(time=Dates.format.(data.times, dateformat"yyyy-mm-ddTHH:MM:SS"))
-                for (station_index, station_id) in enumerate(ids)
-                    mask_df[!, Symbol(station_id)] = common_mask[station_index, :]
+                for fold in 1:cfg.k
+                    _run_benchmark_fold!(
+                        cfg, fold, folds, id_map, ids, products, product,
+                        data, lonlat, y_obs, y_sat, terrain, joint_inputs, nested_joint,
+                        scheme, scheme_symbol, repeat_index, repeat_seed,
+                        predictions, nearest_train_distance,
+                        dem_store, joint_store, joint_scaling_tables, joint_qc_tables,
+                        all_metric_rows, all_scan_rows, run_status_rows, auto_selection_rows,
+                        hurdle_rows, selection_fallback_cells,
+                    )
                 end
-                CSV.write(joinpath(product_dir, "common_evaluation_mask.csv"), mask_df)
-            end
-            if scheme_symbol == :balanced_spatial && cfg.bootstrap_reps > 0
-                append!(all_bootstrap_rows, paired_bootstrap_rows(
-                    cfg, scheme, product, data.times, y_obs, predictions, common_mask;
-                    repeat=repeat_index, seed=repeat_seed,
-                ))
+
+                common_mask = _common_method_mask(y_obs, predictions)
+                if !any(common_mask)
+                    failures = ["fold=$(row.fold) method=$(row.method): $(row.error)" for
+                        row in run_status_rows if row.scheme == scheme && row.product == product &&
+                        row.status != "success"]
+                    error("[$scheme/$product] no common valid OOF samples across all methods; " *
+                        join(failures, " | "))
+                end
+                product_dir = joinpath(scheme_dir, lowercase(product))
+                mkpath(product_dir)
+                for method in BENCHMARK_METHODS
+                    # The per-station OOF tables are large; only the first repeat writes them.
+                    repeat_index == 1 && write_wide(
+                        joinpath(product_dir, "oof_$(method).csv"), data.times, ids, predictions[method],
+                    )
+                    append_stratified_metrics!(
+                        all_metric_rows, scheme, product, method, data.times, y_obs,
+                        predictions[method], common_mask, nearest_train_distance, cfg.event_thresholds;
+                        repeat=repeat_index, seed=repeat_seed,
+                    )
+                end
+                if repeat_index == 1
+                    mask_df = DataFrame(time=Dates.format.(data.times, dateformat"yyyy-mm-ddTHH:MM:SS"))
+                    for (station_index, station_id) in enumerate(ids)
+                        mask_df[!, Symbol(station_id)] = common_mask[station_index, :]
+                    end
+                    CSV.write(joinpath(product_dir, "common_evaluation_mask.csv"), mask_df)
+                end
+                if scheme_symbol == :balanced_spatial && cfg.bootstrap_reps > 0
+                    append!(all_bootstrap_rows, paired_bootstrap_rows(
+                        cfg, scheme, product, data.times, y_obs, predictions, common_mask;
+                        repeat=repeat_index, seed=repeat_seed,
+                    ))
+                end
             end
         end
-    end
     end # repeat loop
 
     return _write_benchmark_outputs(
