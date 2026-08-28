@@ -63,392 +63,70 @@ function _benchmark_status_row(
     )
 end
 
-function run_interpolation_benchmark(cfg::InterpolationBenchmarkConfig)
-    mkpath(cfg.mger.outdir)
-    station_meta = load_station_meta(cfg.mger.station_meta_path;
-        station_id_col=cfg.mger.station_id_col, lon_col=cfg.mger.lon_col, lat_col=cfg.mger.lat_col)
-    products, ids, product_data = load_global_common_product_data(cfg.mger)
-    lonlat = build_X_lonlat(station_meta, ids)
-    _validate_benchmark_config(cfg, length(ids))
-    terrain = _dem_enabled(cfg) ? load_aligned_terrain(something(cfg.terrain_path), ids) : nothing
-    dem_store = _empty_dem_store()
-    common_times = product_data[first(products)].times
-    joint_inputs = _joint_enabled(cfg) ? load_joint_benchmark_inputs(
-        something(cfg.joint_covariates), products, ids, common_times,
-    ) : nothing
-    nested_joint = _joint_enabled(cfg) && cfg.joint_selection !== nothing
-    joint_store = _empty_joint_store()
-    joint_scaling_tables = DataFrame[]
-    joint_qc_tables = DataFrame[]
-    if joint_inputs !== nothing
-        if nested_joint
-            CSV.write(joinpath(cfg.mger.outdir, "joint_spec_provenance.csv"), DataFrame([(
-                source_path="", sha256="", selection_mode="nested_per_fold", confirmatory=true,
-            )]))
-        else
-            CSV.write(
-                joinpath(cfg.mger.outdir, "joint_variable_spec_used.csv"),
-                joint_inputs.specification.table,
-            )
-            CSV.write(joinpath(cfg.mger.outdir, "joint_spec_provenance.csv"), DataFrame([(
-                source_path=abspath(something(cfg.joint_covariates).spec_path),
-                sha256=joint_inputs.spec_sha256,
-                selection_mode="fixed_full_data",
-                confirmatory=false,
-            )]))
-        end
-        CSV.write(joinpath(cfg.mger.outdir, "joint_era5_input_qc.csv"), joint_inputs.era5.qc)
-        if joint_inputs.ndvi !== nothing
-            CSV.write(joinpath(cfg.mger.outdir, "joint_ndvi_alignment_qc.csv"),
-                joint_inputs.ndvi.aligned.qc)
-        end
-    end
+"""
+Provenance and input-QC tables for a joint-covariate run.
 
-    all_metric_rows = NamedTuple[]
-    all_scan_rows = NamedTuple[]
-    all_bootstrap_rows = NamedTuple[]
-    run_status_rows = NamedTuple[]
-    auto_selection_rows = NamedTuple[]
-    hurdle_rows = NamedTuple[]
-    # Cells where the fold was too small for an inner selection split and fell back to
-    # leave-one-out. Reported in `benchmark_scope.csv` so the fallback is never silent.
-    selection_fallback_cells = String[]
-
-    if _dem_enabled(cfg)
-        dem = something(cfg.dem)
-        for product in products
-            data = product_data[product]
-            selection = screen_dem_subset(
-                terrain, lonlat, data.times, data.Y_obs, data.Y_sat, dem;
-                scheme="full_data", product, fold=0, phase="full_data",
-                seed=cfg.seed + 100_000 + Int(sum(codeunits(product))),
-            )
-            _store_dem_selection!(dem_store, selection)
-        end
-    end
-
-    seeds = benchmark_seeds(cfg)
-    # Repeated cross-validation: one independent fold partition per repeat. The body is left at its
-    # original indentation to keep the diff reviewable.
-    #
-    # `repeat_seed` and the partition index are deliberately separate. Under the default
-    # `:hilbert` initialisation the partition comes from `rotation = repeat_index - 1` and no RNG
-    # is involved at all; `repeat_seed` still seeds the genuinely stochastic sub-processes below
-    # (paired bootstrap, DEM permutation tests, joint variable selection) and the `:random`
-    # scheme, which is random by definition.
-    for (repeat_index, repeat_seed) in enumerate(seeds)
-    repeat_root = _repeat_dir(cfg.mger.outdir, repeat_index, length(seeds))
-    for scheme_symbol in cfg.cv_schemes
-        scheme = string(scheme_symbol)
-        scheme_dir = joinpath(repeat_root, scheme)
-        mkpath(scheme_dir)
-        folds = benchmark_folds(
-            scheme_symbol, ids, lonlat; k=cfg.k, seed=repeat_seed,
-            center_init=cfg.fold_center_init, rotation=repeat_index - 1,
+`joint_spec_provenance.csv` is written on both paths so a reader can always tell which selection
+mode produced the run: nested per-fold selection is confirmatory, a fixed full-data spec is not.
+"""
+function _write_joint_provenance(cfg::InterpolationBenchmarkConfig, joint_inputs, nested_joint::Bool)
+    if nested_joint
+        CSV.write(joinpath(cfg.mger.outdir, "joint_spec_provenance.csv"), DataFrame([(
+            source_path="", sha256="", selection_mode="nested_per_fold", confirmatory=true,
+        )]))
+    else
+        CSV.write(
+            joinpath(cfg.mger.outdir, "joint_variable_spec_used.csv"),
+            joint_inputs.specification.table,
         )
-        _write_split(joinpath(scheme_dir, "split_common.csv"), ids, folds, scheme_symbol)
-        id_map = Dict(id => index for (index, id) in enumerate(ids))
-
-        for product in products
-            data = product_data[product]
-            y_obs = data.Y_obs
-            y_sat = data.Y_sat
-            predictions = Dict(method => fill(NaN, size(y_obs)) for method in BENCHMARK_METHODS)
-            predictions["raw"] .= y_sat
-            nearest_train_distance = fill(NaN, length(ids))
-
-            for fold in 1:cfg.k
-                val_ids = folds[fold]
-                train_ids = reduce(vcat, (folds[index] for index in 1:cfg.k if index != fold))
-                train_idx = [id_map[id] for id in train_ids]
-                val_idx = [id_map[id] for id in val_ids]
-                train_lonlat = Matrix{Float64}(lonlat[train_idx, :])
-                val_lonlat = Matrix{Float64}(lonlat[val_idx, :])
-                y_obs_train = Matrix{Float64}(y_obs[train_idx, :])
-                y_sat_train = Matrix{Float64}(y_sat[train_idx, :])
-                y_sat_val = Matrix{Float64}(y_sat[val_idx, :])
-                distance_train_val = haversine_distance_matrix(train_lonlat, val_lonlat)
-                nearest_train_distance[val_idx] = vec(minimum(distance_train_val, dims=1))
-                null_predictions = _null_fold_predictions(y_obs_train, length(val_idx))
-                for (null_method, null_prediction) in null_predictions
-                    predictions[null_method][val_idx, :] = null_prediction
-                end
-                # One inner split for the whole fold, so every method's candidates are scored
-                # against the same held-out stations, and so the joint contexts below agree with
-                # what the spatial-only methods use.
-                selection_groups = cfg.tuning_geometry === :inner_spatial ?
-                    selection_folds(cfg, scheme_symbol, train_ids, train_lonlat, fold,
-                        repeat_seed; repeat_index) :
-                    nothing
-                if cfg.tuning_geometry === :inner_spatial && selection_groups === nothing
-                    push!(selection_fallback_cells, "$scheme/$product/fold$fold")
-                end
-
-                dem_context = nothing
-                if _dem_enabled(cfg)
-                    dem = something(cfg.dem)
-                    selection = screen_dem_subset(
-                        terrain[train_idx, :], train_lonlat, data.times,
-                        y_obs_train, y_sat_train, dem; scheme, product, fold, phase="cv",
-                        seed=repeat_seed + 10_000 * fold + Int(sum(codeunits(scheme * product))),
-                        repeat=repeat_index,
-                    )
-                    _store_dem_selection!(dem_store, selection)
-                    dem_context = build_dem_fold_context(
-                        selection, terrain[train_idx, :], terrain[val_idx, :],
-                        train_lonlat, val_lonlat, dem,
-                    )
-                end
-                joint_context = nothing
-                joint_selection_contexts = nothing
-                if joint_inputs !== nothing
-                    joint = something(cfg.joint_covariates)
-                    role_map = if nested_joint
-                        product_index = findfirst(==(product), products)
-                        run_seed = repeat_seed + 1000 * product_index + 10 * fold
-                        dem_seed = repeat_seed + 20260815 + Int(sum(codeunits(product))) +
-                            10_000 + 10 * fold
-                        joint_selection = _screen_joint_subset(
-                            # `select_joint_covariates` expects population-wide matrices and
-                            # slices them via `train_idx` itself (unlike the DEM path's
-                            # pre-sliced `terrain[train_idx,:]` convention above).
-                            product, y_obs, y_sat, joint_inputs.terrain,
-                            joint_inputs.era5.values,
-                            joint_inputs.ndvi === nothing ? nothing : joint_inputs.ndvi.aligned,
-                            train_idx, ids, data.times, lonlat, something(cfg.joint_selection);
-                            scheme, fold, repeat=repeat_index, seed=repeat_seed, run_seed, dem_seed,
-                        )
-                        _store_joint_selection!(joint_store, joint_selection)
-                        joint_selection.role_map
-                    else
-                        joint_inputs.specification.role_maps[product]
-                    end
-                    joint_context = build_joint_fold_context(
-                        product, role_map,
-                        train_idx, val_idx, lonlat, y_obs, y_sat,
-                        joint_inputs.terrain, joint_inputs.era5.values,
-                        joint_inputs.ndvi === nothing ? nothing : joint_inputs.ndvi.aligned,
-                        joint,
-                    )
-                    # `repeat`/`seed` alongside scheme/fold: without them a repeated run's rows are
-                    # indistinguishable on disk, since (scheme, fold, product, variable_group)
-                    # repeats once per partition.
-                    scaling = copy(joint_context.scaling)
-                    insertcols!(scaling, 1,
-                        :scheme => fill(scheme, nrow(scaling)),
-                        :repeat => fill(repeat_index, nrow(scaling)),
-                        :seed => fill(repeat_seed, nrow(scaling)),
-                        :fold => fill(fold, nrow(scaling)))
-                    push!(joint_scaling_tables, scaling)
-                    quality = copy(joint_context.quality_control)
-                    insertcols!(quality, 1,
-                        :scheme => fill(scheme, nrow(quality)),
-                        :repeat => fill(repeat_index, nrow(quality)),
-                        :seed => fill(repeat_seed, nrow(quality)),
-                        :fold => fill(fold, nrow(quality)))
-                    push!(joint_qc_tables, quality)
-                    # One context per inner selection group, so joint candidates can be scored by
-                    # predicting onto held-out stations instead of leave-one-out. Same builder,
-                    # same role map, inner indices — all scaling refits on the inner training set.
-                    if selection_groups !== nothing
-                        joint_selection_contexts = [(
-                            target_positions=group,
-                            context=build_joint_fold_context(
-                                product, role_map,
-                                train_idx[setdiff(1:length(train_idx), group)],
-                                train_idx[group], lonlat, y_obs, y_sat,
-                                joint_inputs.terrain, joint_inputs.era5.values,
-                                joint_inputs.ndvi === nothing ? nothing : joint_inputs.ndvi.aligned,
-                                joint,
-                            ),
-                        ) for group in selection_groups]
-                    end
-                end
-
-                hurdle_context = build_hurdle_context(
-                    data.times, cfg, hurdle_rows; scheme, product, fold, repeat=repeat_index,
-                )
-
-                fold_predictions = merge(
-                    Dict{String,Matrix{Float64}}("raw" => y_sat_val), null_predictions,
-                )
-                scan_start = length(all_scan_rows) + 1
-                # Winning hyperparameters per method, kept so `auto` can re-predict them across the
-                # inner split and choose between the methods without seeing a held-out station.
-                fold_selected = Dict{String,Any}()
-                for (mode, method) in BENCHMARK_RUNS
-                    output_method = _output_method(mode, method)
-                    try
-                        selected = select_interpolation_parameter!(
-                            all_scan_rows, cfg, method, mode, scheme_symbol, product, fold,
-                            train_lonlat, y_obs_train, y_sat_train;
-                            dem_context, joint_context, hurdle_context,
-                            selection_groups, joint_selection_contexts, repeat_seed,
-                            repeat_index,
-                        )
-                        fold_predictions[output_method] = predict_selected(
-                            selected, method, mode, train_lonlat, val_lonlat,
-                            y_obs_train, y_sat_train, y_sat_val;
-                            dem_context, joint_context, hurdle_context,
-                        )
-                        predictions[output_method][val_idx, :] = fold_predictions[output_method]
-                        fold_selected[output_method] = selected
-                        eligible = .!isnan.(y_obs[val_idx, :]) .& .!isnan.(y_sat_val)
-                        coverage = _prediction_coverage(eligible, fold_predictions[output_method])
-                        push!(run_status_rows, _benchmark_status_row(
-                            dem_context, joint_context, joint_inputs, nested_joint;
-                            scheme, product, fold, repeat=repeat_index, seed=repeat_seed,
-                            mode, method, output_method,
-                            status=coverage >= cfg.min_tuning_coverage ? "success" : "partial",
-                            error=coverage >= cfg.min_tuning_coverage ? "" :
-                                "prediction coverage below minimum",
-                            prediction_coverage=coverage,
-                        ))
-                    catch e
-                        fold_predictions[output_method] = fill(NaN, length(val_idx), size(y_obs, 2))
-                        push!(run_status_rows, _benchmark_status_row(
-                            dem_context, joint_context, joint_inputs, nested_joint;
-                            scheme, product, fold, repeat=repeat_index, seed=repeat_seed,
-                            mode, method, output_method, status="failed",
-                            error=sprint(showerror, e), prediction_coverage=0.0,
-                        ))
-                    end
-                end
-
-                for index in scan_start:length(all_scan_rows)
-                    all_scan_rows[index] = merge(
-                        all_scan_rows[index], (; repeat=repeat_index, seed=repeat_seed),
-                    )
-                end
-
-                # `auto`: choose one GWR-family method for this fold on the inner split alone.
-                #
-                # Contenders are re-predicted rather than compared on their scan rows, because the
-                # scan scores each method over its own non-NaN cells and the winner would otherwise
-                # partly be whoever failed on the hardest ones. Same tuning hours as the scan, so
-                # the choice is made against the criterion the candidates were tuned on.
-                auto_time_indices, auto_time_weights =
-                    cfg.tuning_max_times > 0 && size(y_obs_train, 2) > cfg.tuning_max_times ?
-                        _tuning_time_sample(
-                            y_obs_train, cfg.tuning_max_times, cfg.tuning_time_weighting,
-                        ) : (collect(axes(y_obs_train, 2)), nothing)
-                auto_contenders = NamedTuple[]
-                auto_failures = String[]
-                # Not run on the legacy DEM path: `inner_selection_prediction` deliberately carries
-                # no `dem_context`, and that path is mutually exclusive with the joint one and is
-                # not part of the reported comparison.
-                auto_applicable = !_dem_enabled(cfg) && selection_groups !== nothing
-                if auto_applicable
-                    for (mode, method) in AUTO_CANDIDATE_RUNS
-                        output_method = _output_method(mode, method)
-                        haskey(fold_selected, output_method) || continue
-                        try
-                            push!(auto_contenders, (; method=output_method,
-                                prediction=inner_selection_prediction(
-                                    fold_selected[output_method], method, mode, train_lonlat,
-                                    y_obs_train, y_sat_train, selection_groups;
-                                    joint_contexts=joint_selection_contexts,
-                                    time_indices=auto_time_indices,
-                                )))
-                        catch e
-                            push!(auto_failures, "$output_method: $(sprint(showerror, e))")
-                        end
-                    end
-                end
-                auto_choice = select_auto_method(
-                    auto_contenders,
-                    Matrix{Float64}(y_obs_train[:, auto_time_indices]),
-                    Matrix{Float64}(y_sat_train[:, auto_time_indices]);
-                    time_weights=auto_time_weights,
-                )
-                if auto_choice !== nothing && haskey(fold_predictions, auto_choice.chosen)
-                    fold_predictions[AUTO_METHOD] = fold_predictions[auto_choice.chosen]
-                    predictions[AUTO_METHOD][val_idx, :] = fold_predictions[AUTO_METHOD]
-                    push!(auto_selection_rows, merge(
-                        (; scheme, product, fold, repeat=repeat_index, seed=repeat_seed),
-                        auto_choice,
-                        (; skipped=join(auto_failures, " | ")),
-                    ))
-                else
-                    # No inner split (leave-one-out geometry, or a fold too small to split), or no
-                    # contender survived. Left unpredicted rather than defaulted to a method,
-                    # which would make `auto` mean something different in different folds.
-                    fold_predictions[AUTO_METHOD] = fill(NaN, length(val_idx), size(y_obs, 2))
-                end
-                # "skipped" rather than "failed" where `auto` was never applicable, so a genuine
-                # breakage stays visible instead of being lost among expected non-runs.
-                auto_status, auto_error = if auto_choice !== nothing
-                    ("success", "")
-                elseif _dem_enabled(cfg)
-                    ("skipped", "auto is not run on the legacy DEM path")
-                elseif selection_groups === nothing
-                    ("skipped", "fold has no inner selection split to choose on")
-                else
-                    ("failed", "no auto contender scored: $(join(auto_failures, " | "))")
-                end
-                # Measured the same way as every other method's row - non-NaN share of the
-                # held-out cells it could have predicted - so the column means one thing across the
-                # table. `auto_selection.csv` carries the inner-split mask coverage separately.
-                auto_eligible = .!isnan.(y_obs[val_idx, :]) .& .!isnan.(y_sat_val)
-                auto_coverage = _prediction_coverage(auto_eligible, fold_predictions[AUTO_METHOD])
-                push!(run_status_rows, _benchmark_status_row(
-                    nothing, nothing, joint_inputs, nested_joint;
-                    scheme, product, fold, repeat=repeat_index, seed=repeat_seed,
-                    mode="", method=AUTO_METHOD, output_method=AUTO_METHOD,
-                    status=auto_status, error=auto_error, prediction_coverage=auto_coverage,
-                ))
-
-                fold_mask = _common_method_mask(Matrix{Float64}(y_obs[val_idx, :]), fold_predictions)
-                if any(fold_mask)
-                    for method in BENCHMARK_METHODS
-                        append_stratified_metrics!(
-                            all_metric_rows, scheme, product, method, data.times,
-                            Matrix{Float64}(y_obs[val_idx, :]), fold_predictions[method], fold_mask,
-                            nearest_train_distance[val_idx], cfg.event_thresholds; fold,
-                            repeat=repeat_index, seed=repeat_seed,
-                        )
-                    end
-                end
-            end
-
-            common_mask = _common_method_mask(y_obs, predictions)
-            if !any(common_mask)
-                failures = ["fold=$(row.fold) method=$(row.method): $(row.error)" for
-                    row in run_status_rows if row.scheme == scheme && row.product == product &&
-                    row.status != "success"]
-                error("[$scheme/$product] no common valid OOF samples across all methods; " *
-                    join(failures, " | "))
-            end
-            product_dir = joinpath(scheme_dir, lowercase(product))
-            mkpath(product_dir)
-            for method in BENCHMARK_METHODS
-                # The per-station OOF tables are large; only the first repeat writes them.
-                repeat_index == 1 && write_wide(
-                    joinpath(product_dir, "oof_$(method).csv"), data.times, ids, predictions[method],
-                )
-                append_stratified_metrics!(
-                    all_metric_rows, scheme, product, method, data.times, y_obs,
-                    predictions[method], common_mask, nearest_train_distance, cfg.event_thresholds;
-                    repeat=repeat_index, seed=repeat_seed,
-                )
-            end
-            if repeat_index == 1
-                mask_df = DataFrame(time=Dates.format.(data.times, dateformat"yyyy-mm-ddTHH:MM:SS"))
-                for (station_index, station_id) in enumerate(ids)
-                    mask_df[!, Symbol(station_id)] = common_mask[station_index, :]
-                end
-                CSV.write(joinpath(product_dir, "common_evaluation_mask.csv"), mask_df)
-            end
-            if scheme_symbol == :balanced_spatial && cfg.bootstrap_reps > 0
-                append!(all_bootstrap_rows, paired_bootstrap_rows(
-                    cfg, scheme, product, data.times, y_obs, predictions, common_mask;
-                    repeat=repeat_index, seed=repeat_seed,
-                ))
-            end
-        end
+        CSV.write(joinpath(cfg.mger.outdir, "joint_spec_provenance.csv"), DataFrame([(
+            source_path=abspath(something(cfg.joint_covariates).spec_path),
+            sha256=joint_inputs.spec_sha256,
+            selection_mode="fixed_full_data",
+            confirmatory=false,
+        )]))
     end
-    end # repeat loop
+    CSV.write(joinpath(cfg.mger.outdir, "joint_era5_input_qc.csv"), joint_inputs.era5.qc)
+    if joint_inputs.ndvi !== nothing
+        CSV.write(joinpath(cfg.mger.outdir, "joint_ndvi_alignment_qc.csv"),
+            joint_inputs.ndvi.aligned.qc)
+    end
+    return nothing
+end
 
+"""
+Screen the DEM covariates once over every station, before any fold is drawn.
+
+Reported alongside the per-fold screens so a reader can see which variables the full station set
+supports; the `"full_data"` scheme label keeps it out of the cross-fold stability tables.
+"""
+function _screen_dem_full_data!(dem_store, cfg::InterpolationBenchmarkConfig, terrain, lonlat, products, product_data)
+    dem = something(cfg.dem)
+    for product in products
+        data = product_data[product]
+        selection = screen_dem_subset(
+            terrain, lonlat, data.times, data.Y_obs, data.Y_sat, dem;
+            scheme="full_data", product, fold=0, phase="full_data",
+            seed=cfg.seed + 100_000 + Int(sum(codeunits(product))),
+        )
+        _store_dem_selection!(dem_store, selection)
+    end
+    return dem_store
+end
+
+"""
+Assemble every result table from the accumulated rows and write the run's CSVs.
+
+Split out of `run_interpolation_benchmark` so the orchestration reads as
+setup -> repeat/scheme/product/fold loops -> outputs. Parameters are named for the accumulators
+they receive so the body is unchanged from when it was inline.
+"""
+function _write_benchmark_outputs(
+    cfg::InterpolationBenchmarkConfig, products, seeds, nested_joint::Bool, joint_inputs,
+    dem_store, joint_store, joint_scaling_tables, joint_qc_tables,
+    all_metric_rows, all_scan_rows, all_bootstrap_rows, run_status_rows,
+    auto_selection_rows, hurdle_rows, selection_fallback_cells,
+)
     metrics = DataFrame(all_metric_rows)
     scans = DataFrame(all_scan_rows)
     bootstrap = DataFrame(all_bootstrap_rows)
@@ -602,4 +280,399 @@ function run_interpolation_benchmark(cfg::InterpolationBenchmarkConfig)
     CSV.write(joinpath(cfg.mger.outdir, "benchmark_scope.csv"), scope)
     return (; metrics, scans, bootstrap, status, claim, repeat_summary, fold_summary,
         rank_stability, auto_selection=DataFrame(auto_selection_rows))
+end
+
+"""
+Everything one cross-validation fold does: split the stations, build the fold's DEM/joint/hurdle
+contexts, tune and predict each `BENCHMARK_RUNS` method, run `auto`, and append the fold's metric,
+scan and status rows.
+
+Extracted verbatim from `run_interpolation_benchmark`, whose body was a single 580-line function
+with the fold loop nested four deep. Parameters are named for the values they receive so the body
+is unchanged from when it was inline; the length of this argument list is the honest measure of
+how much per-run state a fold touches, and is a fair target for a later pass.
+
+Mutates `predictions`, `nearest_train_distance`, the DEM/joint stores and the row accumulators.
+"""
+function _run_benchmark_fold!(
+    cfg::InterpolationBenchmarkConfig, fold::Int, folds, id_map, ids, products, product,
+    data, lonlat, y_obs, y_sat, terrain, joint_inputs, nested_joint::Bool,
+    scheme, scheme_symbol, repeat_index::Int, repeat_seed::Int,
+    predictions, nearest_train_distance,
+    dem_store, joint_store, joint_scaling_tables, joint_qc_tables,
+    all_metric_rows, all_scan_rows, run_status_rows, auto_selection_rows, hurdle_rows,
+    selection_fallback_cells,
+)
+
+    val_ids = folds[fold]
+    train_ids = reduce(vcat, (folds[index] for index in 1:cfg.k if index != fold))
+    train_idx = [id_map[id] for id in train_ids]
+    val_idx = [id_map[id] for id in val_ids]
+    train_lonlat = Matrix{Float64}(lonlat[train_idx, :])
+    val_lonlat = Matrix{Float64}(lonlat[val_idx, :])
+    y_obs_train = Matrix{Float64}(y_obs[train_idx, :])
+    y_sat_train = Matrix{Float64}(y_sat[train_idx, :])
+    y_sat_val = Matrix{Float64}(y_sat[val_idx, :])
+    distance_train_val = haversine_distance_matrix(train_lonlat, val_lonlat)
+    nearest_train_distance[val_idx] = vec(minimum(distance_train_val, dims=1))
+    null_predictions = _null_fold_predictions(y_obs_train, length(val_idx))
+    for (null_method, null_prediction) in null_predictions
+        predictions[null_method][val_idx, :] = null_prediction
+    end
+    # One inner split for the whole fold, so every method's candidates are scored
+    # against the same held-out stations, and so the joint contexts below agree with
+    # what the spatial-only methods use.
+    selection_groups = cfg.tuning_geometry === :inner_spatial ?
+        selection_folds(cfg, scheme_symbol, train_ids, train_lonlat, fold,
+            repeat_seed; repeat_index) :
+        nothing
+    if cfg.tuning_geometry === :inner_spatial && selection_groups === nothing
+        push!(selection_fallback_cells, "$scheme/$product/fold$fold")
+    end
+
+    dem_context = nothing
+    if _dem_enabled(cfg)
+        dem = something(cfg.dem)
+        selection = screen_dem_subset(
+            terrain[train_idx, :], train_lonlat, data.times,
+            y_obs_train, y_sat_train, dem; scheme, product, fold, phase="cv",
+            seed=repeat_seed + 10_000 * fold + Int(sum(codeunits(scheme * product))),
+            repeat=repeat_index,
+        )
+        _store_dem_selection!(dem_store, selection)
+        dem_context = build_dem_fold_context(
+            selection, terrain[train_idx, :], terrain[val_idx, :],
+            train_lonlat, val_lonlat, dem,
+        )
+    end
+    joint_context = nothing
+    joint_selection_contexts = nothing
+    if joint_inputs !== nothing
+        joint = something(cfg.joint_covariates)
+        role_map = if nested_joint
+            product_index = findfirst(==(product), products)
+            run_seed = repeat_seed + 1000 * product_index + 10 * fold
+            dem_seed = repeat_seed + 20260815 + Int(sum(codeunits(product))) +
+                10_000 + 10 * fold
+            joint_selection = _screen_joint_subset(
+                # `select_joint_covariates` expects population-wide matrices and
+                # slices them via `train_idx` itself (unlike the DEM path's
+                # pre-sliced `terrain[train_idx,:]` convention above).
+                product, y_obs, y_sat, joint_inputs.terrain,
+                joint_inputs.era5.values,
+                joint_inputs.ndvi === nothing ? nothing : joint_inputs.ndvi.aligned,
+                train_idx, ids, data.times, lonlat, something(cfg.joint_selection);
+                scheme, fold, repeat=repeat_index, seed=repeat_seed, run_seed, dem_seed,
+            )
+            _store_joint_selection!(joint_store, joint_selection)
+            joint_selection.role_map
+        else
+            joint_inputs.specification.role_maps[product]
+        end
+        joint_context = build_joint_fold_context(
+            product, role_map,
+            train_idx, val_idx, lonlat, y_obs, y_sat,
+            joint_inputs.terrain, joint_inputs.era5.values,
+            joint_inputs.ndvi === nothing ? nothing : joint_inputs.ndvi.aligned,
+            joint,
+        )
+        # `repeat`/`seed` alongside scheme/fold: without them a repeated run's rows are
+        # indistinguishable on disk, since (scheme, fold, product, variable_group)
+        # repeats once per partition.
+        scaling = copy(joint_context.scaling)
+        insertcols!(scaling, 1,
+            :scheme => fill(scheme, nrow(scaling)),
+            :repeat => fill(repeat_index, nrow(scaling)),
+            :seed => fill(repeat_seed, nrow(scaling)),
+            :fold => fill(fold, nrow(scaling)))
+        push!(joint_scaling_tables, scaling)
+        quality = copy(joint_context.quality_control)
+        insertcols!(quality, 1,
+            :scheme => fill(scheme, nrow(quality)),
+            :repeat => fill(repeat_index, nrow(quality)),
+            :seed => fill(repeat_seed, nrow(quality)),
+            :fold => fill(fold, nrow(quality)))
+        push!(joint_qc_tables, quality)
+        # One context per inner selection group, so joint candidates can be scored by
+        # predicting onto held-out stations instead of leave-one-out. Same builder,
+        # same role map, inner indices — all scaling refits on the inner training set.
+        if selection_groups !== nothing
+            joint_selection_contexts = [(
+                target_positions=group,
+                context=build_joint_fold_context(
+                    product, role_map,
+                    train_idx[setdiff(1:length(train_idx), group)],
+                    train_idx[group], lonlat, y_obs, y_sat,
+                    joint_inputs.terrain, joint_inputs.era5.values,
+                    joint_inputs.ndvi === nothing ? nothing : joint_inputs.ndvi.aligned,
+                    joint,
+                ),
+            ) for group in selection_groups]
+        end
+    end
+
+    hurdle_context = build_hurdle_context(
+        data.times, cfg, hurdle_rows; scheme, product, fold, repeat=repeat_index,
+    )
+
+    fold_predictions = merge(
+        Dict{String,Matrix{Float64}}("raw" => y_sat_val), null_predictions,
+    )
+    scan_start = length(all_scan_rows) + 1
+    # Winning hyperparameters per method, kept so `auto` can re-predict them across the
+    # inner split and choose between the methods without seeing a held-out station.
+    fold_selected = Dict{String,Any}()
+    for (mode, method) in BENCHMARK_RUNS
+        output_method = _output_method(mode, method)
+        try
+            selected = select_interpolation_parameter!(
+                all_scan_rows, cfg, method, mode, scheme_symbol, product, fold,
+                train_lonlat, y_obs_train, y_sat_train;
+                dem_context, joint_context, hurdle_context,
+                selection_groups, joint_selection_contexts, repeat_seed,
+                repeat_index,
+            )
+            fold_predictions[output_method] = predict_selected(
+                selected, method, mode, train_lonlat, val_lonlat,
+                y_obs_train, y_sat_train, y_sat_val;
+                dem_context, joint_context, hurdle_context,
+            )
+            predictions[output_method][val_idx, :] = fold_predictions[output_method]
+            fold_selected[output_method] = selected
+            eligible = .!isnan.(y_obs[val_idx, :]) .& .!isnan.(y_sat_val)
+            coverage = _prediction_coverage(eligible, fold_predictions[output_method])
+            push!(run_status_rows, _benchmark_status_row(
+                dem_context, joint_context, joint_inputs, nested_joint;
+                scheme, product, fold, repeat=repeat_index, seed=repeat_seed,
+                mode, method, output_method,
+                status=coverage >= cfg.min_tuning_coverage ? "success" : "partial",
+                error=coverage >= cfg.min_tuning_coverage ? "" :
+                    "prediction coverage below minimum",
+                prediction_coverage=coverage,
+            ))
+        catch e
+            fold_predictions[output_method] = fill(NaN, length(val_idx), size(y_obs, 2))
+            push!(run_status_rows, _benchmark_status_row(
+                dem_context, joint_context, joint_inputs, nested_joint;
+                scheme, product, fold, repeat=repeat_index, seed=repeat_seed,
+                mode, method, output_method, status="failed",
+                error=sprint(showerror, e), prediction_coverage=0.0,
+            ))
+        end
+    end
+
+    for index in scan_start:length(all_scan_rows)
+        all_scan_rows[index] = merge(
+            all_scan_rows[index], (; repeat=repeat_index, seed=repeat_seed),
+        )
+    end
+
+    # `auto`: choose one GWR-family method for this fold on the inner split alone.
+    #
+    # Contenders are re-predicted rather than compared on their scan rows, because the
+    # scan scores each method over its own non-NaN cells and the winner would otherwise
+    # partly be whoever failed on the hardest ones. Same tuning hours as the scan, so
+    # the choice is made against the criterion the candidates were tuned on.
+    auto_time_indices, auto_time_weights =
+        cfg.tuning_max_times > 0 && size(y_obs_train, 2) > cfg.tuning_max_times ?
+            _tuning_time_sample(
+                y_obs_train, cfg.tuning_max_times, cfg.tuning_time_weighting,
+            ) : (collect(axes(y_obs_train, 2)), nothing)
+    auto_contenders = NamedTuple[]
+    auto_failures = String[]
+    # Not run on the legacy DEM path: `inner_selection_prediction` deliberately carries
+    # no `dem_context`, and that path is mutually exclusive with the joint one and is
+    # not part of the reported comparison.
+    auto_applicable = !_dem_enabled(cfg) && selection_groups !== nothing
+    if auto_applicable
+        for (mode, method) in AUTO_CANDIDATE_RUNS
+            output_method = _output_method(mode, method)
+            haskey(fold_selected, output_method) || continue
+            try
+                push!(auto_contenders, (; method=output_method,
+                    prediction=inner_selection_prediction(
+                        fold_selected[output_method], method, mode, train_lonlat,
+                        y_obs_train, y_sat_train, selection_groups;
+                        joint_contexts=joint_selection_contexts,
+                        time_indices=auto_time_indices,
+                    )))
+            catch e
+                push!(auto_failures, "$output_method: $(sprint(showerror, e))")
+            end
+        end
+    end
+    auto_choice = select_auto_method(
+        auto_contenders,
+        Matrix{Float64}(y_obs_train[:, auto_time_indices]),
+        Matrix{Float64}(y_sat_train[:, auto_time_indices]);
+        time_weights=auto_time_weights,
+    )
+    if auto_choice !== nothing && haskey(fold_predictions, auto_choice.chosen)
+        fold_predictions[AUTO_METHOD] = fold_predictions[auto_choice.chosen]
+        predictions[AUTO_METHOD][val_idx, :] = fold_predictions[AUTO_METHOD]
+        push!(auto_selection_rows, merge(
+            (; scheme, product, fold, repeat=repeat_index, seed=repeat_seed),
+            auto_choice,
+            (; skipped=join(auto_failures, " | ")),
+        ))
+    else
+        # No inner split (leave-one-out geometry, or a fold too small to split), or no
+        # contender survived. Left unpredicted rather than defaulted to a method,
+        # which would make `auto` mean something different in different folds.
+        fold_predictions[AUTO_METHOD] = fill(NaN, length(val_idx), size(y_obs, 2))
+    end
+    # "skipped" rather than "failed" where `auto` was never applicable, so a genuine
+    # breakage stays visible instead of being lost among expected non-runs.
+    auto_status, auto_error = if auto_choice !== nothing
+        ("success", "")
+    elseif _dem_enabled(cfg)
+        ("skipped", "auto is not run on the legacy DEM path")
+    elseif selection_groups === nothing
+        ("skipped", "fold has no inner selection split to choose on")
+    else
+        ("failed", "no auto contender scored: $(join(auto_failures, " | "))")
+    end
+    # Measured the same way as every other method's row - non-NaN share of the
+    # held-out cells it could have predicted - so the column means one thing across the
+    # table. `auto_selection.csv` carries the inner-split mask coverage separately.
+    auto_eligible = .!isnan.(y_obs[val_idx, :]) .& .!isnan.(y_sat_val)
+    auto_coverage = _prediction_coverage(auto_eligible, fold_predictions[AUTO_METHOD])
+    push!(run_status_rows, _benchmark_status_row(
+        nothing, nothing, joint_inputs, nested_joint;
+        scheme, product, fold, repeat=repeat_index, seed=repeat_seed,
+        mode="", method=AUTO_METHOD, output_method=AUTO_METHOD,
+        status=auto_status, error=auto_error, prediction_coverage=auto_coverage,
+    ))
+
+    fold_mask = _common_method_mask(Matrix{Float64}(y_obs[val_idx, :]), fold_predictions)
+    if any(fold_mask)
+        for method in BENCHMARK_METHODS
+            append_stratified_metrics!(
+                all_metric_rows, scheme, product, method, data.times,
+                Matrix{Float64}(y_obs[val_idx, :]), fold_predictions[method], fold_mask,
+                nearest_train_distance[val_idx], cfg.event_thresholds; fold,
+                repeat=repeat_index, seed=repeat_seed,
+            )
+        end
+    end
+    return nothing
+end
+
+function run_interpolation_benchmark(cfg::InterpolationBenchmarkConfig)
+    mkpath(cfg.mger.outdir)
+    station_meta = load_station_meta(cfg.mger.station_meta_path;
+        station_id_col=cfg.mger.station_id_col, lon_col=cfg.mger.lon_col, lat_col=cfg.mger.lat_col)
+    products, ids, product_data = load_global_common_product_data(cfg.mger)
+    lonlat = build_X_lonlat(station_meta, ids)
+    _validate_benchmark_config(cfg, length(ids))
+    terrain = _dem_enabled(cfg) ? load_aligned_terrain(something(cfg.terrain_path), ids) : nothing
+    dem_store = _empty_dem_store()
+    common_times = product_data[first(products)].times
+    joint_inputs = _joint_enabled(cfg) ? load_joint_benchmark_inputs(
+        something(cfg.joint_covariates), products, ids, common_times,
+    ) : nothing
+    nested_joint = _joint_enabled(cfg) && cfg.joint_selection !== nothing
+    joint_store = _empty_joint_store()
+    joint_scaling_tables = DataFrame[]
+    joint_qc_tables = DataFrame[]
+    joint_inputs === nothing || _write_joint_provenance(cfg, joint_inputs, nested_joint)
+
+    all_metric_rows = NamedTuple[]
+    all_scan_rows = NamedTuple[]
+    all_bootstrap_rows = NamedTuple[]
+    run_status_rows = NamedTuple[]
+    auto_selection_rows = NamedTuple[]
+    hurdle_rows = NamedTuple[]
+    # Cells where the fold was too small for an inner selection split and fell back to
+    # leave-one-out. Reported in `benchmark_scope.csv` so the fallback is never silent.
+    selection_fallback_cells = String[]
+
+    _dem_enabled(cfg) && _screen_dem_full_data!(dem_store, cfg, terrain, lonlat, products, product_data)
+
+    seeds = benchmark_seeds(cfg)
+    # Repeated cross-validation: one independent fold partition per repeat. The body is left at its
+    # original indentation to keep the diff reviewable.
+    #
+    # `repeat_seed` and the partition index are deliberately separate. Under the default
+    # `:hilbert` initialisation the partition comes from `rotation = repeat_index - 1` and no RNG
+    # is involved at all; `repeat_seed` still seeds the genuinely stochastic sub-processes below
+    # (paired bootstrap, DEM permutation tests, joint variable selection) and the `:random`
+    # scheme, which is random by definition.
+    for (repeat_index, repeat_seed) in enumerate(seeds)
+    repeat_root = _repeat_dir(cfg.mger.outdir, repeat_index, length(seeds))
+    for scheme_symbol in cfg.cv_schemes
+        scheme = string(scheme_symbol)
+        scheme_dir = joinpath(repeat_root, scheme)
+        mkpath(scheme_dir)
+        folds = benchmark_folds(
+            scheme_symbol, ids, lonlat; k=cfg.k, seed=repeat_seed,
+            center_init=cfg.fold_center_init, rotation=repeat_index - 1,
+        )
+        _write_split(joinpath(scheme_dir, "split_common.csv"), ids, folds, scheme_symbol)
+        id_map = Dict(id => index for (index, id) in enumerate(ids))
+
+        for product in products
+            data = product_data[product]
+            y_obs = data.Y_obs
+            y_sat = data.Y_sat
+            predictions = Dict(method => fill(NaN, size(y_obs)) for method in BENCHMARK_METHODS)
+            predictions["raw"] .= y_sat
+            nearest_train_distance = fill(NaN, length(ids))
+
+            for fold in 1:cfg.k
+                _run_benchmark_fold!(
+                    cfg, fold, folds, id_map, ids, products, product,
+                    data, lonlat, y_obs, y_sat, terrain, joint_inputs, nested_joint,
+                    scheme, scheme_symbol, repeat_index, repeat_seed,
+                    predictions, nearest_train_distance,
+                    dem_store, joint_store, joint_scaling_tables, joint_qc_tables,
+                    all_metric_rows, all_scan_rows, run_status_rows, auto_selection_rows,
+                    hurdle_rows, selection_fallback_cells,
+                )
+            end
+
+            common_mask = _common_method_mask(y_obs, predictions)
+            if !any(common_mask)
+                failures = ["fold=$(row.fold) method=$(row.method): $(row.error)" for
+                    row in run_status_rows if row.scheme == scheme && row.product == product &&
+                    row.status != "success"]
+                error("[$scheme/$product] no common valid OOF samples across all methods; " *
+                    join(failures, " | "))
+            end
+            product_dir = joinpath(scheme_dir, lowercase(product))
+            mkpath(product_dir)
+            for method in BENCHMARK_METHODS
+                # The per-station OOF tables are large; only the first repeat writes them.
+                repeat_index == 1 && write_wide(
+                    joinpath(product_dir, "oof_$(method).csv"), data.times, ids, predictions[method],
+                )
+                append_stratified_metrics!(
+                    all_metric_rows, scheme, product, method, data.times, y_obs,
+                    predictions[method], common_mask, nearest_train_distance, cfg.event_thresholds;
+                    repeat=repeat_index, seed=repeat_seed,
+                )
+            end
+            if repeat_index == 1
+                mask_df = DataFrame(time=Dates.format.(data.times, dateformat"yyyy-mm-ddTHH:MM:SS"))
+                for (station_index, station_id) in enumerate(ids)
+                    mask_df[!, Symbol(station_id)] = common_mask[station_index, :]
+                end
+                CSV.write(joinpath(product_dir, "common_evaluation_mask.csv"), mask_df)
+            end
+            if scheme_symbol == :balanced_spatial && cfg.bootstrap_reps > 0
+                append!(all_bootstrap_rows, paired_bootstrap_rows(
+                    cfg, scheme, product, data.times, y_obs, predictions, common_mask;
+                    repeat=repeat_index, seed=repeat_seed,
+                ))
+            end
+        end
+    end
+    end # repeat loop
+
+    return _write_benchmark_outputs(
+        cfg, products, seeds, nested_joint, joint_inputs,
+        dem_store, joint_store, joint_scaling_tables, joint_qc_tables,
+        all_metric_rows, all_scan_rows, all_bootstrap_rows, run_status_rows,
+        auto_selection_rows, hurdle_rows, selection_fallback_cells,
+    )
 end
