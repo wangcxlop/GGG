@@ -7,8 +7,15 @@ using LinearAlgebra
 using SHA
 using Statistics
 
-include(joinpath(@__DIR__, "DEMTerrainExperiment.jl"))
-using .DEMTerrainExperiment: mixed_gwr_predict, multiscale_gwr_predict
+# Loaded through src/load_modules.jl by whoever loads this file. Previously included here,
+# which compiled a second DEMTerrainExperiment whose types were incompatible with the one
+# the benchmark and JointVariableSelection used.
+# `using Main.X: a, b` imports only `a` and `b`; it does not bind `X` itself, and this module
+# also reaches DEMTerrainExperiment by qualification (`_haversine_matrix`, `_local_hat`,
+# `_global_projection`). Bind the module name explicitly so both forms resolve, without
+# pulling in the rest of its exported surface.
+using Main: DEMTerrainExperiment
+using Main.DEMTerrainExperiment: mixed_gwr_predict, multiscale_gwr_predict
 
 export JointCovariateBenchmarkConfig, JointFoldContext
 export load_joint_covariate_spec, joint_spec_sha256, build_joint_fold_context

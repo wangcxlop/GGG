@@ -7,8 +7,9 @@ using LinearAlgebra
 using Random
 using Statistics
 
-include(joinpath(@__DIR__, "ERA5VariableSelection.jl"))
-using .ERA5VariableSelection
+# Loaded through src/load_modules.jl by whoever loads this file, so there is one shared
+# ERA5VariableSelection rather than a private copy compiled into this module.
+using Main.ERA5VariableSelection
 
 export NDVISelectionConfig, load_ndvi_covariates, align_ndvi_asof
 export prepare_ndvi_panel, screen_ndvi, ndvi_spatial_variability_test

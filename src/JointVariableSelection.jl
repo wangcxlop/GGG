@@ -7,12 +7,11 @@ using LinearAlgebra
 using Random
 using Statistics
 
-include(joinpath(@__DIR__, "DEMTerrainExperiment.jl"))
-include(joinpath(@__DIR__, "ERA5VariableSelection.jl"))
-include(joinpath(@__DIR__, "NDVIVariableSelection.jl"))
-using .DEMTerrainExperiment
-using .ERA5VariableSelection
-using .NDVIVariableSelection
+# All three are loaded through src/load_modules.jl before this file, so each is shared
+# rather than recompiled into this module. See src/load_modules.jl.
+using Main.DEMTerrainExperiment
+using Main.ERA5VariableSelection
+using Main.NDVIVariableSelection
 
 export JointSelectionConfig, JOINT_GROUP_ORDER, prepare_joint_panel, joint_vif
 export joint_spatial_variability_test, run_joint_variable_selection, select_joint_covariates
