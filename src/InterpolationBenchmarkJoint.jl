@@ -140,28 +140,21 @@ function select_joint_parameter!(
             kernel_fn = _kernel_function(kernel)
             for (adaptive, family_candidates) in bandwidth_families
                 for bandwidth in family_candidates
-                    try
+                    _scan_candidate!(scan_rows;
+                        scheme, product, fold, mode, method,
+                        group=only(group_names), kernel, adaptive, bw=bandwidth,
+                    ) do
                         metrics = _joint_candidate_metrics(
                             joint_context, residuals, y_obs, y_sat, joint_method,
                             [bandwidth], kernel_fn,
                             times, time_weights, selection_entries, shrink_candidates;
                             adaptive,
                         )
-                        push!(scan_rows, _scan_row(;
-                            scheme, product, fold, mode, method,
-                            group=only(group_names), kernel, adaptive,
-                            bw=bandwidth, shrink=metrics.shrink, n=metrics.n, coverage=metrics.coverage,
+                        (; shrink=metrics.shrink, n=metrics.n, coverage=metrics.coverage,
                             RMSE=metrics.RMSE, MAE=metrics.MAE,
                             status=metrics.coverage >= cfg.min_tuning_coverage ? "success" : "failed",
                             error=metrics.coverage >= cfg.min_tuning_coverage ? "" :
-                                "LOOCV coverage below minimum",
-                        ))
-                    catch error
-                        push!(scan_rows, _scan_row(;
-                            scheme, product, fold, mode, method,
-                            group=only(group_names), kernel, adaptive,
-                            bw=bandwidth, status="failed", error=sprint(showerror, error),
-                        ))
+                                "LOOCV coverage below minimum")
                     end
                 end
             end
@@ -198,29 +191,21 @@ function select_joint_parameter!(
                         candidate_rows = Int[]
                         for bandwidth in family_candidates
                             trial = copy(bandwidths); trial[group_index] = bandwidth
-                            try
+                            _scan_candidate!(scan_rows;
+                                scheme, product, fold, mode, method, iteration,
+                                group=group_names[group_index], kernel, adaptive, bw=bandwidth,
+                            ) do
                                 metrics = _joint_candidate_metrics(
                                     joint_context, residuals, y_obs, y_sat, joint_method,
                                     trial, kernel_fn,
                                     times, time_weights, selection_entries, shrink_candidates;
                                     adaptive,
                                 )
-                                push!(scan_rows, _scan_row(;
-                                    scheme, product, fold, mode, method, iteration,
-                                    group=group_names[group_index], kernel, adaptive,
-                                    bw=bandwidth, shrink=metrics.shrink,
-                                    n=metrics.n, coverage=metrics.coverage,
+                                (; shrink=metrics.shrink, n=metrics.n, coverage=metrics.coverage,
                                     RMSE=metrics.RMSE, MAE=metrics.MAE,
                                     status=metrics.coverage >= cfg.min_tuning_coverage ? "success" : "failed",
                                     error=metrics.coverage >= cfg.min_tuning_coverage ? "" :
-                                        "LOOCV coverage below minimum",
-                                ))
-                            catch error
-                                push!(scan_rows, _scan_row(;
-                                    scheme, product, fold, mode, method, iteration,
-                                    group=group_names[group_index], kernel, adaptive,
-                                    bw=bandwidth, status="failed", error=sprint(showerror, error),
-                                ))
+                                        "LOOCV coverage below minimum")
                             end
                             push!(candidate_rows, length(scan_rows))
                         end

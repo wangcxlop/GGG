@@ -68,6 +68,27 @@ function _scan_row(; scheme, product, fold, mode, method, group="all", iteration
     )
 end
 
+"""
+Score one candidate and append its scan row, recording a failure as a row rather than letting it
+abort the whole scan.
+
+`fields` identifies the candidate and is written either way; `score` returns the row's remaining
+columns, splatted in on success. Every scan in the benchmark - idw/adw, tps, gwr, hurdle_gwr,
+mixed_gwr, mgwr's per-group descent, and both joint paths - wrote this try/push/catch/push block
+out by hand, so how a failed candidate is recorded lived in eight places at once.
+
+The joint scans pass their own `status`/`error` through `score`, because there a coverage
+shortfall is a recorded failure rather than a thrown one.
+"""
+function _scan_candidate!(score, scan_rows::Vector{NamedTuple}; fields...)
+    try
+        push!(scan_rows, _scan_row(; fields..., score()...))
+    catch e
+        push!(scan_rows, _scan_row(; fields..., status="failed", error=sprint(showerror, e)))
+    end
+    return scan_rows
+end
+
 function _select_candidate!(rows::Vector{NamedTuple}, first_row::Int, min_coverage::Float64)
     valid = [i for i in first_row:length(rows) if
         rows[i].status == "success" && rows[i].coverage >= min_coverage && isfinite(rows[i].RMSE)]
@@ -125,7 +146,10 @@ function select_mgwr_bandwidths!(
                         for bw in candidates
                             trial = copy(bandwidths)
                             trial[group_index] = bw
-                            try
+                            _scan_candidate!(scan_rows;
+                                scheme, product, fold, mode="residual", method="mgwr",
+                                group, iteration, kernel, adaptive, bw,
+                            ) do
                                 interpolated = selection_groups === nothing ?
                                     _mgwr_predict(
                                         train_lonlat, residuals, train_lonlat;
@@ -137,17 +161,7 @@ function select_mgwr_bandwidths!(
                                             train_lonlat[va, :]; bandwidths=trial, kernel, adaptive,
                                         ))
                                 prediction = max.(y_sat .+ interpolated, 0.0)
-                                metrics = _candidate_metrics(y_obs, y_sat, prediction; time_weights)
-                                push!(scan_rows, _scan_row(;
-                                    scheme, product, fold, mode="residual", method="mgwr",
-                                    group, iteration, kernel, adaptive, bw, metrics...,
-                                ))
-                            catch e
-                                push!(scan_rows, _scan_row(;
-                                    scheme, product, fold, mode="residual", method="mgwr",
-                                    group, iteration, kernel, adaptive, bw,
-                                    status="failed", error=sprint(showerror, e),
-                                ))
+                                _candidate_metrics(y_obs, y_sat, prediction; time_weights)
                             end
                             push!(candidate_rows, length(scan_rows))
                         end
@@ -344,7 +358,7 @@ function select_interpolation_parameter!(
     if method in ("idw", "adw")
         predictor = method == "idw" ? idw_predict : adw_predict
         for power in cfg.idw_powers, neighbors in cfg.neighbor_candidates
-            try
+            _scan_candidate!(scan_rows; scheme, product, fold, mode, method, power, neighbors) do
                 interpolated = scored(
                     (tr, va) -> predictor(
                         train_lonlat[tr, :], target_values[tr, :], train_lonlat[va, :];
@@ -356,23 +370,15 @@ function select_interpolation_parameter!(
                     ),
                 )
                 prediction = mode == "direct" ? max.(interpolated, 0.0) : max.(y_sat .+ interpolated, 0.0)
-                metrics = _candidate_metrics(
+                _candidate_metrics(
                     y_obs, y_sat, prediction;
                     require_satellite=true, time_weights,
                 )
-                push!(scan_rows, _scan_row(;
-                    scheme, product, fold, mode, method, power, neighbors, metrics...,
-                ))
-            catch e
-                push!(scan_rows, _scan_row(;
-                    scheme, product, fold, mode, method, power, neighbors,
-                    status="failed", error=sprint(showerror, e),
-                ))
             end
         end
     elseif method == "tps"
         for smooth in cfg.tps_smooth_candidates
-            try
+            _scan_candidate!(scan_rows; scheme, product, fold, mode, method, smooth) do
                 interpolated = scored(
                     (tr, va) -> tps_predict(
                         train_lonlat[tr, :], target_values[tr, :], train_lonlat[va, :];
@@ -381,25 +387,17 @@ function select_interpolation_parameter!(
                     () -> tps_loo_predict(train_lonlat, target_values; smooth=smooth),
                 )
                 prediction = mode == "direct" ? max.(interpolated, 0.0) : max.(y_sat .+ interpolated, 0.0)
-                metrics = _candidate_metrics(
+                _candidate_metrics(
                     y_obs, y_sat, prediction;
                     require_satellite=true, time_weights,
                 )
-                push!(scan_rows, _scan_row(;
-                    scheme, product, fold, mode, method, smooth, metrics...,
-                ))
-            catch e
-                push!(scan_rows, _scan_row(;
-                    scheme, product, fold, mode, method, smooth,
-                    status="failed", error=sprint(showerror, e),
-                ))
             end
         end
     elseif method == "gwr"
         for kernel in cfg.mger.kernels
             for (adaptive, candidates) in bandwidth_families
                 for bw in candidates
-                    try
+                    _scan_candidate!(scan_rows; scheme, product, fold, mode, method, kernel, adaptive, bw) do
                         interpolated = scored(
                             (tr, va) -> _gwr_predict(
                                 train_lonlat[tr, :], target_values[tr, :], train_lonlat[va, :];
@@ -411,18 +409,10 @@ function select_interpolation_parameter!(
                             ),
                         )
                         prediction = mode == "direct" ? max.(interpolated, 0.0) : max.(y_sat .+ interpolated, 0.0)
-                        metrics = _candidate_metrics(
+                        _candidate_metrics(
                             y_obs, y_sat, prediction;
                             require_satellite=true, time_weights,
                         )
-                        push!(scan_rows, _scan_row(;
-                            scheme, product, fold, mode, method, kernel, adaptive, bw, metrics...,
-                        ))
-                    catch e
-                        push!(scan_rows, _scan_row(;
-                            scheme, product, fold, mode, method, kernel, adaptive, bw,
-                            status="failed", error=sprint(showerror, e),
-                        ))
                     end
                 end
             end
@@ -439,7 +429,7 @@ function select_interpolation_parameter!(
                     # Skip it rather than logging a guaranteed-failure row per kernel; giving
                     # `hurdle_gwr` a global option means teaching `SpatialBandwidth` about one.
                     isfinite(bw) || continue
-                    try
+                    _scan_candidate!(scan_rows; scheme, product, fold, mode, method, kernel, adaptive, bw) do
                         hurdle_config = _hurdle_config(hurdle_context, kernel, adaptive, bw)
                         corrected = scored(
                             (tr, va) -> _hurdle_predict(
@@ -453,15 +443,7 @@ function select_interpolation_parameter!(
                                 config=hurdle_config, exclude_self=true,
                             ).corrected,
                         )
-                        metrics = _candidate_metrics(y_obs, y_sat, corrected; time_weights)
-                        push!(scan_rows, _scan_row(;
-                            scheme, product, fold, mode, method, kernel, adaptive, bw, metrics...,
-                        ))
-                    catch e
-                        push!(scan_rows, _scan_row(;
-                            scheme, product, fold, mode, method, kernel, adaptive, bw,
-                            status="failed", error=sprint(showerror, e),
-                        ))
+                        _candidate_metrics(y_obs, y_sat, corrected; time_weights)
                     end
                 end
             end
@@ -471,7 +453,7 @@ function select_interpolation_parameter!(
         for kernel in cfg.mger.kernels
             for (adaptive, candidates) in bandwidth_families
                 for bw in candidates
-                    try
+                    _scan_candidate!(scan_rows; scheme, product, fold, mode, method, kernel, adaptive, bw) do
                         interpolated = scored(
                             (tr, va) -> _mixed_gwr_predict(
                                 train_lonlat[tr, :], target_values[tr, :], train_lonlat[va, :];
@@ -483,15 +465,7 @@ function select_interpolation_parameter!(
                             ),
                         )
                         prediction = max.(y_sat .+ interpolated, 0.0)
-                        metrics = _candidate_metrics(y_obs, y_sat, prediction; time_weights)
-                        push!(scan_rows, _scan_row(;
-                            scheme, product, fold, mode, method, kernel, adaptive, bw, metrics...,
-                        ))
-                    catch e
-                        push!(scan_rows, _scan_row(;
-                            scheme, product, fold, mode, method, kernel, adaptive, bw,
-                            status="failed", error=sprint(showerror, e),
-                        ))
+                        _candidate_metrics(y_obs, y_sat, prediction; time_weights)
                     end
                 end
             end
