@@ -305,6 +305,134 @@ end
 _tuning_time_indices(y_obs::Matrix{Float64}, maximum_times::Int) =
     first(_tuning_time_sample(y_obs, maximum_times, :uniform))
 
+# The per-method candidate scans. Each was a branch of one `if`/`elseif` chain inside
+# `select_interpolation_parameter!`, which ran to 222 lines and had to be read in full to find out
+# what any single method searched. They are separate functions so a method's grid is readable on
+# its own; the dispatcher below still decides which one runs, and no grid changed.
+#
+# `row` carries the scan row's identity (scheme, product, fold, mode, method), splatted into
+# `_scan_candidate!`. `scored` is the caller's out-of-fold-vs-leave-one-out scoring closure, which
+# depends on the selection geometry and so cannot be rebuilt here.
+
+"""IDW/ADW: a power x neighbour-count grid. The only non-GWR method with two free parameters."""
+function _scan_idw_adw!(
+    scan_rows::Vector{NamedTuple}, cfg::InterpolationBenchmarkConfig, row::NamedTuple, scored,
+    train_lonlat::Matrix{Float64}, target_values::Matrix{Float64},
+    y_obs::Matrix{Float64}, y_sat::Matrix{Float64}, time_weights,
+)
+    predictor = row.method == "idw" ? idw_predict : adw_predict
+    for power in cfg.idw_powers, neighbors in cfg.neighbor_candidates
+        _scan_candidate!(scan_rows; row..., power, neighbors) do
+            interpolated = scored(
+                (tr, va) -> predictor(
+                    train_lonlat[tr, :], target_values[tr, :], train_lonlat[va, :];
+                    power=power, neighbors=neighbors,
+                ),
+                () -> predictor(
+                    train_lonlat, target_values, train_lonlat;
+                    power=power, neighbors=neighbors, exclude_self=true,
+                ),
+            )
+            prediction = row.mode == "direct" ? max.(interpolated, 0.0) : max.(y_sat .+ interpolated, 0.0)
+            _candidate_metrics(
+                y_obs, y_sat, prediction;
+                require_satellite=true, time_weights,
+            )
+        end
+    end
+    return scan_rows
+end
+
+"""Thin-plate spline: one smoothing parameter."""
+function _scan_tps!(
+    scan_rows::Vector{NamedTuple}, cfg::InterpolationBenchmarkConfig, row::NamedTuple, scored,
+    train_lonlat::Matrix{Float64}, target_values::Matrix{Float64},
+    y_obs::Matrix{Float64}, y_sat::Matrix{Float64}, time_weights,
+)
+    for smooth in cfg.tps_smooth_candidates
+        _scan_candidate!(scan_rows; row..., smooth) do
+            interpolated = scored(
+                (tr, va) -> tps_predict(
+                    train_lonlat[tr, :], target_values[tr, :], train_lonlat[va, :];
+                    smooth=smooth,
+                ),
+                () -> tps_loo_predict(train_lonlat, target_values; smooth=smooth),
+            )
+            prediction = row.mode == "direct" ? max.(interpolated, 0.0) : max.(y_sat .+ interpolated, 0.0)
+            _candidate_metrics(
+                y_obs, y_sat, prediction;
+                require_satellite=true, time_weights,
+            )
+        end
+    end
+    return scan_rows
+end
+
+"""Direct or residual GWR over the shared kernel x bandwidth-family grid."""
+function _scan_gwr!(
+    scan_rows::Vector{NamedTuple}, cfg::InterpolationBenchmarkConfig, row::NamedTuple, scored,
+    train_lonlat::Matrix{Float64}, target_values::Matrix{Float64},
+    y_obs::Matrix{Float64}, y_sat::Matrix{Float64}, time_weights, bandwidth_families,
+)
+    for kernel in cfg.mger.kernels
+        for (adaptive, candidates) in bandwidth_families
+            for bw in candidates
+                _scan_candidate!(scan_rows; row..., kernel, adaptive, bw) do
+                    interpolated = scored(
+                        (tr, va) -> _gwr_predict(
+                            train_lonlat[tr, :], target_values[tr, :], train_lonlat[va, :];
+                            kernel, adaptive, bw,
+                        ),
+                        () -> _gwr_predict(
+                            train_lonlat, target_values, train_lonlat;
+                            kernel, adaptive, bw, exclude_self=true,
+                        ),
+                    )
+                    prediction = row.mode == "direct" ? max.(interpolated, 0.0) : max.(y_sat .+ interpolated, 0.0)
+                    _candidate_metrics(
+                        y_obs, y_sat, prediction;
+                        require_satellite=true, time_weights,
+                    )
+                end
+            end
+        end
+    end
+    return scan_rows
+end
+
+"""
+Mixed GWR: same grid as `_scan_gwr!`, residual mode only, so the family stays at equal search
+budget.
+"""
+function _scan_mixed_gwr!(
+    scan_rows::Vector{NamedTuple}, cfg::InterpolationBenchmarkConfig, row::NamedTuple, scored,
+    train_lonlat::Matrix{Float64}, target_values::Matrix{Float64},
+    y_obs::Matrix{Float64}, y_sat::Matrix{Float64}, time_weights, bandwidth_families,
+)
+    for kernel in cfg.mger.kernels
+        for (adaptive, candidates) in bandwidth_families
+            for bw in candidates
+                _scan_candidate!(scan_rows; row..., kernel, adaptive, bw) do
+                    interpolated = scored(
+                        (tr, va) -> _mixed_gwr_predict(
+                            train_lonlat[tr, :], target_values[tr, :], train_lonlat[va, :];
+                            bw, kernel, adaptive,
+                        ),
+                        () -> _mixed_gwr_predict(
+                            train_lonlat, target_values, train_lonlat;
+                            bw, kernel, adaptive, exclude_self=true,
+                        ),
+                    )
+                    prediction = max.(y_sat .+ interpolated, 0.0)
+                    _candidate_metrics(y_obs, y_sat, prediction; time_weights)
+                end
+            end
+        end
+    end
+    return scan_rows
+end
+
+
 function select_interpolation_parameter!(
     scan_rows::Vector{NamedTuple}, cfg::InterpolationBenchmarkConfig,
     method::String, mode::String, scheme::Symbol, product::String, fold::Int,
@@ -361,121 +489,26 @@ function select_interpolation_parameter!(
         cfg, _usable_adaptive_candidates(cfg.mger.bw_adaptive, n_train, selection_groups),
     )
     first_row = length(scan_rows) + 1
+    row = (; scheme, product, fold, mode, method)
     if method in ("idw", "adw")
-        predictor = method == "idw" ? idw_predict : adw_predict
-        for power in cfg.idw_powers, neighbors in cfg.neighbor_candidates
-            _scan_candidate!(scan_rows; scheme, product, fold, mode, method, power, neighbors) do
-                interpolated = scored(
-                    (tr, va) -> predictor(
-                        train_lonlat[tr, :], target_values[tr, :], train_lonlat[va, :];
-                        power=power, neighbors=neighbors,
-                    ),
-                    () -> predictor(
-                        train_lonlat, target_values, train_lonlat;
-                        power=power, neighbors=neighbors, exclude_self=true,
-                    ),
-                )
-                prediction = mode == "direct" ? max.(interpolated, 0.0) : max.(y_sat .+ interpolated, 0.0)
-                _candidate_metrics(
-                    y_obs, y_sat, prediction;
-                    require_satellite=true, time_weights,
-                )
-            end
-        end
+        _scan_idw_adw!(scan_rows, cfg, row, scored, train_lonlat, target_values,
+            y_obs, y_sat, time_weights)
     elseif method == "tps"
-        for smooth in cfg.tps_smooth_candidates
-            _scan_candidate!(scan_rows; scheme, product, fold, mode, method, smooth) do
-                interpolated = scored(
-                    (tr, va) -> tps_predict(
-                        train_lonlat[tr, :], target_values[tr, :], train_lonlat[va, :];
-                        smooth=smooth,
-                    ),
-                    () -> tps_loo_predict(train_lonlat, target_values; smooth=smooth),
-                )
-                prediction = mode == "direct" ? max.(interpolated, 0.0) : max.(y_sat .+ interpolated, 0.0)
-                _candidate_metrics(
-                    y_obs, y_sat, prediction;
-                    require_satellite=true, time_weights,
-                )
-            end
-        end
+        _scan_tps!(scan_rows, cfg, row, scored, train_lonlat, target_values,
+            y_obs, y_sat, time_weights)
     elseif method == "gwr"
-        for kernel in cfg.mger.kernels
-            for (adaptive, candidates) in bandwidth_families
-                for bw in candidates
-                    _scan_candidate!(scan_rows; scheme, product, fold, mode, method, kernel, adaptive, bw) do
-                        interpolated = scored(
-                            (tr, va) -> _gwr_predict(
-                                train_lonlat[tr, :], target_values[tr, :], train_lonlat[va, :];
-                                kernel, adaptive, bw,
-                            ),
-                            () -> _gwr_predict(
-                                train_lonlat, target_values, train_lonlat;
-                                kernel, adaptive, bw, exclude_self=true,
-                            ),
-                        )
-                        prediction = mode == "direct" ? max.(interpolated, 0.0) : max.(y_sat .+ interpolated, 0.0)
-                        _candidate_metrics(
-                            y_obs, y_sat, prediction;
-                            require_satellite=true, time_weights,
-                        )
-                    end
-                end
-            end
-        end
+        _scan_gwr!(scan_rows, cfg, row, scored, train_lonlat, target_values,
+            y_obs, y_sat, time_weights, bandwidth_families)
     elseif method == "hurdle_gwr"
         mode == "direct" || throw(ArgumentError("hurdle_gwr only supports direct mode"))
         hurdle_context === nothing &&
             throw(ArgumentError("hurdle_gwr requires a hurdle_context carrying the fold times"))
-        for kernel in cfg.mger.kernels
-            for (adaptive, candidates) in bandwidth_families
-                for bw in candidates
-                    # `FixedBandwidth` rejects a non-finite bandwidth by construction, so the
-                    # family's global candidate cannot be expressed as a `HurdleGWRConfig`.
-                    # Skip it rather than logging a guaranteed-failure row per kernel; giving
-                    # `hurdle_gwr` a global option means teaching `SpatialBandwidth` about one.
-                    isfinite(bw) || continue
-                    _scan_candidate!(scan_rows; scheme, product, fold, mode, method, kernel, adaptive, bw) do
-                        hurdle_config = _hurdle_config(hurdle_context, kernel, adaptive, bw)
-                        corrected = scored(
-                            (tr, va) -> _hurdle_predict(
-                                train_lonlat[tr, :], y_obs[tr, :], y_sat[tr, :],
-                                train_lonlat[va, :], y_sat[va, :], something(tuning_times);
-                                config=hurdle_config,
-                            ).corrected,
-                            () -> _hurdle_predict(
-                                train_lonlat, y_obs, y_sat, train_lonlat, y_sat,
-                                something(tuning_times);
-                                config=hurdle_config, exclude_self=true,
-                            ).corrected,
-                        )
-                        _candidate_metrics(y_obs, y_sat, corrected; time_weights)
-                    end
-                end
-            end
-        end
+        _scan_hurdle_gwr!(scan_rows, cfg, row, scored, train_lonlat, y_obs, y_sat,
+            time_weights, bandwidth_families, hurdle_context, tuning_times)
     elseif method == "mixed_gwr"
         mode == "residual" || throw(ArgumentError("mixed_gwr only supports residual mode"))
-        for kernel in cfg.mger.kernels
-            for (adaptive, candidates) in bandwidth_families
-                for bw in candidates
-                    _scan_candidate!(scan_rows; scheme, product, fold, mode, method, kernel, adaptive, bw) do
-                        interpolated = scored(
-                            (tr, va) -> _mixed_gwr_predict(
-                                train_lonlat[tr, :], target_values[tr, :], train_lonlat[va, :];
-                                bw, kernel, adaptive,
-                            ),
-                            () -> _mixed_gwr_predict(
-                                train_lonlat, target_values, train_lonlat;
-                                bw, kernel, adaptive, exclude_self=true,
-                            ),
-                        )
-                        prediction = max.(y_sat .+ interpolated, 0.0)
-                        _candidate_metrics(y_obs, y_sat, prediction; time_weights)
-                    end
-                end
-            end
-        end
+        _scan_mixed_gwr!(scan_rows, cfg, row, scored, train_lonlat, target_values,
+            y_obs, y_sat, time_weights, bandwidth_families)
     elseif method == "mgwr"
         mode == "residual" || throw(ArgumentError("mgwr only supports residual mode"))
         return select_mgwr_bandwidths!(
