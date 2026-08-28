@@ -7,7 +7,8 @@ using CSV, DataFrames, Dates
 
 include(joinpath(ROOT, "src", "load_modules.jl"))
 load_pipeline("MGERPipeline")
-load_standalone_modules("DEMTerrainExperiment")
+load_standalone_modules("DEMTerrainExperiment", "MGERDataPrep")
+using Main.MGERDataPrep
 using Main.DEMTerrainExperiment
 
 const STUDY_DATA = joinpath(ROOT, "data", "processed", "study_area")
@@ -51,14 +52,6 @@ function experiment_inputs(mode::Symbol)
     return mger, cfg
 end
 
-function aligned_terrain(path::String, ids::Vector{String})
-    terrain = CSV.read(path, DataFrame; types=Dict(:station_id => String))
-    allunique(terrain.station_id) || error("Duplicate station IDs in terrain table")
-    index = Dict(id => row for (row, id) in enumerate(terrain.station_id))
-    missing_ids = filter(id -> !haskey(index, id), ids)
-    isempty(missing_ids) || error("Terrain table is missing $(length(missing_ids)) common stations")
-    return terrain[[index[id] for id in ids], :]
-end
 
 function main(args=ARGS)
     mode = isempty(args) ? :smoke : Symbol(lowercase(args[1]))
@@ -66,7 +59,7 @@ function main(args=ARGS)
     station_meta = load_station_meta(mger.station_meta_path)
     products, ids, product_data = load_global_common_product_data(mger)
     lonlat = build_X_lonlat(station_meta, ids)
-    terrain = aligned_terrain(
+    terrain = align_station_table(
         joinpath(ROOT, "data", "processed", "covariates", "station_terrain.csv"), ids,
     )
     times = product_data[first(products)].times

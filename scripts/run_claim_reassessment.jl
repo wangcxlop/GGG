@@ -108,18 +108,15 @@ function nearest_train_km(fold_of::Vector{Int}, lonlat::Matrix{Float64})
         validation = findall(==(fold), fold_of)
         training = findall(!=(fold), fold_of)
         (isempty(validation) || isempty(training)) && continue
-        distance[validation] = vec(minimum(
-            haversine_distance_matrix(lonlat[training, :], lonlat[validation, :]), dims=1,
-        ))
+        distance[validation] = nearest_training_distance(
+            lonlat[training, :], lonlat[validation, :])
     end
     return distance
 end
 
 function main(args=ARGS)
     run_dir = isempty(args) ? DEFAULT_RUN : abspath(args[1])
-    isdir(run_dir) || error("benchmark output directory not found: $run_dir")
-    outdir = joinpath(ROOT, "output", "benchmark_diagnostics", basename(run_dir))
-    mkpath(outdir)
+    outdir = benchmark_diagnostics_outdir(ROOT, run_dir)
 
     mger = study_config(outdir)
     products, ids, product_data = load_global_common_product_data(mger)

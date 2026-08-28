@@ -3,7 +3,7 @@ module TraditionalInterpolation
 using LinearAlgebra
 using Statistics
 
-export haversine_distance_matrix, local_km_coordinates
+export haversine_distance_matrix, local_km_coordinates, nearest_training_distance
 export idw_predict, adw_predict, tps_predict, tps_loo_predict
 
 # Station distances are NOT computed against one radius project-wide. This value (the WGS72
@@ -47,6 +47,18 @@ function haversine_distance_matrix(
     end
     return distances
 end
+
+"""
+Distance from each validation station to its nearest training station, in km.
+
+The quantity behind the benchmark's `nearest_train_km` stratum: how far a held-out station is
+from any gauge the model actually saw. Written out inline in the benchmark's fold loop and again,
+with two different surrounding interfaces, in `run_claim_reassessment.jl` and
+`verify_fold_rotations.jl`.
+"""
+nearest_training_distance(train_lonlat::AbstractMatrix, val_lonlat::AbstractMatrix) =
+    vec(minimum(haversine_distance_matrix(train_lonlat, val_lonlat), dims=1))
+
 
 """Equirectangular local coordinates in km, using a common lon/lat centre."""
 function local_km_coordinates(

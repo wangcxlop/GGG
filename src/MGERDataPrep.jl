@@ -3,6 +3,7 @@ module MGERDataPrep
 using CSV, DataFrames, Dates, Statistics
 
 export audit_mger_inputs, parse_time_utcish, prepare_satellite_wide
+export align_station_table, assert_wide, assert_station_columns
 
 function parse_time_utcish(value)
     text = replace(strip(String(value)), "Z" => "")
@@ -100,6 +101,42 @@ function prepare_satellite_wide(
         station_count=length(station_columns),
         duplicate_pair_count=nrow(duplicate_qc),
     )
+end
+
+"""
+Reorder a per-station covariate table to match `ids`, erroring rather than silently dropping.
+
+Both `run_dem_variable_selection.jl` and `run_joint_variable_selection.jl` carried their own
+identical copy of this. `InterpolationBenchmarkDEM.load_aligned_terrain` does the same alignment
+and more (required-column and finiteness checks) and is deliberately left alone - it is the
+benchmark's stricter contract, not a duplicate of this one.
+"""
+function align_station_table(path::AbstractString, ids::Vector{String})
+    table = CSV.read(path, DataFrame; types=Dict(:station_id => String))
+    allunique(table.station_id) || error("Duplicate station IDs in $(basename(path))")
+    row_by_id = Dict(id => row for (row, id) in enumerate(table.station_id))
+    missing_ids = filter(id -> !haskey(row_by_id, id), ids)
+    isempty(missing_ids) ||
+        error("$(basename(path)) is missing $(length(missing_ids)) stations")
+    return table[[row_by_id[id] for id in ids], :]
+end
+
+"""
+Assert a wide `time x station` CSV has the expected row count and number of station columns
+(`ncol - 1`, since the first column is the timestamp). Returns the table so a caller can go on to
+inspect it.
+"""
+function assert_wide(path::AbstractString, expected_rows::Int, expected_stations::Int)
+    table = CSV.read(path, DataFrame)
+    @assert nrow(table) == expected_rows "$path has unexpected row count"
+    @assert ncol(table) - 1 == expected_stations "$path has unexpected station count"
+    return table
+end
+
+"""Assert a wide CSV's station columns are exactly `expected_ids`, in order."""
+function assert_station_columns(path::AbstractString, expected_ids::Vector{String})
+    header = propertynames(CSV.File(path; limit=1))
+    @assert string.(header[2:end]) == expected_ids "$path has unexpected station columns"
 end
 
 function read_wide_signature(path::AbstractString)

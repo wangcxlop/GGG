@@ -46,8 +46,7 @@ function nearest_train_distances(ids, lonlat, folds, k)
     for fold in 1:k
         val = [position[id] for id in folds[fold]]
         train = [position[id] for id in reduce(vcat, (folds[j] for j in 1:k if j != fold))]
-        matrix = haversine_distance_matrix(lonlat[train, :], lonlat[val, :])
-        append!(distances, vec(minimum(matrix, dims=1)))
+        append!(distances, nearest_training_distance(lonlat[train, :], lonlat[val, :]))
     end
     return distances
 end

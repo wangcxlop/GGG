@@ -11,6 +11,10 @@
 using CSV, DataFrames
 
 const ROOT = normpath(joinpath(@__DIR__, ".."))
+
+include(joinpath(ROOT, "src", "load_modules.jl"))
+load_standalone_modules("MGERDataPrep")
+using Main.MGERDataPrep
 const PROCESSED = joinpath(ROOT, "data", "processed")
 const STUDY_DATA = joinpath(PROCESSED, "study_area")
 const KERNELS = (
@@ -21,17 +25,7 @@ const KERNELS = (
     (4, "boxcar"),
 )
 
-function assert_wide(path::AbstractString, expected_rows::Int, expected_stations::Int)
-    table = CSV.read(path, DataFrame)
-    @assert nrow(table) == expected_rows "$path has unexpected row count"
-    @assert ncol(table) - 1 == expected_stations "$path has unexpected station count"
-    return table
-end
 
-function assert_station_columns(path::AbstractString, expected_ids::Vector{String})
-    header = propertynames(CSV.File(path; limit=1))
-    @assert string.(header[2:end]) == expected_ids "$path has unexpected station columns"
-end
 
 function main(args=ARGS)
     full_year = "--full-year" in args

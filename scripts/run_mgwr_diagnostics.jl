@@ -58,9 +58,7 @@ end
 
 function main(args=ARGS)
     run_dir = isempty(args) ? DEFAULT_RUN : abspath(args[1])
-    isdir(run_dir) || error("benchmark output directory not found: $run_dir")
-    outdir = joinpath(ROOT, "output", "benchmark_diagnostics", basename(run_dir))
-    mkpath(outdir)
+    outdir = benchmark_diagnostics_outdir(ROOT, run_dir)
 
     println("Reading benchmark run: $run_dir")
     products, ids, product_data = load_common_data(outdir)
