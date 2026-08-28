@@ -96,6 +96,174 @@ function _joint_candidate_metrics(
     ))
 end
 
+
+# The joint-covariate path's two bandwidth searches, previously the two halves of one 172-line
+# `select_joint_parameter!`. `residual_gwr`/`mixed_gwr` carry a single shared bandwidth; joint
+# `mgwr` runs a per-group coordinate descent. Only the preamble that builds the candidate grid is
+# genuinely shared, and it stays in the dispatcher.
+#
+# The descent below is deliberately NOT merged with `select_mgwr_bandwidths!` or
+# `_select_dem_multiscale_bandwidths!`. All three walk groups to a fixed point, but they differ in
+# what they fit and how they score, and unifying them is exactly the kind of change that moves
+# numbers without announcing it.
+
+"""One shared bandwidth, scored over the kernel x bandwidth-family grid, with the shrinkage ladder
+rescored for free inside `_joint_candidate_metrics`."""
+function _select_joint_single_bandwidth!(
+    scan_rows::Vector{NamedTuple}, cfg::InterpolationBenchmarkConfig,
+    method::String, mode::String, scheme::Symbol, product::String, fold::Int,
+    joint_context, joint_method::String, residuals::Matrix{Float64},
+    y_obs::Matrix{Float64}, y_sat::Matrix{Float64}, times, time_weights,
+    selection_entries, shrink_candidates::Vector{Float64}, bandwidth_families, group_names,
+)
+    first_row = length(scan_rows) + 1
+    for kernel in cfg.mger.kernels
+        kernel_fn = _kernel_function(kernel)
+        for (adaptive, family_candidates) in bandwidth_families
+            for bandwidth in family_candidates
+                _scan_candidate!(scan_rows;
+                    scheme, product, fold, mode, method,
+                    group=only(group_names), kernel, adaptive, bw=bandwidth,
+                ) do
+                    metrics = _joint_candidate_metrics(
+                        joint_context, residuals, y_obs, y_sat, joint_method,
+                        [bandwidth], kernel_fn,
+                        times, time_weights, selection_entries, shrink_candidates;
+                        adaptive,
+                    )
+                    (; shrink=metrics.shrink, n=metrics.n, coverage=metrics.coverage,
+                        RMSE=metrics.RMSE, MAE=metrics.MAE,
+                        status=metrics.coverage >= cfg.min_tuning_coverage ? "success" : "failed",
+                        error=metrics.coverage >= cfg.min_tuning_coverage ? "" :
+                            "LOOCV coverage below minimum")
+                end
+            end
+        end
+    end
+    selected = _select_candidate!(scan_rows, first_row, cfg.min_tuning_coverage)
+    return (; bandwidths=[selected.bw], shrink=selected.shrink,
+        kernel=Int(selected.kernel), adaptive=Bool(selected.adaptive),
+        joint_model=true, joint_method)
+end
+
+"""
+Per-group coordinate descent for joint MGWR: each (kernel, bandwidth-family) combination runs its
+own independent descent, and combinations are compared on the last group's RMSE in the final
+converged sweep.
+"""
+function _select_joint_coordinate_descent!(
+    scan_rows::Vector{NamedTuple}, cfg::InterpolationBenchmarkConfig,
+    method::String, mode::String, scheme::Symbol, product::String, fold::Int,
+    joint_context, joint_method::String, residuals::Matrix{Float64},
+    y_obs::Matrix{Float64}, y_sat::Matrix{Float64}, times, time_weights,
+    selection_entries, shrink_candidates::Vector{Float64}, bandwidth_families, group_names,
+)
+
+# Each (kernel, bandwidth-family) combination runs its own independent per-group coordinate
+# descent to convergence (identical logic to the single-kernel, adaptive-only version, just
+# parameterised); combinations are then compared by the RMSE of the last group scored in
+# their converged sweep — the search never computes one joint RMSE for the whole config, so
+# this is the best single number available per combination. A combination that has no
+# candidates, or fails to converge, is skipped rather than aborting the whole search.
+best_result = nothing
+for kernel in cfg.mger.kernels
+    kernel_fn = _kernel_function(kernel)
+    for (adaptive, family_candidates) in bandwidth_families
+        isempty(family_candidates) && continue
+        # Start every group at the widest candidate - the global one, when it is in the
+        # family. A back-fit that starts wide and tightens is the conventional direction,
+        # and the descent runs to convergence either way.
+        bandwidths = fill(last(family_candidates), length(group_names))
+        converged = false
+        final_iteration = 0
+        last_selected_index = 0
+        try
+            for iteration in 1:cfg.mgwr_max_tuning_iterations
+                previous = copy(bandwidths)
+                final_iteration = iteration
+                for group_index in eachindex(group_names)
+                    candidate_rows = Int[]
+                    for bandwidth in family_candidates
+                        trial = copy(bandwidths); trial[group_index] = bandwidth
+                        _scan_candidate!(scan_rows;
+                            scheme, product, fold, mode, method, iteration,
+                            group=group_names[group_index], kernel, adaptive, bw=bandwidth,
+                        ) do
+                            metrics = _joint_candidate_metrics(
+                                joint_context, residuals, y_obs, y_sat, joint_method,
+                                trial, kernel_fn,
+                                times, time_weights, selection_entries, shrink_candidates;
+                                adaptive,
+                            )
+                            (; shrink=metrics.shrink, n=metrics.n, coverage=metrics.coverage,
+                                RMSE=metrics.RMSE, MAE=metrics.MAE,
+                                status=metrics.coverage >= cfg.min_tuning_coverage ? "success" : "failed",
+                                error=metrics.coverage >= cfg.min_tuning_coverage ? "" :
+                                    "LOOCV coverage below minimum")
+                        end
+                        push!(candidate_rows, length(scan_rows))
+                    end
+                    valid = filter(candidate_rows) do index
+                        row = scan_rows[index]
+                        row.status == "success" && row.coverage >= cfg.min_tuning_coverage &&
+                            isfinite(row.RMSE)
+                    end
+                    isempty(valid) && throw(ArgumentError(
+                        "all MGWR candidates failed for $(group_names[group_index]) " *
+                        "with kernel $kernel, adaptive=$adaptive",
+                    ))
+                    selected_index = sort(valid; by=index ->
+                        (scan_rows[index].RMSE, scan_rows[index].MAE))[1]
+                    bandwidths[group_index] = scan_rows[selected_index].bw
+                    last_selected_index = selected_index
+                end
+                if bandwidths == previous
+                    converged = true
+                    break
+                end
+            end
+        catch error
+            error isa ArgumentError || rethrow()
+            continue
+        end
+        converged || continue
+        kernel_rmse = scan_rows[last_selected_index].RMSE
+        if best_result === nothing || kernel_rmse < best_result.rmse
+            best_result = (;
+                kernel, adaptive, bandwidths=copy(bandwidths), final_iteration, rmse=kernel_rmse,
+            )
+        end
+    end
+end
+best_result === nothing && throw(ArgumentError(
+    "joint MGWR bandwidth search did not converge for any kernel/bandwidth-family " *
+    "combination in $(cfg.mgwr_max_tuning_iterations) iterations",
+))
+kernel = best_result.kernel
+adaptive = best_result.adaptive
+bandwidths = best_result.bandwidths
+final_iteration = best_result.final_iteration
+selected_shrink = NaN
+for group_index in eachindex(group_names)
+    matching = filter(eachindex(scan_rows)) do index
+        row = scan_rows[index]
+        row.scheme == string(scheme) && row.product == product && row.fold == fold &&
+            row.method == method && row.kernel == kernel && row.adaptive == adaptive &&
+            row.iteration == final_iteration &&
+            row.group == group_names[group_index] &&
+            row.bw == bandwidths[group_index] && row.status == "success"
+    end
+    isempty(matching) && error("selected joint MGWR bandwidth row is absent")
+    selected_index = last(matching)
+    scan_rows[selected_index] = merge(scan_rows[selected_index], (; selected=true))
+    # The search only stops once a whole sweep leaves `bandwidths` unchanged, so every group's
+    # winning row in the final iteration was scored against the same bandwidth vector and
+    # therefore the same residual prediction. Any of their shrink values is the right one.
+    selected_shrink = scan_rows[selected_index].shrink
+end
+return (; bandwidths, shrink=selected_shrink, kernel, adaptive, joint_model=true, joint_method)
+end
+
 function select_joint_parameter!(
     scan_rows::Vector{NamedTuple}, cfg::InterpolationBenchmarkConfig,
     method::String, mode::String, scheme::Symbol, product::String, fold::Int,
@@ -135,139 +303,15 @@ function select_joint_parameter!(
     # in the scan row's `shrink` column alongside its bandwidth.
     shrink_candidates = cfg.residual_shrinkage_candidates
     if joint_method in ("residual_gwr", "mixed_gwr")
-        first_row = length(scan_rows) + 1
-        for kernel in cfg.mger.kernels
-            kernel_fn = _kernel_function(kernel)
-            for (adaptive, family_candidates) in bandwidth_families
-                for bandwidth in family_candidates
-                    _scan_candidate!(scan_rows;
-                        scheme, product, fold, mode, method,
-                        group=only(group_names), kernel, adaptive, bw=bandwidth,
-                    ) do
-                        metrics = _joint_candidate_metrics(
-                            joint_context, residuals, y_obs, y_sat, joint_method,
-                            [bandwidth], kernel_fn,
-                            times, time_weights, selection_entries, shrink_candidates;
-                            adaptive,
-                        )
-                        (; shrink=metrics.shrink, n=metrics.n, coverage=metrics.coverage,
-                            RMSE=metrics.RMSE, MAE=metrics.MAE,
-                            status=metrics.coverage >= cfg.min_tuning_coverage ? "success" : "failed",
-                            error=metrics.coverage >= cfg.min_tuning_coverage ? "" :
-                                "LOOCV coverage below minimum")
-                    end
-                end
-            end
-        end
-        selected = _select_candidate!(scan_rows, first_row, cfg.min_tuning_coverage)
-        return (; bandwidths=[selected.bw], shrink=selected.shrink,
-            kernel=Int(selected.kernel), adaptive=Bool(selected.adaptive),
-            joint_model=true, joint_method)
+        return _select_joint_single_bandwidth!(
+            scan_rows, cfg, method, mode, scheme, product, fold,
+            joint_context, joint_method, residuals, y_obs, y_sat, times, time_weights,
+            selection_entries, shrink_candidates, bandwidth_families, group_names)
     end
-
-    # Each (kernel, bandwidth-family) combination runs its own independent per-group coordinate
-    # descent to convergence (identical logic to the single-kernel, adaptive-only version, just
-    # parameterised); combinations are then compared by the RMSE of the last group scored in
-    # their converged sweep — the search never computes one joint RMSE for the whole config, so
-    # this is the best single number available per combination. A combination that has no
-    # candidates, or fails to converge, is skipped rather than aborting the whole search.
-    best_result = nothing
-    for kernel in cfg.mger.kernels
-        kernel_fn = _kernel_function(kernel)
-        for (adaptive, family_candidates) in bandwidth_families
-            isempty(family_candidates) && continue
-            # Start every group at the widest candidate - the global one, when it is in the
-            # family. A back-fit that starts wide and tightens is the conventional direction,
-            # and the descent runs to convergence either way.
-            bandwidths = fill(last(family_candidates), length(group_names))
-            converged = false
-            final_iteration = 0
-            last_selected_index = 0
-            try
-                for iteration in 1:cfg.mgwr_max_tuning_iterations
-                    previous = copy(bandwidths)
-                    final_iteration = iteration
-                    for group_index in eachindex(group_names)
-                        candidate_rows = Int[]
-                        for bandwidth in family_candidates
-                            trial = copy(bandwidths); trial[group_index] = bandwidth
-                            _scan_candidate!(scan_rows;
-                                scheme, product, fold, mode, method, iteration,
-                                group=group_names[group_index], kernel, adaptive, bw=bandwidth,
-                            ) do
-                                metrics = _joint_candidate_metrics(
-                                    joint_context, residuals, y_obs, y_sat, joint_method,
-                                    trial, kernel_fn,
-                                    times, time_weights, selection_entries, shrink_candidates;
-                                    adaptive,
-                                )
-                                (; shrink=metrics.shrink, n=metrics.n, coverage=metrics.coverage,
-                                    RMSE=metrics.RMSE, MAE=metrics.MAE,
-                                    status=metrics.coverage >= cfg.min_tuning_coverage ? "success" : "failed",
-                                    error=metrics.coverage >= cfg.min_tuning_coverage ? "" :
-                                        "LOOCV coverage below minimum")
-                            end
-                            push!(candidate_rows, length(scan_rows))
-                        end
-                        valid = filter(candidate_rows) do index
-                            row = scan_rows[index]
-                            row.status == "success" && row.coverage >= cfg.min_tuning_coverage &&
-                                isfinite(row.RMSE)
-                        end
-                        isempty(valid) && throw(ArgumentError(
-                            "all MGWR candidates failed for $(group_names[group_index]) " *
-                            "with kernel $kernel, adaptive=$adaptive",
-                        ))
-                        selected_index = sort(valid; by=index ->
-                            (scan_rows[index].RMSE, scan_rows[index].MAE))[1]
-                        bandwidths[group_index] = scan_rows[selected_index].bw
-                        last_selected_index = selected_index
-                    end
-                    if bandwidths == previous
-                        converged = true
-                        break
-                    end
-                end
-            catch error
-                error isa ArgumentError || rethrow()
-                continue
-            end
-            converged || continue
-            kernel_rmse = scan_rows[last_selected_index].RMSE
-            if best_result === nothing || kernel_rmse < best_result.rmse
-                best_result = (;
-                    kernel, adaptive, bandwidths=copy(bandwidths), final_iteration, rmse=kernel_rmse,
-                )
-            end
-        end
-    end
-    best_result === nothing && throw(ArgumentError(
-        "joint MGWR bandwidth search did not converge for any kernel/bandwidth-family " *
-        "combination in $(cfg.mgwr_max_tuning_iterations) iterations",
-    ))
-    kernel = best_result.kernel
-    adaptive = best_result.adaptive
-    bandwidths = best_result.bandwidths
-    final_iteration = best_result.final_iteration
-    selected_shrink = NaN
-    for group_index in eachindex(group_names)
-        matching = filter(eachindex(scan_rows)) do index
-            row = scan_rows[index]
-            row.scheme == string(scheme) && row.product == product && row.fold == fold &&
-                row.method == method && row.kernel == kernel && row.adaptive == adaptive &&
-                row.iteration == final_iteration &&
-                row.group == group_names[group_index] &&
-                row.bw == bandwidths[group_index] && row.status == "success"
-        end
-        isempty(matching) && error("selected joint MGWR bandwidth row is absent")
-        selected_index = last(matching)
-        scan_rows[selected_index] = merge(scan_rows[selected_index], (; selected=true))
-        # The search only stops once a whole sweep leaves `bandwidths` unchanged, so every group's
-        # winning row in the final iteration was scored against the same bandwidth vector and
-        # therefore the same residual prediction. Any of their shrink values is the right one.
-        selected_shrink = scan_rows[selected_index].shrink
-    end
-    return (; bandwidths, shrink=selected_shrink, kernel, adaptive, joint_model=true, joint_method)
+    return _select_joint_coordinate_descent!(
+        scan_rows, cfg, method, mode, scheme, product, fold,
+        joint_context, joint_method, residuals, y_obs, y_sat, times, time_weights,
+        selection_entries, shrink_candidates, bandwidth_families, group_names)
 end
 
 function _tag_joint_table!(
