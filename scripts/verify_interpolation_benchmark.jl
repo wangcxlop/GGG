@@ -11,6 +11,16 @@ const REMOVED_METHODS = ["residual_idw", "residual_adw", "residual_tps"]
 function main(args=ARGS)
     mode = isempty(args) ? "smoke" : lowercase(args[1])
     mode in ("smoke", "full") || throw(ArgumentError("mode must be smoke or full"))
+    # STALE, same cause as in verify_interpolation_benchmark_nested_covariates.jl:
+    # `run_interpolation_benchmark.jl` appends `_mgwr<grouping>` for any grouping other than the
+    # historical `:split`, and appends it on the legacy-DEM path too even though
+    # `mgwr_spatial_grouping` only configures the joint models there. With the current
+    # `:intercept_only` default a `--legacy-dem` smoke run lands in
+    # `..._smoke_dem_mgwrintercept_only` and this script reports every output as missing. The run
+    # itself is fine - it was exercised end to end during the refactor and wrote all 18 required
+    # files. Not fixed here: the right fix is to make the runner record its own outdir, or to
+    # stop tagging the DEM path with a joint-only setting, and both are decisions about the
+    # scripts rather than about the refactor.
     outdir = joinpath(ROOT, "output", mode == "smoke" ?
         "interpolation_benchmark_smoke_dem" :
         "interpolation_benchmark_full_dem")
