@@ -41,4 +41,4 @@ RTableTools = "76227a05-389e-44bd-84ad-996dde4b1834"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [targets]
-test = ["Test", "Distances", "RCall", "RTableTools"]
+test = ["Test", "RCall", "RTableTools"]
