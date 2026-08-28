@@ -283,6 +283,101 @@ function _write_benchmark_outputs(
 end
 
 """
+`auto` for one fold: choose a single GWR-family method using only the inner selection split, and
+record the choice.
+
+Split out of `_run_benchmark_fold!`, which was 262 lines. Mutates `fold_predictions` (writing the
+`auto` entry, NaN when no contender could be scored), `auto_selection_rows` and `run_status_rows`.
+Parameters keep the names the enclosing locals had, so the body is unchanged from when it was
+inline.
+"""
+function _run_fold_auto!(
+    cfg::InterpolationBenchmarkConfig, fold::Int, scheme, product, repeat_index::Int,
+    repeat_seed::Int, val_idx, y_obs, y_sat_val, y_obs_train, y_sat_train, train_lonlat,
+    selection_groups, joint_selection_contexts, joint_inputs, nested_joint::Bool,
+    fold_selected, fold_predictions, predictions, auto_selection_rows, run_status_rows,
+)
+
+    # `auto`: choose one GWR-family method for this fold on the inner split alone.
+    #
+    # Contenders are re-predicted rather than compared on their scan rows, because the
+    # scan scores each method over its own non-NaN cells and the winner would otherwise
+    # partly be whoever failed on the hardest ones. Same tuning hours as the scan, so
+    # the choice is made against the criterion the candidates were tuned on.
+    auto_time_indices, auto_time_weights =
+        cfg.tuning_max_times > 0 && size(y_obs_train, 2) > cfg.tuning_max_times ?
+            _tuning_time_sample(
+                y_obs_train, cfg.tuning_max_times, cfg.tuning_time_weighting,
+            ) : (collect(axes(y_obs_train, 2)), nothing)
+    auto_contenders = NamedTuple[]
+    auto_failures = String[]
+    # Not run on the legacy DEM path: `inner_selection_prediction` deliberately carries
+    # no `dem_context`, and that path is mutually exclusive with the joint one and is
+    # not part of the reported comparison.
+    auto_applicable = !_dem_enabled(cfg) && selection_groups !== nothing
+    if auto_applicable
+        for (mode, method) in AUTO_CANDIDATE_RUNS
+            output_method = _output_method(mode, method)
+            haskey(fold_selected, output_method) || continue
+            try
+                push!(auto_contenders, (; method=output_method,
+                    prediction=inner_selection_prediction(
+                        fold_selected[output_method], method, mode, train_lonlat,
+                        y_obs_train, y_sat_train, selection_groups;
+                        joint_contexts=joint_selection_contexts,
+                        time_indices=auto_time_indices,
+                    )))
+            catch e
+                push!(auto_failures, "$output_method: $(sprint(showerror, e))")
+            end
+        end
+    end
+    auto_choice = select_auto_method(
+        auto_contenders,
+        Matrix{Float64}(y_obs_train[:, auto_time_indices]),
+        Matrix{Float64}(y_sat_train[:, auto_time_indices]);
+        time_weights=auto_time_weights,
+    )
+    if auto_choice !== nothing && haskey(fold_predictions, auto_choice.chosen)
+        fold_predictions[AUTO_METHOD] = fold_predictions[auto_choice.chosen]
+        predictions[AUTO_METHOD][val_idx, :] = fold_predictions[AUTO_METHOD]
+        push!(auto_selection_rows, merge(
+            (; scheme, product, fold, repeat=repeat_index, seed=repeat_seed),
+            auto_choice,
+            (; skipped=join(auto_failures, " | ")),
+        ))
+    else
+        # No inner split (leave-one-out geometry, or a fold too small to split), or no
+        # contender survived. Left unpredicted rather than defaulted to a method,
+        # which would make `auto` mean something different in different folds.
+        fold_predictions[AUTO_METHOD] = fill(NaN, length(val_idx), size(y_obs, 2))
+    end
+    # "skipped" rather than "failed" where `auto` was never applicable, so a genuine
+    # breakage stays visible instead of being lost among expected non-runs.
+    auto_status, auto_error = if auto_choice !== nothing
+        ("success", "")
+    elseif _dem_enabled(cfg)
+        ("skipped", "auto is not run on the legacy DEM path")
+    elseif selection_groups === nothing
+        ("skipped", "fold has no inner selection split to choose on")
+    else
+        ("failed", "no auto contender scored: $(join(auto_failures, " | "))")
+    end
+    # Measured the same way as every other method's row - non-NaN share of the
+    # held-out cells it could have predicted - so the column means one thing across the
+    # table. `auto_selection.csv` carries the inner-split mask coverage separately.
+    auto_eligible = .!isnan.(y_obs[val_idx, :]) .& .!isnan.(y_sat_val)
+    auto_coverage = _prediction_coverage(auto_eligible, fold_predictions[AUTO_METHOD])
+    push!(run_status_rows, _benchmark_status_row(
+        nothing, nothing, joint_inputs, nested_joint;
+        scheme, product, fold, repeat=repeat_index, seed=repeat_seed,
+        mode="", method=AUTO_METHOD, output_method=AUTO_METHOD,
+        status=auto_status, error=auto_error, prediction_coverage=auto_coverage,
+    ))
+    return nothing
+end
+
+"""
 Everything one cross-validation fold does: split the stations, build the fold's DEM/joint/hurdle
 contexts, tune and predict each `BENCHMARK_RUNS` method, run `auto`, and append the fold's metric,
 scan and status rows.
@@ -467,83 +562,12 @@ function _run_benchmark_fold!(
         )
     end
 
-    # `auto`: choose one GWR-family method for this fold on the inner split alone.
-    #
-    # Contenders are re-predicted rather than compared on their scan rows, because the
-    # scan scores each method over its own non-NaN cells and the winner would otherwise
-    # partly be whoever failed on the hardest ones. Same tuning hours as the scan, so
-    # the choice is made against the criterion the candidates were tuned on.
-    auto_time_indices, auto_time_weights =
-        cfg.tuning_max_times > 0 && size(y_obs_train, 2) > cfg.tuning_max_times ?
-            _tuning_time_sample(
-                y_obs_train, cfg.tuning_max_times, cfg.tuning_time_weighting,
-            ) : (collect(axes(y_obs_train, 2)), nothing)
-    auto_contenders = NamedTuple[]
-    auto_failures = String[]
-    # Not run on the legacy DEM path: `inner_selection_prediction` deliberately carries
-    # no `dem_context`, and that path is mutually exclusive with the joint one and is
-    # not part of the reported comparison.
-    auto_applicable = !_dem_enabled(cfg) && selection_groups !== nothing
-    if auto_applicable
-        for (mode, method) in AUTO_CANDIDATE_RUNS
-            output_method = _output_method(mode, method)
-            haskey(fold_selected, output_method) || continue
-            try
-                push!(auto_contenders, (; method=output_method,
-                    prediction=inner_selection_prediction(
-                        fold_selected[output_method], method, mode, train_lonlat,
-                        y_obs_train, y_sat_train, selection_groups;
-                        joint_contexts=joint_selection_contexts,
-                        time_indices=auto_time_indices,
-                    )))
-            catch e
-                push!(auto_failures, "$output_method: $(sprint(showerror, e))")
-            end
-        end
-    end
-    auto_choice = select_auto_method(
-        auto_contenders,
-        Matrix{Float64}(y_obs_train[:, auto_time_indices]),
-        Matrix{Float64}(y_sat_train[:, auto_time_indices]);
-        time_weights=auto_time_weights,
+    _run_fold_auto!(
+        cfg, fold, scheme, product, repeat_index, repeat_seed, val_idx, y_obs, y_sat_val,
+        y_obs_train, y_sat_train, train_lonlat, selection_groups, joint_selection_contexts,
+        joint_inputs, nested_joint, fold_selected, fold_predictions, predictions,
+        auto_selection_rows, run_status_rows,
     )
-    if auto_choice !== nothing && haskey(fold_predictions, auto_choice.chosen)
-        fold_predictions[AUTO_METHOD] = fold_predictions[auto_choice.chosen]
-        predictions[AUTO_METHOD][val_idx, :] = fold_predictions[AUTO_METHOD]
-        push!(auto_selection_rows, merge(
-            (; scheme, product, fold, repeat=repeat_index, seed=repeat_seed),
-            auto_choice,
-            (; skipped=join(auto_failures, " | ")),
-        ))
-    else
-        # No inner split (leave-one-out geometry, or a fold too small to split), or no
-        # contender survived. Left unpredicted rather than defaulted to a method,
-        # which would make `auto` mean something different in different folds.
-        fold_predictions[AUTO_METHOD] = fill(NaN, length(val_idx), size(y_obs, 2))
-    end
-    # "skipped" rather than "failed" where `auto` was never applicable, so a genuine
-    # breakage stays visible instead of being lost among expected non-runs.
-    auto_status, auto_error = if auto_choice !== nothing
-        ("success", "")
-    elseif _dem_enabled(cfg)
-        ("skipped", "auto is not run on the legacy DEM path")
-    elseif selection_groups === nothing
-        ("skipped", "fold has no inner selection split to choose on")
-    else
-        ("failed", "no auto contender scored: $(join(auto_failures, " | "))")
-    end
-    # Measured the same way as every other method's row - non-NaN share of the
-    # held-out cells it could have predicted - so the column means one thing across the
-    # table. `auto_selection.csv` carries the inner-split mask coverage separately.
-    auto_eligible = .!isnan.(y_obs[val_idx, :]) .& .!isnan.(y_sat_val)
-    auto_coverage = _prediction_coverage(auto_eligible, fold_predictions[AUTO_METHOD])
-    push!(run_status_rows, _benchmark_status_row(
-        nothing, nothing, joint_inputs, nested_joint;
-        scheme, product, fold, repeat=repeat_index, seed=repeat_seed,
-        mode="", method=AUTO_METHOD, output_method=AUTO_METHOD,
-        status=auto_status, error=auto_error, prediction_coverage=auto_coverage,
-    ))
-
     fold_mask = _common_method_mask(Matrix{Float64}(y_obs[val_idx, :]), fold_predictions)
     if any(fold_mask)
         for method in BENCHMARK_METHODS
