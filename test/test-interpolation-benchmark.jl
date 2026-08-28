@@ -5,7 +5,6 @@ using CSV, DataFrames, Dates
 using Random
 
 const BENCHMARK_TEST_ROOT = normpath(joinpath(@__DIR__, ".."))
-pushfirst!(LOAD_PATH, joinpath(BENCHMARK_TEST_ROOT, "src"))
 
 using MixedGWR
 include(joinpath(BENCHMARK_TEST_ROOT, "src", "InterpolationBenchmark.jl"))

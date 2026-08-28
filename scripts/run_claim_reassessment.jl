@@ -14,7 +14,6 @@
 #   julia --project=. scripts/run_claim_reassessment.jl <benchmark_output_dir>
 
 const ROOT = normpath(joinpath(@__DIR__, ".."))
-pushfirst!(LOAD_PATH, joinpath(ROOT, "src"))
 
 using MixedGWR
 using CSV, DataFrames, Dates, Random, Statistics

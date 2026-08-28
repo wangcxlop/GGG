@@ -1,7 +1,6 @@
 #!/usr/bin/env julia
 
 const ROOT = normpath(joinpath(@__DIR__, ".."))
-pushfirst!(LOAD_PATH, joinpath(ROOT, "src"))
 
 using MixedGWR
 using DataFrames, Dates

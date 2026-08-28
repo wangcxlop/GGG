@@ -17,7 +17,6 @@
 # `compare_<basename(before)>_vs_<basename(after)>`.
 
 const ROOT = normpath(joinpath(@__DIR__, ".."))
-pushfirst!(LOAD_PATH, joinpath(ROOT, "src"))
 
 using MixedGWR
 using CSV, DataFrames, Dates, Printf

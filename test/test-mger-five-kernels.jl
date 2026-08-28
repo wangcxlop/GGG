@@ -4,7 +4,6 @@ using Test
 using CSV, DataFrames, Dates
 
 const ROOT = normpath(joinpath(@__DIR__, ".."))
-pushfirst!(LOAD_PATH, joinpath(ROOT, "src"))
 
 using MixedGWR
 include(joinpath(ROOT, "src", "MGERPipeline.jl"))
