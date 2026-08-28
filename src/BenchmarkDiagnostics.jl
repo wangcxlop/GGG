@@ -6,10 +6,15 @@ Everything here works off the artefacts an existing benchmark run already wrote
 so a diagnosis costs no benchmark re-run.
 
 The scoring helper `_metrics` is a deliberate independent reimplementation of
-`MGERPipeline.metric_continuous` rather than a call into it: reproducing `metrics_pooled.csv`
+`MixedGWR.metric_continuous` rather than a call into it: reproducing `metrics_pooled.csv`
 from these matrices is the correctness check for the whole reading path, and sharing the
-scoring code would make that check vacuous. (`MGERPipeline.jl` is also a top-level script,
-not a module, so a standalone module cannot import from it anyway.)
+scoring code would make that check vacuous.
+
+That is now the only reason. `metric_continuous` used to live in `MGERPipeline.jl`, a top-level
+script a module could not import from at all; it has since moved into `MixedGWR`, so the
+duplication here is a choice rather than a constraint. The two also differ at the edges -
+`_metrics` returns a NaN row for an empty sample where `metric_continuous` asserts, and adds
+`MSE`/`variance` - so they are not interchangeable as written.
 """
 module BenchmarkDiagnostics
 

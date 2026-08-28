@@ -276,67 +276,12 @@ function make_loocv_dist(dMat::Matrix{Float64})
 end
 
 
-function metric_continuous(y_true::AbstractArray{<:Real}, y_pred::AbstractArray{<:Real}; mask=nothing)
-	a = Float64.(vec(y_true))
-	b = Float64.(vec(y_pred))
-	use_mask = mask === nothing ? (.!isnan.(a) .& .!isnan.(b)) : vec(mask)
-	aa = a[use_mask]
-	bb = b[use_mask]
-	n = length(aa)
-	@assert n > 0 "没有可用样本用于统计"
-	e = bb .- aa
-	rmse = sqrt(mean(e .^ 2))
-	mae = mean(abs.(e))
-	bias = mean(e)
-	r = n > 1 ? cor(aa, bb) : NaN
-	return (; n, RMSE=rmse, MAE=mae, Bias=bias, r)
-end
+# `metric_continuous`, `metric_event`, `common_valid_mask` and `complete_time_mask` now live in
+# `src/metrics.jl` inside the `MixedGWR` module, which this file already imports at the top. They
+# are reused by the benchmark, the diagnostics and the tests, so they are library code rather than
+# part of this pipeline.
 
 
-function metric_event(y_true::AbstractArray{<:Real}, y_pred::AbstractArray{<:Real}; thr::Float64=0.1, mask=nothing)
-	a = Float64.(vec(y_true))
-	b = Float64.(vec(y_pred))
-	use_mask = mask === nothing ? (.!isnan.(a) .& .!isnan.(b)) : vec(mask)
-	aa = a[use_mask]
-	bb = b[use_mask]
-
-	obs = aa .>= thr
-	est = bb .>= thr
-	hit = sum(obs .& est)
-	miss = sum(obs .& .!est)
-	fal = sum((.!obs) .& est)
-
-	pod_den = hit + miss
-	far_den = hit + fal
-	csi_den = hit + miss + fal
-
-	pod = pod_den > 0 ? hit / pod_den : NaN
-	far = far_den > 0 ? fal / far_den : NaN
-	csi = csi_den > 0 ? hit / csi_den : NaN
-	return (; POD=pod, FAR=far, CSI=csi)
-end
-
-
-function common_valid_mask(arrays::AbstractArray...)
-	mask = trues(size(arrays[1]))
-	for a in arrays
-		size(a) == size(mask) ||
-			throw(DimensionMismatch("all arrays must have the same size for a common metric mask"))
-		mask .&= .!isnan.(a)
-	end
-	return mask
-end
-
-
-function complete_time_mask(arrays::AbstractMatrix...)
-	mask = trues(size(arrays[1], 2))
-	for a in arrays
-		size(a, 2) == length(mask) ||
-			throw(DimensionMismatch("all matrices must have the same time dimension"))
-		mask .&= vec(all(.!isnan.(a), dims=1))
-	end
-	return mask
-end
 
 
 function st_gwr_predict_nanaware(

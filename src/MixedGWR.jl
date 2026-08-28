@@ -22,11 +22,13 @@ export GWR_mixed, GWR_mixed_trace, gwr_q, gw_weight_vec, solver_reg, fitted
 export fitted, fitted!, predict, summary
 
 export cor
+export metric_continuous, metric_event, common_valid_mask, complete_time_mask
 
 Base.Matrix(x::Vector) = reshape(x, length(x), 1)
 
 
 include("MGWR.jl")
+include("metrics.jl")
 include("kernel.jl")
 include("gw_weight.jl")
 include("PrecipitationCorrection.jl")
