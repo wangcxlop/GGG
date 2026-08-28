@@ -41,9 +41,42 @@ function first_difference(baseline_path::AbstractString, current_path::AbstractS
         "<$(length(baseline_lines)) lines>", "<$(length(current_lines)) lines>")
 end
 
+"""
+Newest modification time under `dir`, or `nothing` when it holds no files.
+"""
+function newest_mtime(dir::AbstractString)
+    newest = nothing
+    for (root, _, names) in walkdir(dir), name in names
+        stamp = mtime(joinpath(root, name))
+        newest = newest === nothing ? stamp : max(newest, stamp)
+    end
+    return newest
+end
+
+"""
+Refuse to compare a run directory that predates the source it is supposed to exercise.
+
+Without this the gate lies. The run command and the diff are separate steps, so if the pipeline
+errors, the previous run's output is still sitting in the directory - and since that output
+matched the baseline, the diff passes and reports a change as verified when nothing ran. That
+happened during this refactor: a benchmark exited 1 and the diff still said "byte-identical".
+"""
+function assert_run_is_fresh(root::AbstractString, run_dir::AbstractString)
+    src_stamp = newest_mtime(joinpath(root, "src"))
+    run_stamp = newest_mtime(run_dir)
+    run_stamp === nothing && error("run directory is empty: $run_dir")
+    src_stamp === nothing && return nothing
+    run_stamp >= src_stamp || error(
+        "STALE RUN: $(basename(run_dir)) is older than src/. The pipeline almost certainly " *
+        "failed and this is the previous run's output - re-run it and check its exit code.",
+    )
+    return nothing
+end
+
 function compare_snapshots(baseline_dir::AbstractString, current_dir::AbstractString)
     isdir(baseline_dir) || error("baseline snapshot does not exist: $baseline_dir")
     isdir(current_dir) || error("run directory does not exist: $current_dir")
+    assert_run_is_fresh(ROOT, current_dir)
     baseline_files = relative_files(baseline_dir)
     current_files = relative_files(current_dir)
 
