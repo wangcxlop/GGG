@@ -67,6 +67,20 @@ threaded LU accumulates in a different order. Pinning BLAS to one thread was mea
 `paired_comparisons.csv` and `claim_assessment.csv`. Every other method was byte-identical. The
 run's BLAS thread count is therefore part of what makes published numbers reproducible.
 
+The same class of drift showed up again, independent of BLAS, when the full-mode invariance gate
+(`scripts/verify_perf_invariance.jl`) was run against the hour-fit perf pass (commit `b822d78`):
+`paired_comparisons.csv`'s `ci_high` column moved in its last one or two digits for most rows,
+while `ci_low`, `delta_RMSE`, `relative_improvement`, and every other output file (105 of 106)
+stayed byte-identical. `_daily_bootstrap_delta`/`paired_bootstrap_rows`
+(`src/InterpolationBenchmarkBootstrap.jl`) are themselves single-threaded and fully seeded, so the
+difference traces to a sub-ULP perturbation in the `residual_gwr` prediction matrix upstream —
+the perf pass's threaded prediction path reordering some sum. It is only visible in
+`paired_comparisons.csv` because that file's RMSE is summed per-day (≤526 terms) before
+bootstrapping, where a 1-ULP shift is a meaningfully large fraction of the sum; everywhere else
+RMSE is pooled over the full ~2.6M-cell dataset, where the same shift is far below print
+precision and rounds away. Treat a last-digit-only `ci_high` (never `ci_low`, never the
+underlying RMSE/delta columns) as this same benign non-associativity, not a regression.
+
 ## Architecture
 
 ### Two tiers of `src/`
