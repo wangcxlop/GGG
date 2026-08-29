@@ -1,11 +1,11 @@
 #!/usr/bin/env julia
 
 const ROOT = normpath(joinpath(@__DIR__, ".."))
-include(joinpath(ROOT, "src", "ERA5LandStations.jl"))
-include(joinpath(ROOT, "src", "ERA5LandProcessing.jl"))
+include(joinpath(ROOT, "src", "load_modules.jl"))
+load_standalone_modules("ERA5LandStations", "ERA5LandProcessing")
 
-using .ERA5LandStations
-using .ERA5LandProcessing
+using Main.ERA5LandStations
+using Main.ERA5LandProcessing
 using CSV, DataFrames
 
 function parse_args(args)

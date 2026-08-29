@@ -7,6 +7,9 @@ using LinearAlgebra
 using Random
 using Statistics
 
+# Shared bookkeeping for every variable-selection path; see src/SelectionScaffolding.jl.
+using Main.SelectionScaffolding
+
 export ERA5SelectionConfig, ERA5_VARIABLES, align_feature_time, load_era5_panel
 export balanced_spatial_folds, prepare_dynamic_panel, station_block_permutation
 export dynamic_panel_screen, panel_spatial_variability_test, run_era5_variable_selection
@@ -196,6 +199,14 @@ function load_era5_panel(
     return (; values=matrices, qc)
 end
 
+# One of four different spatial-fold builders in the project, and the simplest: a sort-and-slice
+# along the longer axis. The others are `split_stations_balanced_spatial_kfold`
+# (InterpolationBenchmarkFolds.jl - Hilbert-seeded capacity-constrained Lloyd),
+# `DEMTerrainExperiment._balanced_spatial_folds` (farthest-point-seeded Lloyd) and
+# `MGERPipeline.split_stations_spatial_block_kfold` (contiguous lon/lat blocks). They are genuinely
+# different partitioning algorithms rather than copies, so they are not merged; but which one a
+# given selection path uses is historical, not reasoned, and that is worth knowing before reading
+# across their results.
 function balanced_spatial_folds(
     station_ids::Vector{String}, lonlat::Matrix{Float64}; k::Int=5,
 )
@@ -548,11 +559,28 @@ function _panel_sufficient_statistics(panel, selected::Vector{Symbol}, lonlat::M
     return (; A, b, rows, ys, coords, eligible, p)
 end
 
-function _local_coefficients(stats, distances, neighbors, cfg; block_order=collect(eachindex(stats.A)))
+"""One `_adaptive_weights` row per target, for reuse across a permutation test.
+
+The weights are a function of `distances` and `neighbors` only — the block permutation reorders
+which sufficient statistic each spatial slot contributes, never the weight on that slot. Building
+them once removes a sort and two allocations per target from every one of the ~1000 permutations.
+"""
+_local_weight_rows(distances, neighbors, n::Int) =
+    [_adaptive_weights(view(distances, target, :), neighbors) for target in 1:n]
+
+function _local_coefficients(stats, distances, neighbors, cfg;
+    block_order=collect(eachindex(stats.A)), weight_rows=nothing)
     n = length(stats.A); coefficients = fill(NaN, n, stats.p)
+    rows = weight_rows === nothing ? _local_weight_rows(distances, neighbors, n) : weight_rows
+    lhs = Matrix{Float64}(undef, stats.p, stats.p); rhs = Vector{Float64}(undef, stats.p)
     for target in 1:n
-        weights = _adaptive_weights(view(distances, target, :), neighbors)
-        lhs, rhs = cfg.ridge .* Matrix{Float64}(I, stats.p, stats.p), zeros(stats.p)
+        weights = rows[target]
+        # Reused across targets rather than reallocated; refilled to exactly what
+        # `cfg.ridge .* Matrix{Float64}(I, p, p)` and `zeros(p)` produced.
+        fill!(lhs, 0.0); fill!(rhs, 0.0)
+        for i in 1:stats.p
+            lhs[i, i] = cfg.ridge
+        end
         for spatial_index in 1:n
             source = block_order[spatial_index]
             lhs .+= weights[spatial_index] .* stats.A[source]
@@ -615,17 +643,28 @@ function panel_spatial_variability_test(
         return (; bandwidth_scan, variability, bandwidth=missing)
     end
     bandwidth = available.neighbors[argmin(available.loocv_rmse)]
-    coefficients = _local_coefficients(stats, distances, bandwidth, cfg)
+    weight_rows = _local_weight_rows(distances, bandwidth, length(stats.A))
+    coefficients = _local_coefficients(stats, distances, bandwidth, cfg; weight_rows)
     observed = [var(coefficients[:, 3 + j]) for j in eachindex(selected)]
-    exceed = zeros(Int, length(selected))
-    for _ in 1:cfg.spatial_permutations
-        order = station_block_permutation(length(stats.A), rng)
-        permuted = _local_coefficients(stats, distances, bandwidth, cfg; block_order=order)
+    # Drawn up front, from the same `rng` in the same order, so `orders[i]` is exactly what
+    # iteration `i` drew for itself; the bodies are then independent and each is a full
+    # O(n^2 p^2) coefficient-surface rebuild. `hits` is one row per permutation, reduced
+    # afterwards - summing booleans is exact and order-free, so `exceed` is unchanged.
+    orders = [station_block_permutation(length(stats.A), rng)
+        for _ in 1:cfg.spatial_permutations]
+    # `Matrix{Bool}`, not a `BitMatrix`: a BitArray packs 64 entries into one word, so two threads
+    # writing different rows of the same column would read-modify-write the same word and lose
+    # updates. One byte per entry makes the concurrent writes independent.
+    hits = fill(false, cfg.spatial_permutations, length(selected))
+    Threads.@threads :greedy for permutation_index in 1:cfg.spatial_permutations
+        permuted = _local_coefficients(stats, distances, bandwidth, cfg;
+            block_order=orders[permutation_index], weight_rows)
         for j in eachindex(selected)
             value = var(permuted[:, 3 + j])
-            exceed[j] += isfinite(value) && value >= observed[j]
+            hits[permutation_index, j] = isfinite(value) && value >= observed[j]
         end
     end
+    exceed = vec(sum(hits, dims=1))
     pvalues = cfg.spatial_permutations > 0 ?
         (exceed .+ 1) ./ (cfg.spatial_permutations + 1) : fill(NaN, length(selected))
     qvalues = all(isfinite, pvalues) ? _bh_adjust(pvalues) : fill(NaN, length(selected))
@@ -635,22 +674,6 @@ function panel_spatial_variability_test(
             role, bandwidth, role == "uncertain" ? "test_failed" : "ok"))
     end
     return (; bandwidth_scan, variability, bandwidth)
-end
-
-function _annotate!(table::DataFrame, product::String, scheme::String, fold::Int)
-    insertcols!(table, 1, :product => fill(product, nrow(table)),
-        :scheme => fill(scheme, nrow(table)), :fold => fill(fold, nrow(table)))
-    return table
-end
-
-function _append_table!(target::DataFrame, source::DataFrame)
-    if ncol(target) == 0
-        for column in propertynames(source)
-            target[!, column] = similar(source[!, column], 0)
-        end
-    end
-    nrow(source) > 0 && append!(target, source; cols=:union)
-    return target
 end
 
 function run_era5_variable_selection(
@@ -671,14 +694,13 @@ function run_era5_variable_selection(
     bandwidth_all, variability_all, role_all, status_all = DataFrame(), DataFrame(), DataFrame(), DataFrame()
     specifications = DataFrame(product=String[], variable=String[], selected=Bool[], role=String[],
         association_qvalue=Float64[], spatial_qvalue=Union{Missing,Float64}[], status=String[])
-    schemes = [("full_data", 0, collect(1:n))]
-    append!(schemes, [("spatial_cv", fold, findall(!=(fold), folds)) for fold in 1:cfg.k])
+    schemes = selection_schemes(n, folds, cfg.k)
     for product in products
         Ysat = Float64.(satellite[product])
         for (scheme, fold, train_indices) in schemes
             run_seed = cfg.seed + 1000 * findfirst(==(product), products) + 10 * fold
             panel = prepare_dynamic_panel(Yobs, Ysat, era5, train_indices, times, cfg)
-            qc = copy(panel.qc); _annotate!(qc, product, scheme, fold); _append_table!(qc_all, qc)
+            qc = copy(panel.qc); annotate_selection!(qc, product, scheme, fold); append_selection!(qc_all, qc)
             if panel.qc.status[1] != "ok"
                 for variable in ERA5_VARIABLES
                     push!(role_all, (product=product, scheme=scheme, fold=fold,
@@ -694,17 +716,17 @@ function run_era5_variable_selection(
             end
             screen = dynamic_panel_screen(panel, times, cfg; rng=MersenneTwister(run_seed))
             for table in (screen.association, screen.monthly, screen.vif)
-                _annotate!(table, product, scheme, fold)
+                annotate_selection!(table, product, scheme, fold)
             end
-            _append_table!(association_all, screen.association)
-            _append_table!(monthly_all, screen.monthly)
-            _append_table!(vif_all, screen.vif)
+            append_selection!(association_all, screen.association)
+            append_selection!(monthly_all, screen.monthly)
+            append_selection!(vif_all, screen.vif)
             spatial = panel_spatial_variability_test(panel, screen.selected, lonlat[train_indices, :], cfg;
                 rng=MersenneTwister(run_seed + 1))
-            _annotate!(spatial.bandwidth_scan, product, scheme, fold)
-            _annotate!(spatial.variability, product, scheme, fold)
-            _append_table!(bandwidth_all, spatial.bandwidth_scan)
-            _append_table!(variability_all, spatial.variability)
+            annotate_selection!(spatial.bandwidth_scan, product, scheme, fold)
+            annotate_selection!(spatial.variability, product, scheme, fold)
+            append_selection!(bandwidth_all, spatial.bandwidth_scan)
+            append_selection!(variability_all, spatial.variability)
             role_map = Dict(Symbol(row.variable) => (role=row.role, q=row.qvalue, status=row.status)
                 for row in eachrow(spatial.variability))
             association_q = Dict(Symbol(row.variable) => row.qvalue for row in eachrow(screen.association))

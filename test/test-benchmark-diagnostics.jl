@@ -1,8 +1,7 @@
 using Test, DataFrames
 
-if !isdefined(Main, :BenchmarkDiagnostics)
-    include(joinpath(@__DIR__, "..", "src", "BenchmarkDiagnostics.jl"))
-end
+include(joinpath(@__DIR__, "..", "src", "load_modules.jl"))
+load_standalone_modules("BenchmarkDiagnostics")
 const BD = Main.BenchmarkDiagnostics
 
 """

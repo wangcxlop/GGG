@@ -4,10 +4,10 @@ using Test
 using CSV, DataFrames, Dates
 
 const ROOT = normpath(joinpath(@__DIR__, ".."))
-pushfirst!(LOAD_PATH, joinpath(ROOT, "src"))
 
 using MixedGWR
-include(joinpath(ROOT, "src", "MGERPipeline.jl"))
+include(joinpath(ROOT, "src", "load_modules.jl"))
+load_pipeline("MGERPipeline")
 
 const TEST_KERNELS = [GAUSSIAN, EXPONENTIAL, BISQUARE, TRICUBE, BOXCAR]
 const TEST_KERNEL_NAMES = ["gaussian", "exponential", "bisquare", "tricube", "boxcar"]
@@ -263,6 +263,13 @@ end
         @test scope_map["residual_definition"] == "R = P_obs - P_sat; P_corr = P_sat + R_hat"
         @test scope_map["negative_precipitation_policy"] == "retain raw negative corrected values without clipping"
         @test parse(Float64, scope_map["min_scan_coverage"]) == cfg.min_scan_coverage
+        # This run passes `fold_scheme=:random`, which interleaves held-out stations with training
+        # ones, so the scope must not advertise spatial generalisation. The artefact filenames
+        # still say "spatial5fold" for continuity with existing output trees; the recorded claim is
+        # what has to be true.
+        @test scope_map["fold_scheme"] == "random"
+        @test occursin("NOT supported", scope_map["supported_claim"])
+        @test !occursin("spatial bias correction", scope_map["supported_claim"])
 
         duplicate_cfg = fixture_config(fixture, joinpath(temp_dir, "duplicate"); kernels=[GAUSSIAN, GAUSSIAN])
         invalid_cfg = fixture_config(fixture, joinpath(temp_dir, "invalid"); kernels=[9])

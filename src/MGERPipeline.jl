@@ -276,67 +276,12 @@ function make_loocv_dist(dMat::Matrix{Float64})
 end
 
 
-function metric_continuous(y_true::AbstractArray{<:Real}, y_pred::AbstractArray{<:Real}; mask=nothing)
-	a = Float64.(vec(y_true))
-	b = Float64.(vec(y_pred))
-	use_mask = mask === nothing ? (.!isnan.(a) .& .!isnan.(b)) : vec(mask)
-	aa = a[use_mask]
-	bb = b[use_mask]
-	n = length(aa)
-	@assert n > 0 "没有可用样本用于统计"
-	e = bb .- aa
-	rmse = sqrt(mean(e .^ 2))
-	mae = mean(abs.(e))
-	bias = mean(e)
-	r = n > 1 ? cor(aa, bb) : NaN
-	return (; n, RMSE=rmse, MAE=mae, Bias=bias, r)
-end
+# `metric_continuous`, `metric_event`, `common_valid_mask` and `complete_time_mask` now live in
+# `src/metrics.jl` inside the `MixedGWR` module, which this file already imports at the top. They
+# are reused by the benchmark, the diagnostics and the tests, so they are library code rather than
+# part of this pipeline.
 
 
-function metric_event(y_true::AbstractArray{<:Real}, y_pred::AbstractArray{<:Real}; thr::Float64=0.1, mask=nothing)
-	a = Float64.(vec(y_true))
-	b = Float64.(vec(y_pred))
-	use_mask = mask === nothing ? (.!isnan.(a) .& .!isnan.(b)) : vec(mask)
-	aa = a[use_mask]
-	bb = b[use_mask]
-
-	obs = aa .>= thr
-	est = bb .>= thr
-	hit = sum(obs .& est)
-	miss = sum(obs .& .!est)
-	fal = sum((.!obs) .& est)
-
-	pod_den = hit + miss
-	far_den = hit + fal
-	csi_den = hit + miss + fal
-
-	pod = pod_den > 0 ? hit / pod_den : NaN
-	far = far_den > 0 ? fal / far_den : NaN
-	csi = csi_den > 0 ? hit / csi_den : NaN
-	return (; POD=pod, FAR=far, CSI=csi)
-end
-
-
-function common_valid_mask(arrays::AbstractArray...)
-	mask = trues(size(arrays[1]))
-	for a in arrays
-		size(a) == size(mask) ||
-			throw(DimensionMismatch("all arrays must have the same size for a common metric mask"))
-		mask .&= .!isnan.(a)
-	end
-	return mask
-end
-
-
-function complete_time_mask(arrays::AbstractMatrix...)
-	mask = trues(size(arrays[1], 2))
-	for a in arrays
-		size(a, 2) == length(mask) ||
-			throw(DimensionMismatch("all matrices must have the same time dimension"))
-		mask .&= vec(all(.!isnan.(a), dims=1))
-	end
-	return mask
-end
 
 
 function st_gwr_predict_nanaware(
@@ -359,7 +304,10 @@ function st_gwr_predict_nanaware(
 	ntime = size(Y, 2)
 	Ypred = fill(NaN, n_target, ntime)
 
-	@inbounds Threads.@threads for i in 1:n_target
+	# `:greedy` rather than the default chunked schedule: `n_target` is a fold's held-out station
+	# count (tens), so equal chunks leave threads idle on the ragged last round. Each iteration
+	# writes only `Ypred[i, :]`, so the schedule cannot change a value.
+	@inbounds Threads.@threads :greedy for i in 1:n_target
 		xp1 = Xpred[i, 1]
 		xp2 = Xpred[i, 2]
 		xp3 = Xpred[i, 3]
@@ -767,6 +715,20 @@ function write_validation_scope(
 	min_scan_coverage::Float64,
 	kernel_candidates::Vector{Int}=Int[],
 )
+	# The held-out geometry decides what the run can claim. `:random` interleaves validation
+	# stations with training ones, so it supports "stations not used in fitting" but NOT
+	# spatial generalisation to gauge-free ground; only `:spatial_block` holds out contiguous
+	# area. Asserting the spatial claim under `:random` is a scientific overclaim, not a
+	# naming slip, so the string is derived rather than fixed.
+	supported_claim = if fold_scheme === :spatial_block
+		"gauge-network-assisted spatial bias correction/interpolation for stations in held-out spatial blocks"
+	elseif fold_scheme === :random
+		"gauge-network-assisted bias correction/interpolation for stations not used in fitting, " *
+			"held out at random and therefore interleaved with training stations; generalisation " *
+			"to gauge-free regions is NOT supported by this split"
+	else
+		"gauge-network-assisted bias correction/interpolation for stations not used in fitting"
+	end
 	rows = [
 		(key="validation_target", value="held-out station locations at matched observation/satellite timestamps"),
 		(key="training_signal", value="same-timestamp observed-minus-satellite residuals from training stations"),
@@ -786,7 +748,7 @@ function write_validation_scope(
 		(key="parameter_scan_use_loocv_eval", value=string(use_loocv_eval)),
 		(key="cv_scheme", value=cv_scheme),
 		(key="fold_scheme", value=fold_scheme === nothing ? "none" : string(fold_scheme)),
-		(key="supported_claim", value="gauge-network-assisted spatial bias correction/interpolation for stations not used in fitting"),
+		(key="supported_claim", value=supported_claim),
 		(key="unsupported_claim", value="standalone satellite correction or temporal forecast without concurrent training-station observations"),
 	]
 	CSV.write(joinpath(outdir, "validation_scope.csv"), DataFrame(rows))
@@ -796,11 +758,13 @@ end
 """
     split_stations_train_val(station_ids::Vector{String}; train_frac::Float64=0.8, rng::AbstractRNG=Random.GLOBAL_RNG)
 
-Split stations into training and validation sets for spatial cross-validation.
+Split stations into training and validation sets by a random shuffle.
 Returns: (train_ids, val_ids)
 
-This approach tests generalization to new/unseen locations, which is appropriate
-for spatial prediction tasks.
+The held-out stations are new/unseen *locations*, so this tests generalisation to stations that
+were not fitted. It is NOT a spatial split: the shuffle never reads `lonlat`, so held-out
+stations sit interleaved with training ones and a validation station typically has a training
+neighbour a few km away. For held-out *area*, use `split_stations_spatial_block_kfold`.
 """
 
 # 按站点进行空间训练/验证集划分 
@@ -1048,7 +1012,7 @@ function run_spatial_kfold_pipeline(
 			)
 			CSV.write(joinpath(fold_dir, "split_$(product)_spatialcv.csv"), split_df)
 
-			println("[$product] Spatial 5-fold CV ($fold_scheme) fold $fold_idx/$k: $(length(train_ids)) train sites, $(length(val_ids)) val sites")
+			println("[$product] $cv_scheme fold $fold_idx/$k: $(length(train_ids)) train sites, $(length(val_ids)) val sites")
 			result = evaluate_spatial_holdout(
 				product, ids, times, Y_obs, Y_sat, lonlat, train_ids, val_ids, cfg;
 				scan_path=joinpath(fold_dir, "scan_$(product)_spatialcv.csv"),
@@ -1290,11 +1254,12 @@ end
 """
     run_pipeline(cfg::MGERConfig; spatial_cv::Bool=true, train_frac::Float64=0.8, rng::AbstractRNG=Random.GLOBAL_RNG)
 
-Run MGER_FINAL pipeline with optional spatial cross-validation.
+Run MGER_FINAL pipeline with an optional held-out station split.
 
 # Arguments
 - cfg: MGERConfig with pipeline parameters
-- spatial_cv: If true, use train/validation split by sites (spatial holdout)
+- spatial_cv: If true, hold out a random `1 - train_frac` share of stations (see
+  `split_stations_train_val` - a random station holdout, not a spatial one)
 - train_frac: Fraction of stations to use for training (default 0.8)
 - rng: Random number generator for reproducible splits
 
@@ -1307,9 +1272,12 @@ function run_pipeline(cfg::MGERConfig; spatial_cv::Bool=true, train_frac::Float6
 	if !spatial_cv && !cfg.use_loocv_eval
 		error("Refusing spatial_cv=false with use_loocv_eval=false: this would report full-fit in-sample metrics as if they were validation results. Run spatial_cv=true for independent evaluation; that path also writes corr_*_fullfit_insample.csv product files.")
 	end
+	# `spatial_cv=true` is a random 80/20 station holdout - `split_stations_train_val` shuffles
+	# the id list and never reads coordinates - so the label must not say "spatial".
+	cv_scheme = spatial_cv ? "random_station_holdout" : "loocv_eval_all_stations"
 	write_validation_scope(
 		cfg.outdir;
-		cv_scheme=spatial_cv ? "single_station_holdout" : "loocv_eval_all_stations",
+		cv_scheme=cv_scheme,
 		use_loocv_eval=cfg.use_loocv_eval,
 		fold_scheme=nothing,
 		slope_ridge_candidates=cfg.slope_ridge_candidates,
@@ -1375,7 +1343,7 @@ function run_pipeline(cfg::MGERConfig; spatial_cv::Bool=true, train_frac::Float6
 				pairwise(Haversine(6378.388), points_train, points_val)
 			end
 
-			println("[$product] Spatial CV: $(length(train_ids)) train sites, $(length(val_ids)) val sites")
+			println("[$product] $cv_scheme: $(length(train_ids)) train sites, $(length(val_ids)) val sites")
 
 			# Parameter scan on training data only
 			scan_df, best = scan_params(

@@ -1,9 +1,10 @@
 #!/usr/bin/env julia
 
 const ROOT = normpath(joinpath(@__DIR__, ".."))
-include(joinpath(ROOT, "src", "MOD13A2NDVIProcessing.jl"))
+include(joinpath(ROOT, "src", "load_modules.jl"))
+load_standalone_modules("MOD13A2NDVIProcessing")
 
-using .MOD13A2NDVIProcessing
+using Main.MOD13A2NDVIProcessing
 
 function main()
     result = prepare_mod13a2_ndvi(

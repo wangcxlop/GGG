@@ -17,14 +17,14 @@
 # `compare_<basename(before)>_vs_<basename(after)>`.
 
 const ROOT = normpath(joinpath(@__DIR__, ".."))
-pushfirst!(LOAD_PATH, joinpath(ROOT, "src"))
 
 using MixedGWR
 using CSV, DataFrames, Dates, Printf
 
-include(joinpath(ROOT, "src", "MGERPipeline.jl"))
-include(joinpath(ROOT, "src", "BenchmarkDiagnostics.jl"))
-using .BenchmarkDiagnostics
+include(joinpath(ROOT, "src", "load_modules.jl"))
+load_pipeline("MGERPipeline")
+load_standalone_modules("BenchmarkDiagnostics")
+using Main.BenchmarkDiagnostics
 
 const STUDY_DATA = joinpath(ROOT, "data", "processed", "study_area")
 

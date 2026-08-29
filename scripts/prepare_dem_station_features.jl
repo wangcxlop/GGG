@@ -1,9 +1,10 @@
 #!/usr/bin/env julia
 
 const ROOT = normpath(joinpath(@__DIR__, ".."))
-include(joinpath(ROOT, "src", "TerrainFeatures.jl"))
+include(joinpath(ROOT, "src", "load_modules.jl"))
+load_standalone_modules("TerrainFeatures")
 
-using .TerrainFeatures
+using Main.TerrainFeatures
 
 function main()
     result = extract_station_terrain(

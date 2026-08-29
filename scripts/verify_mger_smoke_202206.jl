@@ -3,6 +3,10 @@
 using CSV, DataFrames
 
 const ROOT = normpath(joinpath(@__DIR__, ".."))
+
+include(joinpath(ROOT, "src", "load_modules.jl"))
+load_standalone_modules("MGERDataPrep")
+using Main.MGERDataPrep
 const PROCESSED = joinpath(ROOT, "data", "processed")
 const STUDY_DATA = joinpath(PROCESSED, "study_area")
 const RESULT = joinpath(ROOT, "output", "mger_smoke_202206_5kernels_5fold")
@@ -14,17 +18,7 @@ const KERNELS = (
     (4, "boxcar"),
 )
 
-function assert_wide(path::AbstractString, expected_rows::Int, expected_stations::Int)
-    table = CSV.read(path, DataFrame)
-    @assert nrow(table) == expected_rows "$path has unexpected row count"
-    @assert ncol(table) - 1 == expected_stations "$path has unexpected station count"
-    return table
-end
 
-function assert_station_columns(path::AbstractString, expected_ids::Vector{String})
-    header = propertynames(CSV.File(path; limit=1))
-    @assert string.(header[2:end]) == expected_ids "$path has unexpected station columns"
-end
 
 function main()
     station_meta = CSV.read(joinpath(STUDY_DATA, "station_meta.csv"), DataFrame)
@@ -137,6 +131,13 @@ function main()
         @assert length(unique(split.station_id)) == 237
         @assert sort(unique(split.fold)) == collect(1:5)
         @assert sort(combine(groupby(split, :fold), nrow => :n).n) == [47, 47, 47, 48, 48]
+        # The filename says "spatial5fold" but the run passes `fold_scheme=:random`, so assert the
+        # scheme the split was actually built with. Without this a scheme swap - which changes what
+        # the numbers mean - passes verification silently.
+        @assert all(==("random"), split.fold_scheme)
+        scope = CSV.read(joinpath(kernel_result, "validation_scope.csv"), DataFrame)
+        @assert only(scope.value[scope.key .== "fold_scheme"]) == "random"
+        @assert occursin("NOT supported", only(scope.value[scope.key .== "supported_claim"]))
         if isempty(reference_split)
             reference_split = split
         else

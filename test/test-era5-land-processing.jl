@@ -1,9 +1,8 @@
 using Test
 
-if !isdefined(@__MODULE__, :ERA5LandProcessing)
-    include(joinpath(@__DIR__, "..", "src", "ERA5LandProcessing.jl"))
-end
-using .ERA5LandProcessing
+include(joinpath(@__DIR__, "..", "src", "load_modules.jl"))
+load_standalone_modules("ERA5LandProcessing")
+using Main.ERA5LandProcessing
 
 @testset "ERA5-Land derived variables" begin
     @test relative_humidity(293.15, 293.15) == 100.0

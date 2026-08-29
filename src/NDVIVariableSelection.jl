@@ -7,8 +7,12 @@ using LinearAlgebra
 using Random
 using Statistics
 
-include(joinpath(@__DIR__, "ERA5VariableSelection.jl"))
-using .ERA5VariableSelection
+# Shared bookkeeping for every variable-selection path; see src/SelectionScaffolding.jl.
+using Main.SelectionScaffolding
+
+# Loaded through src/load_modules.jl by whoever loads this file, so there is one shared
+# ERA5VariableSelection rather than a private copy compiled into this module.
+using Main.ERA5VariableSelection
 
 export NDVISelectionConfig, load_ndvi_covariates, align_ndvi_asof
 export prepare_ndvi_panel, screen_ndvi, ndvi_spatial_variability_test
@@ -319,22 +323,6 @@ function ndvi_spatial_variability_test(
     )
 end
 
-function _annotate!(table::DataFrame, product::String, scheme::String, fold::Int)
-    insertcols!(table, 1, :product => fill(product, nrow(table)),
-        :scheme => fill(scheme, nrow(table)), :fold => fill(fold, nrow(table)))
-    return table
-end
-
-function _append_table!(target::DataFrame, source::DataFrame)
-    if ncol(target) == 0
-        for column in propertynames(source)
-            target[!, column] = similar(source[!, column], 0)
-        end
-    end
-    nrow(source) > 0 && append!(target, source; cols=:union)
-    return target
-end
-
 function run_ndvi_variable_selection(
     cfg::NDVISelectionConfig, products::Vector{String}, station_ids::Vector{String},
     times::Vector{DateTime}, Yobs::Matrix{Float64}, satellite::AbstractDict,
@@ -363,15 +351,14 @@ function run_ndvi_variable_selection(
         product=String[], variable=String[], selected=Bool[], role=String[],
         association_qvalue=Float64[], spatial_qvalue=Union{Missing,Float64}[], status=String[],
     )
-    schemes = [("full_data", 0, collect(1:n))]
-    append!(schemes, [("spatial_cv", fold, findall(!=(fold), folds)) for fold in 1:cfg.k])
+    schemes = selection_schemes(n, folds, cfg.k)
     for product in products
         Ysat = Float64.(satellite[product])
         for (scheme, fold, train_indices) in schemes
             run_seed = cfg.seed + 1000 * findfirst(==(product), products) + 10 * fold
             panel = prepare_ndvi_panel(Yobs, Ysat, aligned, train_indices, station_ids, cfg)
-            qc = copy(panel.qc); _annotate!(qc, product, scheme, fold); _append_table!(qc_all, qc)
-            cells = copy(panel.cells); _annotate!(cells, product, scheme, fold); _append_table!(cells_all, cells)
+            qc = copy(panel.qc); annotate_selection!(qc, product, scheme, fold); append_selection!(qc_all, qc)
+            cells = copy(panel.cells); annotate_selection!(cells, product, scheme, fold); append_selection!(cells_all, cells)
             if panel.qc.status[1] != "ok"
                 push!(roles_all, (product=product, scheme=scheme, fold=fold,
                     variable="ndvi", selected=false, role="uncertain",
@@ -386,19 +373,19 @@ function run_ndvi_variable_selection(
             end
             screen = screen_ndvi(panel, aligned.periods, cfg; rng=MersenneTwister(run_seed))
             for table in (screen.association, screen.monthly, screen.vif)
-                _annotate!(table, product, scheme, fold)
+                annotate_selection!(table, product, scheme, fold)
             end
-            _append_table!(association_all, screen.association)
-            _append_table!(monthly_all, screen.monthly)
-            _append_table!(vif_all, screen.vif)
+            append_selection!(association_all, screen.association)
+            append_selection!(monthly_all, screen.monthly)
+            append_selection!(vif_all, screen.vif)
             spatial = ndvi_spatial_variability_test(
                 panel, screen.selected, lonlat[train_indices, :], cfg;
                 rng=MersenneTwister(run_seed + 1),
             )
-            _annotate!(spatial.bandwidth_scan, product, scheme, fold)
-            _annotate!(spatial.variability, product, scheme, fold)
-            _append_table!(bandwidth_all, spatial.bandwidth_scan)
-            _append_table!(variability_all, spatial.variability)
+            annotate_selection!(spatial.bandwidth_scan, product, scheme, fold)
+            annotate_selection!(spatial.variability, product, scheme, fold)
+            append_selection!(bandwidth_all, spatial.bandwidth_scan)
+            append_selection!(variability_all, spatial.variability)
             if isempty(screen.selected)
                 role, spatial_q, role_status = "not_selected", missing, "not_selected"
             elseif nrow(spatial.variability) == 0

@@ -5,10 +5,10 @@ using CSV, DataFrames, Dates
 using Random
 
 const BENCHMARK_TEST_ROOT = normpath(joinpath(@__DIR__, ".."))
-pushfirst!(LOAD_PATH, joinpath(BENCHMARK_TEST_ROOT, "src"))
 
 using MixedGWR
-include(joinpath(BENCHMARK_TEST_ROOT, "src", "InterpolationBenchmark.jl"))
+include(joinpath(BENCHMARK_TEST_ROOT, "src", "load_modules.jl"))
+load_pipeline("InterpolationBenchmark")
 
 function _write_benchmark_wide(path, times, ids, values)
     df = DataFrame(time=times)
@@ -71,6 +71,48 @@ end
     )
 end
 
+@testset "mixed_gwr and mgwr sweep every configured kernel" begin
+    # `gwr`/`residual_gwr` have always swept every configured kernel; `mixed_gwr`/`mgwr` used to
+    # be hardcoded to BISQUARE regardless of `cfg.mger.kernels`. This is the parity guard: with
+    # more than one kernel configured, both methods' scans must actually vary kernel, not just
+    # report it.
+    rng = MersenneTwister(2027)
+    n = 30
+    train_lonlat = hcat(110.0 .+ rand(rng, n), 30.0 .+ rand(rng, n))
+    n_time = 6
+    y_sat = 5.0 .+ 0.3 .* randn(rng, n, n_time)
+    y_obs = y_sat .+ 0.2 .* randn(rng, n, n_time)
+
+    mger = MGERConfig(
+        station_meta_path="unused.csv", obs_hourly_wide_path="unused.csv",
+        sat_paths=Dict("FY4B" => "unused.csv"), outdir="unused",
+        kernels=[GAUSSIAN, BISQUARE], bw_adaptive=[8.0, 16.0], bw_fixed_km=[20.0, 50.0],
+    )
+    cfg = InterpolationBenchmarkConfig(mger=mger, mgwr_max_tuning_iterations=3)
+
+    mixed_rows = NamedTuple[]
+    mixed_selected = select_interpolation_parameter!(
+        mixed_rows, cfg, "mixed_gwr", "residual", :balanced_spatial, "TEST", 1,
+        train_lonlat, y_obs, y_sat,
+    )
+    @test length(unique(row.kernel for row in mixed_rows)) > 1
+    @test length(unique(row.adaptive for row in mixed_rows)) > 1
+    @test mixed_selected.kernel in cfg.mger.kernels
+    @test mixed_selected.adaptive isa Bool
+    @test count(row.selected for row in mixed_rows) == 1
+
+    mgwr_rows = NamedTuple[]
+    mgwr_selected = select_interpolation_parameter!(
+        mgwr_rows, cfg, "mgwr", "residual", :balanced_spatial, "TEST", 1,
+        train_lonlat, y_obs, y_sat,
+    )
+    @test length(unique(row.kernel for row in mgwr_rows)) > 1
+    @test length(unique(row.adaptive for row in mgwr_rows)) > 1
+    @test mgwr_selected.kernel in cfg.mger.kernels
+    @test mgwr_selected.adaptive isa Bool
+    @test count(row.selected for row in mgwr_rows) == length(mgwr_selected.bandwidths)
+end
+
 @testset "Balanced spatial folds" begin
     ids = string.(1:23)
     lonlat = hcat(
@@ -110,6 +152,64 @@ end
     @test all(p -> maximum(length.(p)) - minimum(length.(p)) <= 1, partitions)
 end
 
+@testset "Hilbert curve index" begin
+    # The whole seed-free scheme rests on this ordering being a genuine Hilbert curve: a bijection
+    # onto 0:n^2-1 whose consecutive cells are grid neighbours. If it degenerated into a row-major
+    # or Morton order the fold blocks would stop being compact and nothing downstream would say so.
+    for order in 2:5
+        n = 1 << order
+        cells = [(x, y) for x in 0:(n - 1), y in 0:(n - 1)]
+        located = Dict(_hilbert_index(x, y, order) => (x, y) for (x, y) in cells)
+        @test length(located) == n * n
+        @test extrema(keys(located)) == (0, n * n - 1)
+        @test all(0:(n * n - 2)) do d
+            (x1, y1), (x2, y2) = located[d], located[d + 1]
+            abs(x1 - x2) + abs(y1 - y2) == 1
+        end
+    end
+    # A degenerate axis must not divide by zero.
+    @test _hilbert_axis([3.0, 3.0, 3.0]) == [0, 0, 0]
+end
+
+@testset "Hilbert folds are seed-free and rotation-indexed" begin
+    rng = MersenneTwister(2026)
+    ids = string.(1:120)
+    lonlat = hcat(109.5 .+ 2.5 .* rand(rng, 120), 29.5 .+ 2.5 .* rand(rng, 120))
+    signature(folds) = sort([sort(f) for f in folds])
+
+    # The point of the scheme: the seed argument is inert, so no reported partition is an RNG draw.
+    @test split_stations_balanced_spatial_kfold(
+            ids, lonlat; k=5, seed=1, center_init=:hilbert, rotation=3) ==
+        split_stations_balanced_spatial_kfold(
+            ids, lonlat; k=5, seed=999_999, center_init=:hilbert, rotation=3)
+    # Rotation, not the seed, is what moves stations between folds.
+    @test signature(split_stations_balanced_spatial_kfold(
+            ids, lonlat; k=5, center_init=:hilbert, rotation=0)) !=
+        signature(split_stations_balanced_spatial_kfold(
+            ids, lonlat; k=5, center_init=:hilbert, rotation=1))
+
+    rotations = [split_stations_balanced_spatial_kfold(
+        ids, lonlat; k=5, center_init=:hilbert, rotation=r) for r in 0:19]
+    # Repeated cross-validation still measures split sensitivity: the rotations must not collapse
+    # the way `:farthest` did. Capacity-constrained Lloyd pulls different initialisations toward the
+    # same optima, so the two schemes are close rather than identical. Measured distinct partitions,
+    # hilbert rotations against `:kmeanspp` seeds:
+    #
+    #   this uniform 120-station cloud   7/10 and 16/20, against 9/10 and 13/20
+    #   the real clustered 237-station network   8/10 and 14/20, against 8/10 and 15/20
+    #
+    # Comparable in both directions, which is the bar: the seed goes away without costing the
+    # partition diversity repeated CV needs. `scripts/verify_fold_rotations.jl` regates this on the
+    # real network, where the comparison that matters is made against the incumbent directly.
+    @test length(unique(signature.(rotations[1:10]))) >= 7
+    @test length(unique(signature.(rotations))) >= 15
+    @test all(p -> sort(reduce(vcat, p)) == sort(ids), rotations)
+    @test all(p -> maximum(length.(p)) - minimum(length.(p)) <= 1, rotations)
+    # Every rotation is reproducible on its own.
+    @test all(r -> split_stations_balanced_spatial_kfold(
+        ids, lonlat; k=5, center_init=:hilbert, rotation=r) == rotations[r + 1], 0:19)
+end
+
 """Path-only MGERConfig for tests that exercise configuration validation, not data loading."""
 _dummy_mger() = MGERConfig(
     station_meta_path="unused.csv", obs_hourly_wide_path="unused.csv",
@@ -131,6 +231,13 @@ _dummy_mger() = MGERConfig(
             mger=_dummy_mger(), fold_center_init=:nope,
         ), 50,
     )
+    # The seed-free initialisation is the default and must validate; the seeded ones stay reachable.
+    for init in (:hilbert, :kmeanspp, :farthest)
+        @test _validate_benchmark_config(
+            InterpolationBenchmarkConfig(mger=_dummy_mger(), fold_center_init=init), 50,
+        ) === nothing
+    end
+    @test InterpolationBenchmarkConfig(mger=_dummy_mger()).fold_center_init === :hilbert
     # A single repeat keeps the historical output layout; repeats nest under repeat_<i>.
     @test _repeat_dir("/out", 1, 1) == "/out"
     @test _repeat_dir("/out", 2, 5) == joinpath("/out", "repeat_02")
@@ -167,14 +274,15 @@ end
 end
 
 """One pooled `metrics` row for `assess_gwr_claim` test fixtures."""
-_claim_metric_row(; product, method, group, level, RMSE, CSI=0.5, FAR=0.1) = _empty_metric_row(;
-    scheme="balanced_spatial", product, method, fold=missing, repeat=1, seed=1,
-    group, level, n=100, coverage=1.0, RMSE, MAE=RMSE, CSI, FAR,
-)
+_claim_metric_row(; product, method, group, level, RMSE, CSI=0.5, FAR=0.1, repeat=1) =
+    _empty_metric_row(;
+        scheme="balanced_spatial", product, method, fold=missing, repeat, seed=10 + repeat,
+        group, level, n=100, coverage=1.0, RMSE, MAE=RMSE, CSI, FAR,
+    )
 
 """One `paired_bootstrap_rows`-shaped row for `assess_gwr_claim` test fixtures."""
-_claim_bootstrap_row(; product, baseline, stratum, ci_low, pvalue_holm) = (;
-    scheme="balanced_spatial", product, stratum, baseline, repeat=1, seed=1,
+_claim_bootstrap_row(; product, baseline, stratum, ci_low, pvalue_holm, repeat=1) = (;
+    scheme="balanced_spatial", product, stratum, baseline, repeat, seed=10 + repeat,
     n=100, n_day=10, reps=200, RMSE_baseline=1.0, RMSE_gwr=0.9, delta_RMSE=0.1,
     relative_improvement=0.1, ci_low, ci_high=0.2, pvalue=0.01, pvalue_holm,
 )
@@ -406,15 +514,16 @@ end
     y_sat_train = f.y_sat[train_idx, :]
     times = collect(1:size(residuals, 2))
 
+    bisquare = _kernel_function(BISQUARE)
     unshrunk = _joint_candidate_metrics(
         context, residuals, y_obs_train, y_sat_train, "residual_gwr",
-        [8], times, nothing, nothing, [1.0],
+        [8.0], bisquare, times, nothing, nothing, [1.0],
     )
     @test unshrunk.shrink == 1.0
 
     ladder = _joint_candidate_metrics(
         context, residuals, y_obs_train, y_sat_train, "residual_gwr",
-        [8], times, nothing, nothing, [0.25, 0.5, 0.75, 1.0],
+        [8.0], bisquare, times, nothing, nothing, [0.25, 0.5, 0.75, 1.0],
     )
     # The ladder always contains 1.0, so it can never score worse than the unshrunk fit.
     @test ladder.RMSE <= unshrunk.RMSE + 1e-12
@@ -428,19 +537,190 @@ end
     inflated_obs = y_sat_train .+ 2.0 .* (y_obs_train .- y_sat_train)
     inflated = _joint_candidate_metrics(
         context, 2.0 .* residuals, inflated_obs, y_sat_train, "residual_gwr",
-        [8], times, nothing, nothing, [0.25, 0.5, 0.75, 1.0],
+        [8.0], bisquare, times, nothing, nothing, [0.25, 0.5, 0.75, 1.0],
     )
     over_corrected = _joint_candidate_metrics(
         context, 2.0 .* residuals, y_obs_train, y_sat_train, "residual_gwr",
-        [8], times, nothing, nothing, [0.25, 0.5, 0.75, 1.0],
+        [8.0], bisquare, times, nothing, nothing, [0.25, 0.5, 0.75, 1.0],
     )
     @test inflated.shrink >= over_corrected.shrink
     @test over_corrected.shrink < 1.0
 
     @test_throws ArgumentError _joint_candidate_metrics(
         context, residuals, y_obs_train, y_sat_train, "residual_gwr",
-        [8], times, nothing, nothing, Float64[],
+        [8.0], bisquare, times, nothing, nothing, Float64[],
     )
+end
+
+@testset "DEM and joint mixed_gwr/mgwr sweep every kernel and bandwidth family" begin
+    # Mirrors the baseline-path parity test above: `select_dem_parameter!`/
+    # `select_joint_parameter!` used to fix `mixed_gwr`/`mgwr` at kernel=BISQUARE and, even after
+    # the kernel sweep was added, only ever searched the adaptive (neighbor-count) bandwidth
+    # family. With more than one kernel and a non-empty fixed-km grid configured, both dimensions
+    # must actually vary, matching the baseline path's `gwr`.
+    mger = MGERConfig(
+        station_meta_path="unused.csv", obs_hourly_wide_path="unused.csv",
+        sat_paths=Dict("FY4B" => "unused.csv"), outdir="unused",
+        kernels=[GAUSSIAN, BISQUARE], bw_adaptive=[8.0, 16.0], bw_fixed_km=[20.0, 50.0],
+    )
+
+    @testset "DEM path" begin
+        rng = MersenneTwister(2029)
+        n = 40
+        lonlat = hcat(collect(range(109.5, 112.0; length=n)), 30.0 .+ rand(rng, n))
+        elevation = collect(range(100.0, 1800.0; length=n))
+        aspect = rand(rng, n) .* 360
+        terrain = DataFrame(
+            station_id=string.(1:n), elevation_m=elevation, slope_deg=5.0 .+ rand(rng, n) .* 20,
+            aspect_deg=aspect, aspect_sin=sind.(aspect), aspect_cos=cosd.(aspect),
+        )
+        train_idx, val_idx = 1:32, 33:40
+        role_map = Dict("elevation" => "local")
+        response = 0.002 .* elevation[train_idx] .+ 0.01 .* randn(rng, length(train_idx))
+        selection = (; role_map, response, selection_status="selected")
+        dem = DEMTerrainExperiment.DEMExperimentConfig(
+            outdir="unused", bandwidth_candidates=[16, 24],
+        )
+        dem_context = build_dem_fold_context(
+            selection, terrain[train_idx, :], terrain[val_idx, :],
+            lonlat[train_idx, :], lonlat[val_idx, :], dem,
+        )
+        cfg = InterpolationBenchmarkConfig(mger=mger, terrain_path="unused", dem=dem)
+
+        for method in ("mixed_gwr", "mgwr")
+            scan_rows = NamedTuple[]
+            selected = select_dem_parameter!(
+                scan_rows, cfg, method, "residual", :balanced_spatial, "TEST", 1, dem_context,
+            )
+            @test length(unique(row.kernel for row in scan_rows)) > 1
+            @test length(unique(row.adaptive for row in scan_rows)) > 1
+            @test selected.kernel in cfg.mger.kernels
+            @test selected.adaptive isa Bool
+        end
+    end
+
+    @testset "Joint-covariate path" begin
+        f = synthetic_joint_benchmark_fixture()
+        train_idx = collect(1:22)
+        val_idx = collect(23:30)
+        roles = Dict("elevation" => "local")
+        joint_context = JointCovariateModels.build_joint_fold_context(
+            "FY4B", roles, train_idx, val_idx, f.lonlat, f.y_obs, f.y_sat,
+            f.terrain, f.era5, nothing, f.joint_cfg,
+        )
+        cfg = InterpolationBenchmarkConfig(
+            mger=mger, joint_covariates=f.joint_cfg, mgwr_max_tuning_iterations=3,
+        )
+        y_obs_train = f.y_obs[train_idx, :]
+        y_sat_train = f.y_sat[train_idx, :]
+
+        for method in ("mixed_gwr", "mgwr")
+            scan_rows = NamedTuple[]
+            selected = select_joint_parameter!(
+                scan_rows, cfg, method, "residual", :balanced_spatial, "FY4B", 1,
+                joint_context, y_obs_train, y_sat_train,
+            )
+            @test length(unique(row.kernel for row in scan_rows)) > 1
+            @test length(unique(row.adaptive for row in scan_rows)) > 1
+            @test selected.kernel in cfg.mger.kernels
+            @test selected.adaptive isa Bool
+        end
+    end
+end
+
+@testset "Explicit global bandwidth candidate" begin
+    # The whole design rests on `bw = Inf` meaning "unweighted OLS over the training stations"
+    # for every kernel, so that global can ride the existing bandwidth plumbing instead of
+    # needing its own code path. Pin that rather than leaving it implicit in `kernel.jl`.
+    @testset "bw = Inf gives every kernel a flat weight of one" begin
+        distances = [0.0 5.0; 12.5 0.0; 40.0 120.0]
+        for kernel in (GAUSSIAN, EXPONENTIAL, BISQUARE, TRICUBE, BOXCAR)
+            @test gw_weight(distances, Inf; kernel=kernel, adaptive=false) == ones(3, 2)
+        end
+    end
+
+    @testset "global still excludes the held-out station under exclude_self" begin
+        # `_gwr_predict` drops self by setting its distance to Inf, which is enough to keep it
+        # out of the adaptive neighbour ranking but NOT enough to zero its weight at bw = Inf:
+        # `kernel(Inf, Inf)` is NaN for four kernels and 1.0 for boxcar. Boxcar is the one that
+        # fails silently - it would hand each station its own value back.
+        rng = MersenneTwister(4711)
+        n = 12
+        lonlat = hcat(110.0 .+ rand(rng, n), 30.0 .+ rand(rng, n))
+        values = reshape(collect(1.0:n), n, 1)
+        center = (mean(lonlat[:, 1]), mean(lonlat[:, 2]))
+        X = build_X_intercept_centered(lonlat; center=center)
+        # At bw = Inf every weight is one, so leave-one-out GWR is exactly OLS refitted on the
+        # other n-1 stations. That is the invariant a leaked self-weight breaks.
+        expected = [only(X[i:i, :] * (X[setdiff(1:n, i), :] \ values[setdiff(1:n, i), 1]))
+                    for i in 1:n]
+        for kernel in (GAUSSIAN, EXPONENTIAL, BISQUARE, TRICUBE, BOXCAR)
+            loo = _gwr_predict(
+                lonlat, values, lonlat; kernel=kernel, adaptive=false, bw=Inf, exclude_self=true,
+            )
+            @test all(isfinite, loo)
+            @test vec(loo) ≈ expected
+        end
+    end
+
+    mger = MGERConfig(
+        station_meta_path="unused.csv", obs_hourly_wide_path="unused.csv",
+        sat_paths=Dict("FY4B" => "unused.csv"), outdir="unused",
+        kernels=[GAUSSIAN, BISQUARE], bw_adaptive=[8.0, 16.0], bw_fixed_km=[20.0, 50.0],
+    )
+
+    @testset "_bandwidth_families appends global only when enabled" begin
+        with_global = InterpolationBenchmarkConfig(mger=mger)
+        without_global = InterpolationBenchmarkConfig(mger=mger, bw_include_global=false)
+        @test with_global.bw_include_global
+
+        (adaptive_on, fixed_on) = _bandwidth_families(with_global, mger.bw_adaptive)
+        @test adaptive_on == (true, [8.0, 16.0])
+        @test fixed_on == (false, [20.0, 50.0, Inf])
+
+        (_, fixed_off) = _bandwidth_families(without_global, mger.bw_adaptive)
+        @test fixed_off == (false, [20.0, 50.0])
+
+        # The adaptive family is passed through untouched: the joint path has already filtered
+        # its own grid by the time it calls this.
+        (adaptive_filtered, _) = _bandwidth_families(with_global, [12])
+        @test adaptive_filtered == (true, [12.0])
+    end
+
+    @testset "adaptive candidates are capped by the inner selection split" begin
+        # 30 training stations split into three inner groups of ten: a candidate is only ever
+        # fitted on 20, so anything above that would fall through gw_weight's `dn > 1` branch
+        # to a near-global fit during scoring and then refit as a genuine 24-neighbour model.
+        groups = [collect(1:10), collect(11:20), collect(21:30)]
+        @test _selection_train_minimum(30, groups) == 20
+        @test _usable_adaptive_candidates([8.0, 16.0, 20.0, 24.0], 30, groups) ==
+            [8.0, 16.0, 20.0]
+        # `:loocv` geometry holds out a single station instead of a whole group.
+        @test _selection_train_minimum(30, nothing) == 29
+        @test _usable_adaptive_candidates([8.0, 24.0], 30, nothing) == [8.0, 24.0]
+    end
+
+    @testset "the joint scan actually offers global" begin
+        f = synthetic_joint_benchmark_fixture()
+        train_idx = collect(1:22)
+        val_idx = collect(23:30)
+        joint_context = JointCovariateModels.build_joint_fold_context(
+            "FY4B", Dict("elevation" => "local"), train_idx, val_idx,
+            f.lonlat, f.y_obs, f.y_sat, f.terrain, f.era5, nothing, f.joint_cfg,
+        )
+        cfg = InterpolationBenchmarkConfig(
+            mger=mger, joint_covariates=f.joint_cfg, mgwr_max_tuning_iterations=3,
+        )
+        scan_rows = NamedTuple[]
+        select_joint_parameter!(
+            scan_rows, cfg, "gwr", "residual", :balanced_spatial, "FY4B", 1,
+            joint_context, f.y_obs[train_idx, :], f.y_sat[train_idx, :],
+        )
+        global_rows = filter(row -> row.bw == Inf, scan_rows)
+        @test !isempty(global_rows)
+        @test all(row -> row.adaptive === false, global_rows)
+        @test any(row -> row.status == "success", global_rows)
+    end
 end
 
 @testset "Joint covariate config requires exactly one selection mode" begin
@@ -476,6 +756,175 @@ end
     end
     @test err2 isa ArgumentError
     @test occursin("exactly one of spec_path", err2.msg)
+end
+
+@testset "The claim is assessed on every partition, not just the first" begin
+    products = ["TEST"]
+    # Partition 1: GWR beats all three baselines on every gate. Partition 2: it is worse overall
+    # and loses the heavy-rain gate. A run pinned to repeat 1 would call this supported outright.
+    rows = NamedTuple[]
+    for repeat_value in 1:2
+        gwr_overall = repeat_value == 1 ? 0.9 : 1.6
+        gwr_heavy = repeat_value == 1 ? 0.8 : 1.3
+        push!(rows, _claim_metric_row(product="TEST", method="residual_gwr",
+            group="overall", level="all", RMSE=gwr_overall, repeat=repeat_value))
+        for (method, RMSE) in (("idw", 1.5), ("adw", 1.0), ("tps", 1.3))
+            push!(rows, _claim_metric_row(product="TEST", method=method,
+                group="overall", level="all", RMSE=RMSE, repeat=repeat_value))
+        end
+        for (method, RMSE) in (
+            ("residual_gwr", gwr_heavy), ("idw", 1.5), ("adw", 1.2), ("tps", 1.4),
+        )
+            push!(rows, _claim_metric_row(product="TEST", method=method,
+                group="rain_intensity", level="heavy", RMSE=RMSE, repeat=repeat_value))
+        end
+        for (method, RMSE) in (("residual_gwr", 1.0), ("idw", 1.02), ("adw", 1.01), ("tps", 1.03))
+            push!(rows, _claim_metric_row(product="TEST", method=method,
+                group="rain_intensity", level="moderate", RMSE=RMSE, repeat=repeat_value))
+        end
+        for (method, RMSE) in (("residual_gwr", 0.85), ("idw", 1.4), ("adw", 1.1), ("tps", 1.3))
+            push!(rows, _claim_metric_row(product="TEST", method=method,
+                group="year", level="2022", RMSE=RMSE, repeat=repeat_value))
+        end
+        for (method, CSI, FAR) in (
+            ("residual_gwr", 0.6, 0.10), ("idw", 0.55, 0.12),
+            ("adw", 0.58, 0.11), ("tps", 0.56, 0.13),
+        )
+            push!(rows, _claim_metric_row(product="TEST", method=method,
+                group="event_threshold", level="0.1", RMSE=1.0, CSI=CSI, FAR=FAR,
+                repeat=repeat_value))
+        end
+    end
+    metrics = DataFrame(rows)
+    bootstrap = DataFrame([
+        _claim_bootstrap_row(product="TEST", baseline=baseline, stratum="overall",
+            ci_low=0.3, pvalue_holm=0.01, repeat=repeat_value)
+        for repeat_value in 1:2 for baseline in ("idw", "adw", "tps")
+    ])
+
+    claim = assess_gwr_claim(metrics, bootstrap, products)
+    @test nrow(claim) == 2
+    @test sort(claim.repeat) == [1, 2]
+    first_partition = only(filter(:repeat => ==(1), claim))
+    second_partition = only(filter(:repeat => ==(2), claim))
+    @test first_partition.direction_improved
+    @test first_partition.product_supported
+    # The second partition disagrees, which is exactly what pinning to repeat 1 used to hide.
+    @test !second_partition.direction_improved
+    @test !second_partition.product_supported
+
+    agreement = only(claim_agreement(claim))
+    @test agreement.n_repeats == 2
+    @test agreement.improved_repeats == 1
+    @test agreement.supported_repeats == 1
+    @test !agreement.unanimous
+    @test agreement.min_overall_relative_improvement <
+        agreement.max_overall_relative_improvement
+end
+
+@testset "Fixed full-data covariate selection is refused unless declared exploratory" begin
+    mger = _dummy_mger()
+    leaky = InterpolationBenchmarkConfig(
+        mger=mger,
+        joint_covariates=JointCovariateModels.JointCovariateBenchmarkConfig(
+            spec_path="unused.csv", terrain_path="unused.csv", era5_paths=Dict{Int,String}(),
+        ),
+    )
+    err = try
+        _validate_benchmark_config(leaky, 50)
+        nothing
+    catch e
+        e
+    end
+    @test err isa ArgumentError
+    @test occursin("held-out fold", err.msg)
+
+    # The escape hatch still works - it is an admission, not a fix - and the failure it then hits
+    # is the ordinary missing-file one, which proves the leak check ran first and passed.
+    declared = InterpolationBenchmarkConfig(
+        mger=mger, exploratory_only=true,
+        joint_covariates=JointCovariateModels.JointCovariateBenchmarkConfig(
+            spec_path="unused.csv", terrain_path="unused.csv", era5_paths=Dict{Int,String}(),
+        ),
+    )
+    err2 = try
+        _validate_benchmark_config(declared, 50)
+        nothing
+    catch e
+        e
+    end
+    @test err2 isa ArgumentError
+    @test occursin("joint specification does not exist", err2.msg)
+end
+
+@testset "Fold spread summarises metrics_folds, not the pooled row" begin
+    rows = NamedTuple[]
+    for fold_value in 1:3
+        push!(rows, _empty_metric_row(;
+            scheme="balanced_spatial", product="FY4B", method="adw", fold=fold_value,
+            repeat=1, seed=11, group="overall", level="all",
+            n=100, coverage=1.0, RMSE=Float64(fold_value), MAE=Float64(fold_value),
+        ))
+    end
+    # A pooled row sits in the same table and must be ignored, or the spread would be computed
+    # over an estimate of itself.
+    push!(rows, _empty_metric_row(;
+        scheme="balanced_spatial", product="FY4B", method="adw", fold=missing,
+        repeat=1, seed=11, group="overall", level="all",
+        n=300, coverage=1.0, RMSE=99.0, MAE=99.0,
+    ))
+    summary = summarize_fold_spread(DataFrame(rows))
+    @test nrow(summary) == 1
+    row = only(summary)
+    @test row.n_folds == 3
+    @test row.total_n == 300
+    @test row.RMSE_mean ≈ 2.0
+    @test row.RMSE_min ≈ 1.0
+    @test row.RMSE_max ≈ 3.0
+    @test row.RMSE_std ≈ 1.0
+
+    # One fold has no spread to report, and must say NaN rather than 0.
+    single = summarize_fold_spread(DataFrame([_empty_metric_row(;
+        scheme="balanced_spatial", product="FY4B", method="adw", fold=1,
+        repeat=1, seed=11, group="overall", level="all",
+        n=100, coverage=1.0, RMSE=1.0, MAE=1.0,
+    )]))
+    @test isnan(only(single).RMSE_std)
+end
+
+@testset "auto compares contenders on one shared mask" begin
+    y_obs = [1.0 2.0 3.0 4.0; 1.0 2.0 3.0 4.0]
+    y_sat = fill(1.0, 2, 4)
+    # `patchy` declines the two hard columns and is mediocre on the two it keeps. `steady`
+    # predicts everything: much better than `patchy` on the easy columns, hopeless on the hard
+    # ones. This is the shape of the bias the shared mask exists to remove — a method that fails
+    # where the problem is hard is never charged for it, and its scan-row RMSE flatters it.
+    patchy = y_obs .+ 0.5
+    patchy[:, 3:4] .= NaN
+    steady = copy(y_obs)
+    steady[:, 1:2] .+= 0.1
+    steady[:, 3:4] .+= 10.0
+    # Scored on its own cells — which is what each method's `selected` scan row carries — the
+    # method that gave up looks like the better one.
+    @test _candidate_metrics(y_obs, y_sat, patchy).RMSE <
+        _candidate_metrics(y_obs, y_sat, steady).RMSE
+    # Scored on the shared mask, where neither is charged for the columns `patchy` skipped, it is
+    # not: `steady` is genuinely better on the cells both of them predicted.
+    choice = select_auto_method(
+        [(; method="patchy", prediction=patchy), (; method="steady", prediction=steady)],
+        y_obs, y_sat,
+    )
+    @test choice.chosen == "steady"
+    @test choice.runner_up == "patchy"
+    @test choice.n == 4
+    @test choice.shared_mask_coverage ≈ 0.5
+    @test choice.chosen_rmse ≈ 0.1
+
+    # Nothing to score on: the caller must be told, not handed a default.
+    @test select_auto_method(
+        [(; method="empty", prediction=fill(NaN, 2, 4))], y_obs, y_sat,
+    ) === nothing
+    @test select_auto_method(NamedTuple[], y_obs, y_sat) === nothing
 end
 
 @testset "Interpolation benchmark fixture" begin
@@ -542,12 +991,20 @@ end
         )
         result = run_interpolation_benchmark(cfg)
         @test !isempty(result.metrics)
-        @test nrow(result.status) == 2 * 3 * 10
-        @test all(result.status.status .== "success")
+        @test nrow(result.status) == 2 * 3 * 8
         @test Set(result.status.method) == Set([
-            "idw", "adw", "tps", "gwr", "gwr_const", "hurdle_gwr",
-            "residual_gwr", "residual_gwr_const", "mixed_gwr", "mgwr",
+            "idw", "adw", "tps", "gwr",
+            "residual_gwr", "mixed_gwr", "mgwr", "auto",
         ])
+        fitted_status = filter(:method => !=("auto"), result.status)
+        @test all(fitted_status.status .== "success")
+        # This fixture is the legacy DEM path with 8 training stations per fold, so `auto` has
+        # neither a `dem_context` nor an inner split to choose on. It must say so rather than
+        # failing: "skipped" is what keeps a real breakage visible elsewhere.
+        auto_status = filter(:method => ==("auto"), result.status)
+        @test all(auto_status.status .== "skipped")
+        @test all(occursin("legacy DEM path", row.error) for row in eachrow(auto_status))
+        @test isempty(result.auto_selection)
         @test Set(result.metrics.method) == Set(BENCHMARK_METHODS)
         @test Set((row.mode, row.method) for row in eachrow(result.scans)) == Set(BENCHMARK_RUNS)
         @test Set(result.scans.group[result.scans.method .== "mgwr"]) ==
@@ -910,5 +1367,99 @@ end
                 mger=base.mger, tuning_time_weighting=:wet_only,
             ), 10,
         )
+    end
+end
+
+@testset "No selection step sees the outer held-out fold" begin
+    # The invariant the whole selection design rests on: corrupt the observations at one fold's
+    # validation stations and every hyperparameter chosen for that fold must be bit-identical.
+    #
+    # Scoped to the target fold on purpose. Those stations are *training* data for the other two
+    # folds, so their selections legitimately move - that is also what proves the corruption
+    # reached the pipeline rather than being written to a file nobody read.
+    #
+    # This covers kernel, bandwidth family, bandwidth, IDW power/neighbours, TPS smoothing,
+    # residual shrinkage and the `auto` model choice. Covariate and local/global role selection
+    # have their own equivalent at "Nested joint covariate selection: screening uses training
+    # stations only", which corrupts validation rows of population-wide matrices the same way.
+    mktempdir() do temp_dir
+        n_station, k, seed, target_fold = 60, 3, 11, 2
+        # Pinned, not left to the default: `target_rows` below only names the target fold's
+        # stations if the partition here is the one the pipeline builds, and a fixture that
+        # silently corrupts another fold's *training* data would pass this test vacuously.
+        center_init = :hilbert
+        ids = string.(7001:(7000 + n_station))
+        lon = [110.0 + 0.15 * mod(i - 1, 10) for i in 1:n_station]
+        lat = [30.0 + 0.15 * div(i - 1, 10) for i in 1:n_station]
+        lonlat = hcat(lon, lat)
+        times = collect(DateTime(2022, 6, 1):Hour(1):DateTime(2022, 6, 1, 7))
+        station_path = joinpath(temp_dir, "stations.csv")
+        CSV.write(station_path, DataFrame(station_id=ids, lon=lon, lat=lat))
+
+        obs = Matrix{Float64}(undef, n_station, length(times))
+        for station in 1:n_station, time in eachindex(times)
+            obs[station, time] = max(
+                0.0, 0.5 + 0.03 * station + 0.3 * sin(time / 2) + 0.04 * mod(station * time, 3))
+        end
+        sat = max.(obs .+ 0.3 .+ 0.02 .* reshape(1:n_station, :, 1), 0.0)
+
+        folds = benchmark_folds(:balanced_spatial, ids, lonlat; k=k, seed=seed, center_init)
+        position = Dict(id => index for (index, id) in enumerate(ids))
+        target_rows = [position[id] for id in folds[target_fold]]
+        @test !isempty(target_rows)
+
+        function run_with(label::String, observations::Matrix{Float64})
+            obs_path = joinpath(temp_dir, "obs_$(label).csv")
+            sat_path = joinpath(temp_dir, "fy4b_$(label).csv")
+            _write_benchmark_wide(obs_path, times, ids, observations)
+            _write_benchmark_wide(sat_path, times, ids, sat)
+            cfg = InterpolationBenchmarkConfig(
+                mger=MGERConfig(
+                    station_meta_path=station_path, obs_hourly_wide_path=obs_path,
+                    sat_paths=Dict("FY4B" => sat_path),
+                    outdir=joinpath(temp_dir, "run_$(label)"),
+                    kernels=[GAUSSIAN, BISQUARE],
+                    bw_adaptive=[8.0, 16.0], bw_fixed_km=[20.0, 100.0],
+                    expected_common_time_count=length(times),
+                ),
+                k=k, seed=seed, fold_center_init=center_init, cv_schemes=[:balanced_spatial],
+                idw_powers=[1.5, 2.0], neighbor_candidates=Union{Nothing,Int}[8, 16],
+                tps_smooth_candidates=[0.01, 0.1], min_tuning_coverage=0.8, bootstrap_reps=0,
+            )
+            return run_interpolation_benchmark(cfg)
+        end
+
+        clean = run_with("clean", obs)
+        corrupted_obs = copy(obs)
+        corrupted_obs[target_rows, :] .= 9_999.0
+        corrupted = run_with("corrupted", corrupted_obs)
+
+        key = [:scheme, :product, :fold, :mode, :method, :group]
+        tuned = [:kernel, :adaptive, :bw, :power, :smooth, :shrink]
+        picks(scans) = select(
+            filter(row -> row.selected && row.fold == target_fold, scans), key..., tuned...,
+        )
+        clean_picks = picks(clean.scans)
+        @test nrow(clean_picks) > 0
+        joined = innerjoin(clean_picks, picks(corrupted.scans), on=key, makeunique=true)
+        @test nrow(joined) == nrow(clean_picks)
+        for column in tuned
+            @test all(isequal.(joined[!, column], joined[!, Symbol(column, :_1)]))
+        end
+
+        # `auto` is a selection step too, and its input is the inner split alone.
+        auto_pick(result) = only(filter(
+            row -> row.fold == target_fold, result.auto_selection,
+        ).chosen)
+        @test auto_pick(clean) == auto_pick(corrupted)
+
+        # Sentinel: the corruption really did reach the run. The held-out fold's own score has to
+        # move (its observations changed), and the other folds - for which those stations are
+        # training data - are free to select differently.
+        fold_rmse(result) = only(filter(row ->
+            row.fold === target_fold && row.group == "overall" && row.level == "all" &&
+            row.method == "adw", result.metrics,
+        ).RMSE)
+        @test !isapprox(fold_rmse(clean), fold_rmse(corrupted))
     end
 end

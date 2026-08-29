@@ -1,8 +1,7 @@
-using Test, CSV, DataFrames, Random
+using Test, CSV, DataFrames, LinearAlgebra, Random
 
-if !isdefined(Main, :JointCovariateModels)
-    include(joinpath(@__DIR__, "..", "src", "JointCovariateModels.jl"))
-end
+include(joinpath(@__DIR__, "..", "src", "load_modules.jl"))
+load_standalone_modules("JointCovariateModels")
 const JCM = Main.JointCovariateModels
 
 function joint_model_fixture(; seed=91)
@@ -72,15 +71,16 @@ end
     @test !(context.predictor_train["u10"][:, :, 1] ≈
         context.predictor_train["u10"][:, :, 2])
 
+    bisquare = JCM.DEMTerrainExperiment._bisquare_kernel
     residuals = fixture.Yobs[fixture.train, :] .- fixture.Ysat[fixture.train, :]
     prediction, converged = JCM.dynamic_covariate_predict(
-        context, residuals, "residual_gwr", [15],
+        context, residuals, "residual_gwr", [15.0], bisquare,
     )
     @test size(prediction) == (length(fixture.target), size(fixture.Yobs, 2))
     @test all(converged)
     @test all(isfinite, prediction)
     mgwr_prediction, mgwr_converged = JCM.dynamic_covariate_predict(
-        context, residuals, "mgwr", fill(20, 2),
+        context, residuals, "mgwr", fill(20.0, 2), bisquare,
     )
     @test count(mgwr_converged) >= 4
     @test count(isfinite, mgwr_prediction) >= 4length(fixture.target)
@@ -100,6 +100,7 @@ function regrouped_context(fixture, grouping::Symbol)
 end
 
 @testset "mgwr spatial grouping controls only the spatial block" begin
+    bisquare = JCM.DEMTerrainExperiment._bisquare_kernel
     fixture = joint_model_fixture()
     residuals = fixture.Yobs[fixture.train, :] .- fixture.Ysat[fixture.train, :]
     expected = Dict(
@@ -113,7 +114,7 @@ end
         # The covariate always keeps its own group, which is what makes the model multiscale.
         @test last(names) == "u10"
         prediction, converged = JCM.dynamic_covariate_predict(
-            context, residuals, "mgwr", fill(20, length(names)),
+            context, residuals, "mgwr", fill(20.0, length(names)), bisquare,
         )
         @test size(prediction) == (length(fixture.target), size(fixture.Yobs, 2))
         @test all(converged)
@@ -131,6 +132,7 @@ end
 end
 
 @testset "back-fitting rejects a bandwidth vector of the wrong length" begin
+    bisquare = JCM.DEMTerrainExperiment._bisquare_kernel
     fixture = joint_model_fixture()
     n = length(fixture.train)
     lonlat = fixture.lonlat[fixture.train, :]
@@ -141,11 +143,11 @@ end
     # producing a wrong fit rather than an error.
     @test_throws DimensionMismatch JCM._multiscale_predict_damped(
         groups, empty_global, response, lonlat, groups, empty_global, lonlat,
-        [10, 10, 10], fixture.cfg,
+        [10.0, 10.0, 10.0], bisquare, fixture.cfg,
     )
     prediction, ok = JCM._multiscale_predict_damped(
         groups, empty_global, response, lonlat, groups, empty_global, lonlat,
-        [10, 10], fixture.cfg,
+        [10.0, 10.0], bisquare, fixture.cfg,
     )
     @test only(ok)
     @test all(isfinite, prediction)
@@ -177,8 +179,13 @@ end
         "GPM", fixture.roles, fixture.train, fixture.target, fixture.lonlat,
         fixture.Yobs, fixture.Ysat, fixture.terrain, fixture.era5, nothing, tight,
     )
-    slow, slow_ok = JCM.dynamic_covariate_predict(context, residuals, "mgwr", fill(20, 4))
-    fast, fast_ok = JCM.dynamic_covariate_predict(tight_context, residuals, "mgwr", fill(20, 4))
+    bisquare = JCM.DEMTerrainExperiment._bisquare_kernel
+    slow, slow_ok = JCM.dynamic_covariate_predict(
+        context, residuals, "mgwr", fill(20.0, 4), bisquare,
+    )
+    fast, fast_ok = JCM.dynamic_covariate_predict(
+        tight_context, residuals, "mgwr", fill(20.0, 4), bisquare,
+    )
     @test all(slow_ok) && all(fast_ok)
     @test slow ≈ fast atol = 1e-4
 end
@@ -206,7 +213,7 @@ end
     )
     residuals = fixture.Yobs[fixture.train, :] .- fixture.Ysat[fixture.train, :]
     prediction, _ = JCM.dynamic_covariate_predict(
-        missing_context, residuals, "mixed_gwr", [15],
+        missing_context, residuals, "mixed_gwr", [15.0], JCM.DEMTerrainExperiment._bisquare_kernel,
     )
     @test isnan(prediction[1, 1])
 end
@@ -219,4 +226,21 @@ end
     changed = copy(y); changed[7] += 1.0e6
     second_prediction = JCM._global_predict(X, changed, X, 1e-8; leave_one_out=true)
     @test first_prediction[7] ≈ second_prediction[7]
+end
+
+@testset "local weighted solve returns the ridge WLS coefficients" begin
+    rng = MersenneTwister(37)
+    n, m, ridge = 20, 4, 1e-8
+    Xtrain = hcat(ones(n), randn(rng, n), randn(rng, n))
+    Xtarget = hcat(ones(m), randn(rng, m), randn(rng, m))
+    y = randn(rng, n)
+    # Every weight is positive, so each target selects the whole training set and the
+    # prediction must reproduce the closed-form weighted ridge solution exactly.
+    weights = rand(rng, m, n) .+ 0.5
+    prediction = JCM._local_predict(Xtrain, y, Xtarget, weights, ridge)
+    for target in 1:m
+        w = weights[target, :]
+        beta = (Xtrain' * (w .* Xtrain) + ridge * I) \ (Xtrain' * (w .* y))
+        @test prediction[target] ≈ dot(Xtarget[target, :], beta)
+    end
 end

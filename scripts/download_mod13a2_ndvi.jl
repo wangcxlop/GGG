@@ -1,9 +1,10 @@
 #!/usr/bin/env julia
 
 const ROOT = normpath(joinpath(@__DIR__, ".."))
-include(joinpath(ROOT, "src", "AppEEARSNDVI.jl"))
+include(joinpath(ROOT, "src", "load_modules.jl"))
+load_standalone_modules("AppEEARSNDVI")
 
-using .AppEEARSNDVI
+using Main.AppEEARSNDVI
 
 function usage()
     println("""

@@ -1,16 +1,23 @@
 #!/usr/bin/env julia
 
 const ROOT = normpath(joinpath(@__DIR__, ".."))
-pushfirst!(LOAD_PATH, joinpath(ROOT, "src"))
 
 using MixedGWR
 using DataFrames, Dates
 
-include(joinpath(ROOT, "src", "InterpolationBenchmark.jl"))
+include(joinpath(ROOT, "src", "load_modules.jl"))
+load_pipeline("InterpolationBenchmark")
 
 const STUDY_DATA = joinpath(ROOT, "data", "processed", "study_area")
 
-"""Deterministic seed list for repeated cross-validation, so the sweep itself is reproducible."""
+"""
+Seed list for repeated cross-validation: one repeat per entry.
+
+These no longer choose the fold partitions. Under the default `:hilbert` initialisation repeat `i`
+uses rotation `i-1` of the Hilbert frame, so the partitions are seed-free and `length(seeds)` is
+just the repeat count. The seeds still drive the genuinely stochastic steps inside each repeat -
+paired bootstrap, DEM permutation tests, joint variable selection - and the `:random` CV scheme.
+"""
 repeat_seeds(repeats::Int) = repeats <= 1 ? Int[] : [20260627 + 1000 * i for i in 0:(repeats - 1)]
 
 function benchmark_config(
@@ -43,6 +50,40 @@ function benchmark_config(
             (repeats > 1 ? "_repeats$(repeats)" : ""),
     )
     mkpath(outdir)
+    # One adaptive grid for the whole GWR family - direct `gwr`, `hurdle_gwr`, residual `gwr`,
+    # `mixed_gwr` and `mgwr` all search it, so a comparison between them is at equal search
+    # budget. It used to be two: `mger.bw_adaptive` topped out at 120 while the joint models'
+    # grid reached 160, which direct `gwr` could never select.
+    #
+    # The floor matters most. The canonical grid starts at 30 nearest neighbours (~37 km with
+    # 237 Hubei stations) while IDW/ADW may use 8 (~18 km), and 72% of all selected bandwidths
+    # landed on a grid endpoint with the CV curve still running into it - the grid, not the
+    # data, was picking the bandwidth (`output/benchmark_diagnostics/*/bandwidth_saturation.csv`).
+    # `--local-grid` drops the GWR floor to IDW/ADW's locality so the two compare at equal
+    # bandwidth.
+    #
+    # 160 is gone from the ceiling. Its only real job was "effectively global": it exceeded the
+    # inner selection split's training size, so `gw_weight` fell through its `dn > 1` branch to
+    # a near-uniform fit during scoring and then refitted as the 160th-nearest-of-~190 at
+    # prediction time - the same `bw` naming two different models.
+    # `InterpolationBenchmarkConfig.bw_include_global` now offers global as an explicit
+    # candidate instead, and the 120 ceiling stays below the inner training size so the
+    # fallthrough branch is never reached.
+    #
+    # The floor is now frozen, and the reason is a result rather than a budget. The
+    # `--local-grid` full nested run (2026-08-26) dropped the floor to 8 neighbours / 5 km and
+    # the saturation did not resolve - it relocated: 92/171 GWR-family selections sit on the new
+    # floor, every one of them at `at_grid_min`, with `bw=8` chosen 42 times and `bw=5` 50 times
+    # (`output/benchmark_diagnostics/*_localgrid_*/bandwidth_saturation.csv`). Nor is the curve
+    # flat there - the floor beats the next-widest candidate by a median 0.56% relative RMSE.
+    # The inner CV simply keeps preferring more local, so a lower floor would be selected again.
+    # We stop here because below this the fit stops being identifiable, not because the search
+    # ran out of room: 8 neighbours has to support up to 4 covariates plus an intercept, and
+    # 5 km is already well under Hubei's ~28 km mean station spacing. Read a floor-pinned
+    # selection as "this cell wants an interpolator, not a regression", which is what the
+    # GWR-family-versus-adw gap says too.
+    bw_adaptive = local_grid ? [8.0, 12.0, 16.0, 20.0, 30.0, 50.0, 80.0, 120.0] :
+        (smoke ? [30.0, 80.0] : [30.0, 50.0, 80.0, 120.0])
     mger = MGERConfig(
         station_meta_path=joinpath(STUDY_DATA, "station_meta.csv"),
         obs_hourly_wide_path=joinpath(STUDY_DATA, "hubei_obs_hourly_2022_2025_JunSep.csv"),
@@ -66,13 +107,7 @@ function benchmark_config(
         outdir=outdir,
         kernels=smoke ? [GAUSSIAN, BISQUARE] :
             [GAUSSIAN, EXPONENTIAL, BISQUARE, TRICUBE, BOXCAR],
-        # The canonical grids start at 30 nearest neighbours (~37 km with 237 Hubei stations),
-        # while IDW/ADW may use 8 (~18 km) - and both families select their grid minimum in
-        # nearly every fold, so the floor, not the data, is picking the bandwidth. `--local-grid`
-        # extends the GWR floor down to IDW/ADW's locality so the two can be compared at equal
-        # bandwidth; see `output/benchmark_diagnostics/bandwidth_saturation.csv`.
-        bw_adaptive=local_grid ? [8.0, 12.0, 16.0, 20.0, 30.0, 50.0, 80.0, 120.0] :
-            (smoke ? [30.0, 80.0] : [30.0, 50.0, 80.0, 120.0]),
+        bw_adaptive=bw_adaptive,
         bw_fixed_km=local_grid ? [5.0, 10.0, 20.0, 30.0, 50.0] :
             (smoke ? [30.0, 50.0] : [10.0, 20.0, 30.0, 50.0]),
         rain_threshold=0.1,
@@ -119,8 +154,9 @@ function benchmark_config(
             ROOT, "data", "processed", "covariates",
             "station_ndvi_16day_2022_2024.csv",
         ),
-        bandwidth_candidates=local_grid ? [8, 12, 16, 20, 30, 50, 80, 120, 160] :
-            [30, 50, 80, 120, 160],
+        # Same grid as `mger.bw_adaptive` above: the joint models are part of the GWR family and
+        # are compared against the rest of it, so they must not search a wider one.
+        bandwidth_candidates=Int.(bw_adaptive),
         feature_time_offset_hours=9,
         max_ndvi_age_days=32,
         wet_threshold=0.1,
@@ -161,6 +197,10 @@ function benchmark_config(
         dem=dem,
         joint_covariates=joint,
         joint_selection=joint_selection,
+        # The joint path without nested selection reads a full-data spec, which the config
+        # validator refuses unless the run admits it is exploratory. --no-nested-covariates is
+        # exactly that admission, so it is the only way this turns on.
+        exploratory_only=!legacy_dem && !nested_covariates,
         k=5,
         seed=20260627,
         seeds=repeat_seeds(repeats),
@@ -214,15 +254,19 @@ function main(args=ARGS)
     mode = isempty(args) ? :smoke : Symbol(lowercase(args[1]))
     with_random = "--with-random" in args
     legacy_dem = "--legacy-dem" in args
-    # :full defaults to the leak-free nested per-fold covariate selection (closes the
+    # Both modes default to the leak-free nested per-fold covariate selection (closes the
     # full-data-reused-across-every-fold leak); --no-nested-covariates reproduces the old
     # fixed full-data comparison path, and --legacy-dem never defaults into nested selection.
+    #
+    # :smoke used to default the other way, which meant the cheap path everyone actually runs
+    # exercised different selection code from the one that produces results. It now runs the
+    # same path, so a smoke run is a real rehearsal.
     nested_covariates = if "--nested-covariates" in args
         true
     elseif "--no-nested-covariates" in args
         false
     else
-        mode == :full && !legacy_dem
+        !legacy_dem
     end
     repeats = parse_repeats(args)
     local_grid = "--local-grid" in args

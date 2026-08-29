@@ -6,10 +6,15 @@ Everything here works off the artefacts an existing benchmark run already wrote
 so a diagnosis costs no benchmark re-run.
 
 The scoring helper `_metrics` is a deliberate independent reimplementation of
-`MGERPipeline.metric_continuous` rather than a call into it: reproducing `metrics_pooled.csv`
+`MixedGWR.metric_continuous` rather than a call into it: reproducing `metrics_pooled.csv`
 from these matrices is the correctness check for the whole reading path, and sharing the
-scoring code would make that check vacuous. (`MGERPipeline.jl` is also a top-level script,
-not a module, so a standalone module cannot import from it anyway.)
+scoring code would make that check vacuous.
+
+That is now the only reason. `metric_continuous` used to live in `MGERPipeline.jl`, a top-level
+script a module could not import from at all; it has since moved into `MixedGWR`, so the
+duplication here is a choice rather than a constraint. The two also differ at the edges -
+`_metrics` returns a NaN row for an empty sample where `metric_continuous` asserts, and adds
+`MSE`/`variance` - so they are not interchangeable as written.
 """
 module BenchmarkDiagnostics
 
@@ -20,6 +25,7 @@ export null_baseline_matrices, satellite_rescale_matrix
 export null_baseline_table, satellite_offset_table, mse_decomposition_table
 export bandwidth_saturation_table, covariate_contribution_table
 export rebuild_common_mask, dropout_table, mask_cost_table, run_comparison_table
+export benchmark_diagnostics_outdir
 export RAIN_CLASSES, MASK_METHODS
 
 """Rain-intensity strata, mirroring `InterpolationBenchmark.append_stratified_metrics!`."""
@@ -39,6 +45,22 @@ const MASK_METHODS = [
 ]
 
 # ---------------------------------------------------------------------------- reading
+
+"""
+Where a diagnosis of `run_dir` is written: `output/benchmark_diagnostics/<run name>`.
+
+Each diagnostic run gets its own subdirectory named for the benchmark run it read, so diagnosing a
+second run never overwrites the first one's numbers. Repeated verbatim in
+`run_benchmark_diagnostics.jl`, `run_mgwr_diagnostics.jl` and `run_claim_reassessment.jl`, which
+also each checked `run_dir` exists first - done here so the error is worded once.
+"""
+function benchmark_diagnostics_outdir(root::AbstractString, run_dir::AbstractString)
+    isdir(run_dir) || error("benchmark output directory not found: $run_dir")
+    outdir = joinpath(root, "output", "benchmark_diagnostics", basename(run_dir))
+    mkpath(outdir)
+    return outdir
+end
+
 
 """Read a wide `time × station` benchmark CSV into a `station × time` matrix ordered by `ids`."""
 function read_wide_matrix(path::AbstractString, ids::Vector{String})
@@ -537,7 +559,10 @@ function bandwidth_saturation_table(scan::DataFrame)
     rows = NamedTuple[]
     keys_of_interest = [:scheme, :product, :fold, :mode, :method, :group, :kernel, :adaptive]
     for subgroup in groupby(unique(scan), keys_of_interest)
-        candidates = filter(row -> row.status == "success" && isfinite(row.bw), subgroup)
+        # `!isnan` rather than `isfinite`: the filter's job is excluding the `NaN` bw of the
+        # idw/adw/tps rows, and the GWR family's explicit global candidate is `bw = Inf`, which
+        # sorts last and so still reads as "chose the widest candidate offered".
+        candidates = filter(row -> row.status == "success" && !isnan(row.bw), subgroup)
         nrow(candidates) < 2 && continue
         selected = filter(row -> row.selected === true, candidates)
         nrow(selected) == 1 || continue
@@ -554,6 +579,12 @@ function bandwidth_saturation_table(scan::DataFrame)
         # Monotone toward the chosen endpoint means the search was clipped, not resolved.
         increasing = all(diff(errors) .> 0)
         decreasing = all(diff(errors) .< 0)
+        # Landing on the widest candidate only counts as clipping if a wider one could exist.
+        # The GWR family's top candidate is the explicit global fit (`bw = Inf`), which is the
+        # end of the bandwidth continuum, not the end of an arbitrary grid - selecting it is a
+        # resolved answer ("this coefficient wants to be global"), so it must not be reported
+        # as a grid that needs extending.
+        extensible_max = isfinite(last(widths))
         push!(rows, (;
             scheme=subgroup[1, :scheme], product=subgroup[1, :product],
             fold=subgroup[1, :fold], mode=subgroup[1, :mode],
@@ -562,7 +593,7 @@ function bandwidth_saturation_table(scan::DataFrame)
             n_candidates=nrow(candidates), bw_min=first(widths), bw_max=last(widths),
             bw_selected=chosen, at_grid_min=at_min, at_grid_max=at_max,
             monotone_increasing=increasing, monotone_decreasing=decreasing,
-            clipped_by_grid=(at_min && increasing) || (at_max && decreasing),
+            clipped_by_grid=(at_min && increasing) || (at_max && decreasing && extensible_max),
             RMSE_selected=selected.RMSE[1],
             RMSE_at_min=first(errors), RMSE_at_max=last(errors),
         ))

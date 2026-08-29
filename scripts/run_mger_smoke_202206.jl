@@ -1,12 +1,12 @@
 #!/usr/bin/env julia
 
 const ROOT = normpath(joinpath(@__DIR__, ".."))
-pushfirst!(LOAD_PATH, joinpath(ROOT, "src"))
 
 using MixedGWR
 using Dates
 
-include(joinpath(ROOT, "src", "MGERPipeline.jl"))
+include(joinpath(ROOT, "src", "load_modules.jl"))
+load_pipeline("MGERPipeline")
 
 const STUDY_DATA = joinpath(ROOT, "data", "processed", "study_area")
 

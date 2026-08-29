@@ -29,7 +29,7 @@ include(joinpath(ROOT, "scripts", "run_interpolation_benchmark.jl"))
 using CSV, DataFrames, Statistics
 
 const OUTDIR = joinpath(ROOT, "output", "tuning_weighting_verification")
-const METHODS = ["gwr", "gwr_const"]
+const METHODS = ["gwr"]
 
 """Every (kernel, adaptive, bw) triple the benchmark's selector would scan, in scan order."""
 function candidate_grid(mger)
@@ -44,7 +44,16 @@ function candidate_grid(mger)
     return grid
 end
 
-"""Pick the scan row the benchmark would select: lowest RMSE, MAE breaking ties."""
+"""
+Pick the scan row the benchmark would select: lowest RMSE, MAE breaking ties.
+
+NOT an exact mirror of the real selector. `_select_candidate!`
+(src/InterpolationBenchmarkTuning.jl) sorts by `(RMSE, MAE, -coverage)` and only considers rows
+with `status == "success"`; this sorts by `(RMSE, MAE)` alone. On an exact RMSE-and-MAE tie the
+two can choose different candidates, so this script can report a regret that the benchmark would
+not actually incur. Left alone here because changing it changes what this verification reports,
+which is a decision about the verification rather than about the refactor.
+"""
 function argmin_candidate(rmse::Vector{Float64}, mae::Vector{Float64}, coverage::Vector{Float64},
     min_coverage::Float64)
     valid = [i for i in eachindex(rmse) if isfinite(rmse[i]) && coverage[i] >= min_coverage]
@@ -57,7 +66,6 @@ function evaluate_cell(cfg, lonlat, data, train_idx, method::String, grid)
     y_obs = Matrix{Float64}(data.Y_obs[train_idx, :])
     y_sat = Matrix{Float64}(data.Y_sat[train_idx, :])
     residuals = y_obs .- y_sat
-    predictor = method == "gwr" ? _gwr_predict : _gwr_const_predict
 
     legacy_idx, _ = _tuning_time_sample(y_obs, cfg.tuning_max_times, :uniform)
     fixed_idx, fixed_weights = _tuning_time_sample(y_obs, cfg.tuning_max_times, :stratified)
@@ -66,7 +74,7 @@ function evaluate_cell(cfg, lonlat, data, train_idx, method::String, grid)
         for name in ("truth", "legacy", "fixed"))
     for candidate in grid
         interpolated = try
-            predictor(train_lonlat, residuals, train_lonlat;
+            _gwr_predict(train_lonlat, residuals, train_lonlat;
                 kernel=candidate.kernel, adaptive=candidate.adaptive, bw=candidate.bw,
                 exclude_self=true)
         catch
@@ -254,15 +262,20 @@ function verify_joint(cells=JOINT_CELLS)
             :stratified)
 
         for bandwidth in candidates
+            # This script predates kernel selection; it keeps the historical bisquare-only
+            # behaviour explicitly, since it is measuring the tuning-time-weighting objective,
+            # not the kernel sweep.
+            bandwidth_f = Float64(bandwidth)
+            kernel_fn = _kernel_function(BISQUARE)
             # The reported metric: held-out stations, every hour.
-            held_out, _ = dynamic_covariate_predict(context, residuals, method, [bandwidth])
+            held_out, _ = dynamic_covariate_predict(context, residuals, method, [bandwidth_f], kernel_fn)
             reported = _candidate_metrics(y_obs_val, y_sat_val,
                 max.(y_sat_val .+ held_out, 0.0))
             # What each tuning objective sees.
             legacy = _joint_candidate_metrics(context, residuals, y_obs_train, y_sat_train,
-                method, [bandwidth], legacy_idx)
+                method, [bandwidth_f], kernel_fn, legacy_idx)
             fixed = _joint_candidate_metrics(context, residuals, y_obs_train, y_sat_train,
-                method, [bandwidth], fixed_idx, fixed_weights)
+                method, [bandwidth_f], kernel_fn, fixed_idx, fixed_weights)
             push!(rows, (; product, fold, method, bandwidth,
                 n_covariates=length(role_map),
                 rmse_reported=reported.RMSE, coverage_reported=reported.coverage,

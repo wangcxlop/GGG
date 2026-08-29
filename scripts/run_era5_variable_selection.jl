@@ -1,14 +1,14 @@
 #!/usr/bin/env julia
 
 const ROOT = normpath(joinpath(@__DIR__, ".."))
-pushfirst!(LOAD_PATH, joinpath(ROOT, "src"))
 
 using MixedGWR
 using CSV, DataFrames, Dates
 
-include(joinpath(ROOT, "src", "MGERPipeline.jl"))
-include(joinpath(ROOT, "src", "ERA5VariableSelection.jl"))
-using .ERA5VariableSelection
+include(joinpath(ROOT, "src", "load_modules.jl"))
+load_pipeline("MGERPipeline")
+load_standalone_modules("ERA5VariableSelection")
+using Main.ERA5VariableSelection
 
 const STUDY_DATA = joinpath(ROOT, "data", "processed", "study_area")
 const ERA5_DATA = joinpath(ROOT, "data", "processed", "covariates", "era5_land")

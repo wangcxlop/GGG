@@ -1,9 +1,10 @@
 #!/usr/bin/env julia
 
 const ROOT = normpath(joinpath(@__DIR__, ".."))
-include(joinpath(ROOT, "src", "FY4BPreprocessing.jl"))
+include(joinpath(ROOT, "src", "load_modules.jl"))
+load_standalone_modules("FY4BPreprocessing")
 
-using .FY4BPreprocessing
+using Main.FY4BPreprocessing
 
 const SPECS = [
     (

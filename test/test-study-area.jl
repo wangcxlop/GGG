@@ -1,8 +1,9 @@
 using Test
 using CSV, DataFrames
 
-include(joinpath(@__DIR__, "..", "src", "StudyArea.jl"))
-using .StudyArea
+include(joinpath(@__DIR__, "..", "src", "load_modules.jl"))
+load_standalone_modules("StudyArea")
+using Main.StudyArea
 
 function write_study_wide(path, station_ids)
     table = DataFrame(time=["2022-06-01T09:00:00Z", "2022-06-01T10:00:00Z"])

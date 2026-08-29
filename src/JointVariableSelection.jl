@@ -7,12 +7,14 @@ using LinearAlgebra
 using Random
 using Statistics
 
-include(joinpath(@__DIR__, "DEMTerrainExperiment.jl"))
-include(joinpath(@__DIR__, "ERA5VariableSelection.jl"))
-include(joinpath(@__DIR__, "NDVIVariableSelection.jl"))
-using .DEMTerrainExperiment
-using .ERA5VariableSelection
-using .NDVIVariableSelection
+# Shared bookkeeping for every variable-selection path; see src/SelectionScaffolding.jl.
+using Main.SelectionScaffolding
+
+# All three are loaded through src/load_modules.jl before this file, so each is shared
+# rather than recompiled into this module. See src/load_modules.jl.
+using Main.DEMTerrainExperiment
+using Main.ERA5VariableSelection
+using Main.NDVIVariableSelection
 
 export JointSelectionConfig, JOINT_GROUP_ORDER, prepare_joint_panel, joint_vif
 export joint_spatial_variability_test, run_joint_variable_selection, select_joint_covariates
@@ -434,11 +436,24 @@ function _panel_stats(panel, groups::Vector{String}, lonlat::Matrix{Float64}, cf
     return (; A, b, rows, ys, row_weights, coords, p, group_indices, eligible)
 end
 
-function _coefficients(stats, distances, neighbors, cfg; order=collect(eachindex(stats.A)))
+function _coefficients(stats, distances, neighbors, cfg;
+    order=collect(eachindex(stats.A)), weight_rows=nothing)
     n = length(stats.A); result = fill(NaN, n, stats.p)
+    # Weights are a function of the geometry and bandwidth alone - `order` reorders which
+    # sufficient statistic each spatial slot contributes, never the weight on that slot - so a
+    # permutation test builds them once and hands them in. See
+    # `ERA5VariableSelection._local_weight_rows`.
+    rows = weight_rows === nothing ?
+        ERA5VariableSelection._local_weight_rows(distances, neighbors, n) : weight_rows
+    lhs = Matrix{Float64}(undef, stats.p, stats.p); rhs = Vector{Float64}(undef, stats.p)
     for target in 1:n
-        spatial_weights = ERA5VariableSelection._adaptive_weights(view(distances, target, :), neighbors)
-        lhs = cfg.ridge .* Matrix{Float64}(I, stats.p, stats.p); rhs = zeros(stats.p)
+        spatial_weights = rows[target]
+        # Refilled to exactly what `cfg.ridge .* Matrix{Float64}(I, p, p)` / `zeros(p)` produced,
+        # rather than reallocated per target.
+        fill!(lhs, 0.0); fill!(rhs, 0.0)
+        for i in 1:stats.p
+            lhs[i, i] = cfg.ridge
+        end
         for spatial_index in 1:n
             source = order[spatial_index]
             lhs .+= spatial_weights[spatial_index] .* stats.A[source]
@@ -501,17 +516,29 @@ function joint_spatial_variability_test(
         return (; scan, result, bandwidth=missing)
     end
     bandwidth = available.neighbors[argmin(available.loocv_rmse)]
-    coefficients = _coefficients(stats, distances, bandwidth, cfg)
+    weight_rows = ERA5VariableSelection._local_weight_rows(
+        distances, bandwidth, length(stats.A))
+    coefficients = _coefficients(stats, distances, bandwidth, cfg; weight_rows)
     observed = [sum(var(coefficients[:, index]) for index in stats.group_indices[group]) for group in groups]
-    exceed = zeros(Int, length(groups))
-    for _ in 1:cfg.spatial_permutations
-        order = station_block_permutation(length(stats.A), rng)
-        permuted = _coefficients(stats, distances, bandwidth, cfg; order)
+    # Drawn up front, from the same `rng` in the same order, so `orders[i]` is exactly what
+    # iteration `i` drew for itself; the bodies are then independent and each is a full
+    # O(n^2 p^2) coefficient-surface rebuild. `hits` is one row per permutation, reduced
+    # afterwards - summing booleans is exact and order-free, so `exceed` is unchanged.
+    orders = [station_block_permutation(length(stats.A), rng)
+        for _ in 1:cfg.spatial_permutations]
+    # `Matrix{Bool}`, not a `BitMatrix`: a BitArray packs 64 entries into one word, so two threads
+    # writing different rows of the same column would read-modify-write the same word and lose
+    # updates. One byte per entry makes the concurrent writes independent.
+    hits = fill(false, cfg.spatial_permutations, length(groups))
+    Threads.@threads :greedy for permutation_index in 1:cfg.spatial_permutations
+        permuted = _coefficients(stats, distances, bandwidth, cfg;
+            order=orders[permutation_index], weight_rows)
         for (group_index, group) in enumerate(groups)
             value = sum(var(permuted[:, index]) for index in stats.group_indices[group])
-            exceed[group_index] += isfinite(value) && value >= observed[group_index]
+            hits[permutation_index, group_index] = isfinite(value) && value >= observed[group_index]
         end
     end
+    exceed = vec(sum(hits, dims=1))
     pvalues = (exceed .+ 1) ./ (cfg.spatial_permutations + 1)
     qvalues = DEMTerrainExperiment.bh_adjust(pvalues)
     for (index, group) in enumerate(groups)
@@ -577,22 +604,6 @@ function select_joint_covariates(
     )
 end
 
-function _annotate!(table::DataFrame, product::String, scheme::String, fold::Int)
-    insertcols!(table, 1, :product => fill(product, nrow(table)),
-        :scheme => fill(scheme, nrow(table)), :fold => fill(fold, nrow(table)))
-    return table
-end
-
-function _append!(target::DataFrame, source::DataFrame)
-    if ncol(target) == 0
-        for column in propertynames(source)
-            target[!, column] = similar(source[!, column], 0)
-        end
-    end
-    nrow(source) > 0 && append!(target, source; cols=:union)
-    return target
-end
-
 function run_joint_variable_selection(
     cfg::JointSelectionConfig, products::Vector{String}, station_ids::Vector{String},
     times::Vector{DateTime}, Yobs::Matrix{Float64}, satellite::AbstractDict,
@@ -629,8 +640,7 @@ function run_joint_variable_selection(
         independent_selected=Bool[], independent_qvalue=Float64[], joint_vif_retained=Bool[],
         role=String[], final_included=Bool[], exclusion_reason=String[],
     )
-    schemes = [("full_data", 0, collect(1:n))]
-    append!(schemes, [("spatial_cv", fold, findall(!=(fold), folds)) for fold in 1:cfg.k])
+    schemes = selection_schemes(n, folds, cfg.k)
     for (product_index, product) in enumerate(products)
         Ysat = Float64.(satellite[product])
         for (scheme, fold, train_indices) in schemes
@@ -642,10 +652,10 @@ function run_joint_variable_selection(
                 train_indices, station_ids, times, lonlat, cfg, run_seed, dem_seed,
             )
             candidates = selection.candidates
-            _annotate!(candidates, product, scheme, fold); _append!(candidate_all, candidates)
+            annotate_selection!(candidates, product, scheme, fold); append_selection!(candidate_all, candidates)
             if isempty(selection.active)
                 qc = selection.qc
-                _annotate!(qc, product, scheme, fold); _append!(qc_all, qc)
+                annotate_selection!(qc, product, scheme, fold); append_selection!(qc_all, qc)
                 push!(status_all, (product=product, scheme=scheme, fold=fold,
                     status="ok", reason="no_independent_candidates"))
                 for row in eachrow(candidates)
@@ -662,18 +672,18 @@ function run_joint_variable_selection(
                 end
                 continue
             end
-            qc = copy(selection.qc); _annotate!(qc, product, scheme, fold); _append!(qc_all, qc)
+            qc = copy(selection.qc); annotate_selection!(qc, product, scheme, fold); append_selection!(qc_all, qc)
             scales = copy(selection.scales)
-            _annotate!(scales, product, scheme, fold); _append!(scale_all, scales)
+            annotate_selection!(scales, product, scheme, fold); append_selection!(scale_all, scales)
             weight_audit = copy(selection.weight_audit)
             weight_audit.station_id = station_ids[weight_audit.global_station_index]
-            _annotate!(weight_audit, product, scheme, fold); _append!(weight_all, weight_audit)
+            annotate_selection!(weight_audit, product, scheme, fold); append_selection!(weight_all, weight_audit)
             vif = selection.vif; retained = selection.retained
-            _annotate!(vif, product, scheme, fold); _append!(vif_all, vif)
-            _annotate!(selection.spatial_scan, product, scheme, fold)
-            _append!(bandwidth_all, selection.spatial_scan)
-            _annotate!(selection.spatial_result, product, scheme, fold)
-            _append!(spatial_all, selection.spatial_result)
+            annotate_selection!(vif, product, scheme, fold); append_selection!(vif_all, vif)
+            annotate_selection!(selection.spatial_scan, product, scheme, fold)
+            append_selection!(bandwidth_all, selection.spatial_scan)
+            annotate_selection!(selection.spatial_result, product, scheme, fold)
+            append_selection!(spatial_all, selection.spatial_result)
             role_status_map = Dict(String(row.variable_group) => (role=String(row.role), status=String(row.status))
                 for row in eachrow(selection.spatial_result))
             for row in eachrow(candidates)

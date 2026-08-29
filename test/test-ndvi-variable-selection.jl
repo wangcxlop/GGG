@@ -1,10 +1,9 @@
 using Test
 using CSV, DataFrames, Dates, Random, Statistics
 
-if !isdefined(Main, :NDVIVariableSelection)
-    include(joinpath(@__DIR__, "..", "src", "NDVIVariableSelection.jl"))
-end
-using .NDVIVariableSelection
+include(joinpath(@__DIR__, "..", "src", "load_modules.jl"))
+load_standalone_modules("NDVIVariableSelection")
+using Main.NDVIVariableSelection
 
 function synthetic_ndvi_inputs(n::Int=40, nperiods::Int=12; seed::Int=71)
     rng = MersenneTwister(seed)

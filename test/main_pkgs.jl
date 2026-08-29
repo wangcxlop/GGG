@@ -15,9 +15,15 @@ end
 
 
 # load data
-begin
-  indir = "$(@__DIR__)/.." |> abspath
-  d = fread("$indir/data/prcp_st174_shiyan.csv")
+#
+# `data/` is gitignored, so this fixture is not present in a fresh checkout (nor in CI). The
+# R-comparison testsets that need it are skipped rather than allowed to abort the whole suite -
+# see the `HAS_SHIYAN_DATA` guard in runtests.jl. Restoring the file re-enables them with no
+# other change.
+const SHIYAN_DATA_PATH = abspath(joinpath(@__DIR__, "..", "data", "prcp_st174_shiyan.csv"))
+const HAS_SHIYAN_DATA = isfile(SHIYAN_DATA_PATH)
+if HAS_SHIYAN_DATA
+  d = fread(SHIYAN_DATA_PATH)
 
   coords = Matrix(d[:, [:lon, :lat]])
   points = map(x -> x, eachrow(coords))

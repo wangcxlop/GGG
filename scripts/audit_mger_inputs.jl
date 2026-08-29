@@ -1,9 +1,10 @@
 #!/usr/bin/env julia
 
 const ROOT = normpath(joinpath(@__DIR__, ".."))
-include(joinpath(ROOT, "src", "MGERDataPrep.jl"))
+include(joinpath(ROOT, "src", "load_modules.jl"))
+load_standalone_modules("MGERDataPrep")
 
-using .MGERDataPrep
+using Main.MGERDataPrep
 using Dates
 
 const STUDY_DATA = joinpath(ROOT, "data", "processed", "study_area")

@@ -1,10 +1,9 @@
 using Test
 using Dates
 
-if !isdefined(@__MODULE__, :ERA5LandCovariates)
-    include(joinpath(@__DIR__, "..", "src", "ERA5LandCovariates.jl"))
-end
-using .ERA5LandCovariates
+include(joinpath(@__DIR__, "..", "src", "load_modules.jl"))
+load_standalone_modules("ERA5LandCovariates")
+using Main.ERA5LandCovariates
 
 @testset "ERA5-Land covariate helpers" begin
     @test parse_era5_datetime("2022-01-01T00:00:00.0") == DateTime(2022, 1, 1)

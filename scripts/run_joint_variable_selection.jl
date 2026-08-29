@@ -1,14 +1,15 @@
 #!/usr/bin/env julia
 
 const ROOT = normpath(joinpath(@__DIR__, ".."))
-pushfirst!(LOAD_PATH, joinpath(ROOT, "src"))
 
 using MixedGWR
 using CSV, DataFrames, Dates
 
-include(joinpath(ROOT, "src", "MGERPipeline.jl"))
-include(joinpath(ROOT, "src", "JointVariableSelection.jl"))
-using .JointVariableSelection
+include(joinpath(ROOT, "src", "load_modules.jl"))
+load_pipeline("MGERPipeline")
+load_standalone_modules("JointVariableSelection", "MGERDataPrep")
+using Main.MGERDataPrep
+using Main.JointVariableSelection
 
 const STUDY_DATA = joinpath(ROOT, "data", "processed", "study_area")
 const COVARIATE_DATA = joinpath(ROOT, "data", "processed", "covariates")
@@ -16,14 +17,6 @@ const ERA5_DATA = joinpath(COVARIATE_DATA, "era5_land")
 const NDVI_PATH = joinpath(COVARIATE_DATA, "station_ndvi_16day_2022_2024.csv")
 const TERRAIN_PATH = joinpath(COVARIATE_DATA, "station_terrain.csv")
 
-function aligned_terrain(path::String, ids::Vector{String})
-    terrain = CSV.read(path, DataFrame; types=Dict(:station_id => String))
-    allunique(terrain.station_id) || error("Duplicate station IDs in terrain table")
-    row_by_id = Dict(id => row for (row, id) in enumerate(terrain.station_id))
-    missing_ids = filter(id -> !haskey(row_by_id, id), ids)
-    isempty(missing_ids) || error("Terrain table is missing $(length(missing_ids)) stations")
-    return terrain[[row_by_id[id] for id in ids], :]
-end
 
 function prerequisite_audit()
     roots = Dict(
@@ -113,7 +106,7 @@ function main(args=ARGS)
     Yobs = Matrix{Float64}(product_data[first(products)].Y_obs)
     satellite = Dict(product => Matrix{Float64}(product_data[product].Y_sat)
         for product in products)
-    terrain = aligned_terrain(TERRAIN_PATH, ids)
+    terrain = align_station_table(TERRAIN_PATH, ids)
     years = sort(unique(year(time - Hour(9)) for time in times))
     annual_paths = Dict(year_value => joinpath(
         ERA5_DATA, "era5_land_station_hourly_utc_$(year_value).csv",
