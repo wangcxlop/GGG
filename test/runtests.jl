@@ -17,7 +17,6 @@ if HAS_SHIYAN_DATA
 
   include("test-solver.jl")
   include("test-ST_GWR.jl")
-  include("test-GWR_mixed.jl")
 else
   @warn "Skipping the R/GWmodel comparison testsets: $SHIYAN_DATA_PATH is missing"
 end

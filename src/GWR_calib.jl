@@ -1,11 +1,5 @@
 export GWR_calib, solver_reg2
 
-function GWR_calib(model::MGWR)
-  (; x1, y, wMat) = model
-  GWR_calib(x1, y, wMat)
-end
-
-
 function GWR_calib(x::Matrix{T}, y::Vector{T}, wMat::AbstractMatrix{T}) where {T<:Real}
   p_local = size(x, 2)
   n_control, n_target = size(wMat)

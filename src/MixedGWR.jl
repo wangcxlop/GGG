@@ -12,14 +12,12 @@ using ProgressMeter
 using LinearAlgebra, Statistics
 using Parameters
 using Base.Threads
-import Base.summary
 # using Polyester: @batch
 
-export MGWR, update_weight!
 export GWR
 export ST_GWR, ST_GWR_fast, ST_GWR_fast!, gwr_neighbors
-export GWR_mixed, GWR_mixed_trace, gwr_q, gw_weight_vec, solver_reg, fitted
-export fitted, fitted!, predict, summary
+export gwr_q, gw_weight_vec, solver_reg, fitted
+export fitted, fitted!
 
 export cor
 export metric_continuous, metric_event, common_valid_mask, complete_time_mask
@@ -27,7 +25,7 @@ export metric_continuous, metric_event, common_valid_mask, complete_time_mask
 Base.Matrix(x::Vector) = reshape(x, length(x), 1)
 
 
-include("MGWR.jl")
+include("fitted.jl")
 include("metrics.jl")
 include("kernel.jl")
 include("gw_weight.jl")
@@ -39,9 +37,6 @@ include("GWR_calib.jl")
 include("deprecated.jl")
 
 include("ST_GWR.jl")
-
-include("GWR_mixed.jl")
-include("GWR_mixed_trace.jl")
 
 get_nthread() = Threads.nthreads(:interactive) + Threads.nthreads(:default)
 

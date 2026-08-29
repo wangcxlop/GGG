@@ -32,12 +32,6 @@ function GWR(X::AbstractMatrix{T}, Y::AbstractVector{T},
   GWR!(β, X, Y, wMat)
 end
 
-function GWR(model::MGWR)
-  (; x1, y, wMat_rp) = model
-  GWR(x1, y, wMat_rp)
-end
-
-
 
 
 

@@ -5,15 +5,6 @@ library(GWmodel)
 """
 
 
-function GWR_mixed_r(x1, x2, y, dMat; kernel=BISQUARE)
-  R"GWmodel:::gwr_mixed_2($x1, $x2, $y, $dMat, $dMat, 20.0, $kernel+1, TRUE)" |> rcopy
-end
-
-function GWR_mixed_trace_r(x1, x2, y, dMat; kernel=BISQUARE)
-  R"GWmodel:::gwr_mixed_trace($x1, $x2, $y, $dMat, 20.0, $kernel+1, TRUE)" |> rcopy
-end
-
-
 # load data
 #
 # `data/` is gitignored, so this fixture is not present in a fresh checkout (nor in CI). The
