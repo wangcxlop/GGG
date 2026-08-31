@@ -218,6 +218,87 @@ end
     @test isnan(prediction[1, 1])
 end
 
+"""Rebuild the fixture's context with a chosen `unsupported_local_target`."""
+function unsupported_context(fixture, unsupported::Symbol)
+    cfg = JCM.JointCovariateBenchmarkConfig(
+        spec_path="unused", terrain_path="unused", era5_paths=Dict{Int,String}(),
+        bandwidth_candidates=[10, 15, 20], max_iterations=200, tolerance=1e-5,
+        unsupported_local_target=unsupported,
+    )
+    return JCM.build_joint_fold_context(
+        "GPM", fixture.roles, fixture.train, fixture.target, fixture.lonlat,
+        fixture.Yobs, fixture.Ysat, fixture.terrain, fixture.era5, nothing, cfg,
+    )
+end
+
+@testset "an unfittable local target is missing, not a zero correction" begin
+    # A target with fewer than `p + 1` positively weighted training stations cannot be fitted
+    # locally. `:zero` (the historical encoding) left `_local_hat`'s all-zero row in place, so
+    # the target contributed exactly 0 and was reported as a successful prediction of "no local
+    # correction" — invisible to every coverage gate the benchmark has. `:missing` marks it NaN.
+    #
+    # Only a compact kernel at a *fixed* bandwidth can reach that branch: an adaptive bandwidth
+    # always keeps `k - 1` stations, and `bw = Inf` gives every kernel weight 1.0. The fixture's
+    # seven targets sit east of the training block, so a fixed 60 km reaches the first three and
+    # not the last four.
+    fixture = joint_model_fixture()
+    bisquare = JCM.DEMTerrainExperiment._bisquare_kernel
+    residuals = fixture.Yobs[fixture.train, :] .- fixture.Ysat[fixture.train, :]
+    zero_context = unsupported_context(fixture, :zero)
+    missing_context = unsupported_context(fixture, :missing)
+    @test zero_context.config.unsupported_local_target === :zero
+    # The benchmark's default has to be the honest one; `:zero` is the opt-in escape hatch.
+    @test fixture.context.config.unsupported_local_target === :missing
+
+    # MGWR, `:intercept_only`: the intercept group is one column, so it needs two supporting
+    # stations. `Inf` on the covariate group keeps it out of the picture.
+    bandwidths = [60.0, Inf]
+    zero_mgwr, zero_ok = JCM.dynamic_covariate_predict(
+        zero_context, residuals, "mgwr", bandwidths, bisquare; adaptive=false,
+    )
+    missing_mgwr, missing_ok = JCM.dynamic_covariate_predict(
+        missing_context, residuals, "mgwr", bandwidths, bisquare; adaptive=false,
+    )
+    @test zero_ok == missing_ok
+    @test any(zero_ok)
+    supported, unsupported_rows = 1:3, 4:7
+    for time in findall(zero_ok)
+        # The bug: an unsupported target used to come back as a real-looking number.
+        @test all(isfinite, zero_mgwr[unsupported_rows, time])
+        @test all(isnan, missing_mgwr[unsupported_rows, time])
+        # The fix must not move a value the local fit could actually support. `_local_hat`
+        # fills one row per target and the back-fit hats are untouched, so these are equal
+        # bit for bit, not merely close.
+        @test isequal(
+            collect(zero_mgwr[supported, time]), collect(missing_mgwr[supported, time]),
+        )
+    end
+
+    # The other joint path, `mixed_gwr_predict`. Its single shared block carries the three
+    # spatial columns plus the local covariate, so at 60 km no target clears `p + 1 = 5` and
+    # every one of them was previously a fabricated zero correction.
+    zero_mixed, _ = JCM.dynamic_covariate_predict(
+        zero_context, residuals, "mixed_gwr", [60.0], bisquare; adaptive=false,
+    )
+    missing_mixed, _ = JCM.dynamic_covariate_predict(
+        missing_context, residuals, "mixed_gwr", [60.0], bisquare; adaptive=false,
+    )
+    @test all(isfinite, zero_mixed)
+    @test all(isnan, missing_mixed)
+
+    # An adaptive bandwidth cannot reach the branch, so the two settings agree everywhere.
+    for method in ("residual_gwr", "mixed_gwr")
+        zero_adaptive, _ = JCM.dynamic_covariate_predict(
+            zero_context, residuals, method, [15.0], bisquare,
+        )
+        missing_adaptive, _ = JCM.dynamic_covariate_predict(
+            missing_context, residuals, method, [15.0], bisquare,
+        )
+        @test all(isfinite, missing_adaptive)
+        @test isequal(zero_adaptive, missing_adaptive)
+    end
+end
+
 @testset "global leave-one-out excludes held response" begin
     rng = MersenneTwister(19)
     X = hcat(randn(rng, 25), randn(rng, 25))

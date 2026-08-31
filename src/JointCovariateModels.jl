@@ -105,6 +105,20 @@ Base.@kwdef struct JointCovariateBenchmarkConfig
     # also frees the intercept to go genuinely local (8-80 neighbours) instead of pinning near the
     # grid maximum, which is the multiscale behaviour the method is supposed to have.
     mgwr_spatial_grouping::Symbol = :intercept_only
+    # How a local group's fit at a target with too few supporting stations is recorded.
+    #
+    # `:missing` marks that target NaN, so the coverage machinery (`min_tuning_coverage`,
+    # `_prediction_coverage`, `_common_method_mask`) can see it and reject the candidate.
+    # `:zero` is the historical all-zero hat row, which reports a fabricated "no local
+    # correction" as a successful prediction and is invisible to every one of those gates:
+    # measured on the full nested run, the gate rejected 195/675 of direct `gwr`'s candidates
+    # and 0/675, 0/675, 0/3939 of `residual_gwr`/`mixed_gwr`/`mgwr`'s on the identical grid,
+    # and `mgwr`'s reported GPM own-coverage of 0.9985 was 0.793 once the unfitted targets
+    # were counted honestly. Only a fixed-km bandwidth with a compact kernel
+    # (bisquare/tricube/boxcar) can reach the branch at all.
+    #
+    # `:zero` is kept so a run can reproduce the pre-fix numbers exactly.
+    unsupported_local_target::Symbol = :missing
 end
 
 struct JointFoldContext
@@ -529,7 +543,7 @@ function _multiscale_predict_damped(
     response::Matrix{Float64}, train_lonlat::Matrix{Float64},
     local_target::Vector{Matrix{Float64}}, global_target::Matrix{Float64},
     target_lonlat::Matrix{Float64}, bandwidths::Vector{Float64}, kernel::Function, cfg;
-    adaptive::Bool=true, exclude_self::Bool=false,
+    adaptive::Bool=true, exclude_self::Bool=false, unsupported::Symbol=:zero,
     train_distances::Union{Nothing,Matrix{Float64}}=nothing,
     target_distances::Union{Nothing,Matrix{Float64}}=nothing,
 )
@@ -605,6 +619,13 @@ function _multiscale_predict_damped(
     end
     converged || return fill(NaN, size(target_lonlat, 1), 1), falses(1)
     if exclude_self
+        # `unsupported` cannot be honoured here. Unlike `mixed_gwr_predict` and
+        # `multiscale_gwr_predict`, this branch has no separate target hat to mark: the
+        # leave-one-out prediction *is* the fitted vector of the self-excluding `train_hats`
+        # above, and a NaN row in those would propagate into `fitted`, trip the
+        # `all(isfinite, fitted)` guard and discard the whole hour rather than one station.
+        # Only `tuning_geometry = :loocv` and the no-inner-split joint scoring path reach it;
+        # the default `:inner_spatial` never does.
         return reshape(previous, :, 1), trues(1)
     end
     local_sum = reduce(+, local_components; init=zeros(length(y)))
@@ -622,7 +643,7 @@ function _multiscale_predict_damped(
         end
         target_hat = DEMTerrainExperiment._local_hat(
             local_train[group], local_target[group], target_d,
-            bandwidths[group], kernel; adaptive, ridge=cfg.ridge,
+            bandwidths[group], kernel; adaptive, ridge=cfg.ridge, unsupported,
         )
         prediction .+= target_hat * partial
     end
@@ -637,6 +658,10 @@ function dynamic_covariate_predict(
 )
     method in ("residual_gwr", "mixed_gwr", "mgwr") ||
         throw(ArgumentError("unsupported joint model $method"))
+    # Forwarded to every *target* hat below. It is a documented no-op on
+    # `_multiscale_predict_damped`'s `exclude_self` path, which has no separate target hat;
+    # see the comment at that early return.
+    unsupported = context.config.unsupported_local_target
     target_count = leave_one_out ? size(residuals, 1) : size(context.target_lonlat, 1)
     prediction = fill(NaN, target_count, length(time_indices))
     # `Vector{Bool}`, not a `BitVector`. The loop below writes one entry per iteration from
@@ -712,7 +737,7 @@ function dynamic_covariate_predict(
                     local_train, zeros(Float64, count(valid), 0), partial,
                     train_lonlat, local_train, zeros(Float64, count(valid), 0),
                     train_lonlat, adjusted, kernel, context.config;
-                    adaptive, exclude_self=true,
+                    adaptive, exclude_self=true, unsupported,
                     train_distances, target_distances=train_distances,
                 )
                 local_prediction .+= global_loo
@@ -724,7 +749,7 @@ function dynamic_covariate_predict(
                     train_lonlat, only(adjusted), kernel; adaptive, ridge=context.config.ridge,
                     tolerance=context.config.tolerance,
                     max_iterations=context.config.max_iterations,
-                    exclude_self=true,
+                    exclude_self=true, unsupported,
                     train_distances, target_distances=train_distances,
                 )
                 local_prediction .+= global_loo
@@ -734,7 +759,7 @@ function dynamic_covariate_predict(
             _multiscale_predict_damped(
                 local_train, global_train, response, train_lonlat,
                 local_target, global_target, target_lonlat, adjusted, kernel, context.config;
-                adaptive, exclude_self=leave_one_out,
+                adaptive, exclude_self=leave_one_out, unsupported,
                 train_distances, target_distances,
             )
         else
@@ -743,7 +768,7 @@ function dynamic_covariate_predict(
                 only(local_target), global_target, target_lonlat, only(adjusted), kernel;
                 adaptive, ridge=context.config.ridge, tolerance=context.config.tolerance,
                 max_iterations=context.config.max_iterations,
-                exclude_self=leave_one_out,
+                exclude_self=leave_one_out, unsupported,
                 train_distances, target_distances,
             )
         end

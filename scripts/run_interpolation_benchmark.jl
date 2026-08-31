@@ -25,6 +25,7 @@ function benchmark_config(
     nested_covariates::Bool=false, local_grid::Bool=false,
     stratified_tuning_weights::Bool=false, legacy_tuning_geometry::Bool=false,
     mgwr_grouping::Symbol=:intercept_only, residual_shrinkage::Bool=true,
+    unsupported_local_target::Symbol=:missing,
 )
     mode in (:smoke, :full) || throw(ArgumentError("mode must be :smoke or :full"))
     nested_covariates && legacy_dem && throw(ArgumentError(
@@ -47,6 +48,11 @@ function benchmark_config(
             # overwriting the before-picture.
             (mgwr_grouping === :split ? "" : "_mgwr$(mgwr_grouping)") *
             (residual_shrinkage ? "" : "_noshrink") *
+            # Keyed on the *new* default rather than the historical one, for the same reason
+            # `mgwr_grouping` is keyed on the historical layout: a pre-fix run directory keeps
+            # its name and a corrected run lands somewhere new instead of overwriting the
+            # before-picture. `--legacy-unsupported-zero` therefore reproduces the old path.
+            (unsupported_local_target === :missing ? "_nanunsupported" : "") *
             (repeats > 1 ? "_repeats$(repeats)" : ""),
     )
     mkpath(outdir)
@@ -166,6 +172,7 @@ function benchmark_config(
         # field comment in `JointCovariateBenchmarkConfig`.
         max_iterations=1000,
         mgwr_spatial_grouping=mgwr_grouping,
+        unsupported_local_target=unsupported_local_target,
     )
     # Same permutation rigor as the per-fold nested selection is asked to match the legacy DEM
     # path's precedent (999 full / 99 smoke), rather than reducing it for speed.
@@ -291,9 +298,16 @@ function main(args=ARGS)
     # The scale is now selected with the bandwidth on the inner spatial split, at no extra fitting
     # cost; --no-residual-shrinkage pins it to 1 and reproduces the unshrunk numbers.
     residual_shrinkage = !("--no-residual-shrinkage" in args)
+    # A target with fewer than p+1 locally weighted stations is now reported as NaN rather than
+    # as an all-zero hat row. The zero row was scored as a real prediction, so the coverage gates
+    # could not see it: it left the whole compact-kernel/small-fixed-bandwidth corner of the grid
+    # admissible for the joint GWR models and inadmissible for direct `gwr`, and it inflated
+    # `mgwr`'s reported GPM own-coverage from an honest 0.79 to 0.9985. See the field comment in
+    # `JointCovariateBenchmarkConfig`. --legacy-unsupported-zero reproduces the pre-fix numbers.
+    unsupported_local_target = "--legacy-unsupported-zero" in args ? :zero : :missing
     cfg = benchmark_config(mode; with_random, legacy_dem, repeats, nested_covariates,
         local_grid, stratified_tuning_weights, legacy_tuning_geometry, mgwr_grouping,
-        residual_shrinkage)
+        residual_shrinkage, unsupported_local_target)
     !legacy_dem && Threads.nthreads() == 1 && @warn(
         "Joint dynamic models are compute intensive; use julia -t auto for parallel hourly fits",
     )
@@ -308,6 +322,7 @@ function main(args=ARGS)
         "tuning_geometry=$(cfg.tuning_geometry), " *
         "mgwr_grouping=$mgwr_grouping, " *
         "residual_shrinkage=$residual_shrinkage, " *
+        "unsupported_local_target=$unsupported_local_target, " *
         "output=$(cfg.mger.outdir)")
     result = run_interpolation_benchmark(cfg)
     println("Finished: $(nrow(result.metrics)) metric rows, $(nrow(result.scans)) scan rows")

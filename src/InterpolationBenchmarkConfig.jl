@@ -291,6 +291,9 @@ function _validate_benchmark_config(cfg::InterpolationBenchmarkConfig, n_station
         joint.mgwr_spatial_grouping in (:split, :shared, :intercept_only) || throw(ArgumentError(
             "mgwr_spatial_grouping must be :split, :shared, or :intercept_only",
         ))
+        joint.unsupported_local_target in (:missing, :zero) || throw(ArgumentError(
+            "unsupported_local_target must be :missing or :zero",
+        ))
     end
     return nothing
 end
