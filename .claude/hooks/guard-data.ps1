@@ -98,7 +98,25 @@ if ($cmd -imatch '\bgit\s+worktree\s+(remove|prune)\b') {
     Deny "Blocked: 'git worktree remove/prune' recurses into junctions on Windows and once deleted the contents of data/ through one. Use 'pwsh -NoProfile -File scripts/safe_worktree_remove.ps1 <worktree-path>' instead -- it unlinks any reparse point first, then removes the worktree. See CLAUDE.md, 'Data safety'."
 }
 
-# 3. Recursive deletes aimed at anything called data.
+# 3. Deletes that reach gitignored files. data/ and output/ are gitignored, so
+# 'git clean -x' and 'git stash --all' remove them from the working tree even
+# though no path in the command names them.
+if ($cmd -imatch '\bgit\s+clean\b([^;|&]*)') {
+    $flags = $Matches[1]
+    $dryRun = ($flags -cmatch '(^|\s)-[a-zA-Z]*n[a-zA-Z]*(\s|$)') -or ($flags -imatch '--dry-run\b')
+    $ignoredToo = $flags -cmatch '(^|\s)-[a-zA-Z]*[xX][a-zA-Z]*(\s|$)'
+    if ($ignoredToo -and -not $dryRun) {
+        Deny "Blocked: 'git clean -x' removes IGNORED files, and data/ and output/ are gitignored -- this deletes the entire dataset, with no stash and no recycle bin. If you only meant to drop untracked build artefacts, use 'git clean -fd' (without -x). To see what it would touch, 'git clean -xdn' is a dry run and is allowed. See CLAUDE.md, 'Data safety'."
+    }
+}
+if ($cmd -imatch '\bgit\s+stash\b([^;|&]*)') {
+    $flags = $Matches[1]
+    if (($flags -imatch '(^|\s)--all\b') -or ($flags -imatch '(^|\s)-[a-zA-Z]*a[a-zA-Z]*(\s|$)')) {
+        Deny "Blocked: 'git stash --all' stashes IGNORED files too, which strips data/ and output/ off disk. Restoring them depends on the stash surviving intact -- do not risk the dataset on that. Use 'git stash -u' (untracked, not ignored) if you need a clean tree. See CLAUDE.md, 'Data safety'."
+    }
+}
+
+# 4. Recursive deletes aimed at anything called data.
 # 'data' as a path segment only: matches data, ./data, data/raw, "data", data\raw --
 # but not guard-data.ps1, metadata, or data-vault.
 if ($cmd -imatch '(^|[\s"''/\\;|&(=])data([\s"''/\\;|&)]|$)') {

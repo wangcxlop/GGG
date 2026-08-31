@@ -39,6 +39,11 @@ The rules that follow are not superstition — that is the actual failure.
   recreates the exact hazard, automatically, for every new worktree.
 - If you ever do need to remove a link by hand, use `cmd /c rmdir "<link>"`. Never
   `Remove-Item -Recurse` on a junction.
+- **Never run `git clean -x` or `git stash --all`.** Neither names `data/`, but `data/` and
+  `output/` are gitignored and both commands reach ignored files — `git clean -xfd` deletes the
+  whole dataset outright, and `git stash --all` strips it off disk and makes recovery depend on a
+  stash surviving intact. Use `git clean -fd` (no `-x`) or `git stash -u` instead; `git clean -xdn`
+  is a dry run and is allowed. Both are blocked by the hook.
 
 ### The delete-lock, and its one hard limit
 
@@ -71,7 +76,7 @@ A "permission denied" on a delete under `data/` is the guard working. Do not rou
 
 | Layer | Covers | Does not cover |
 |---|---|---|
-| `.claude/hooks/guard-data.ps1` (PreToolUse) | link creation, `git worktree remove/prune`, recursive deletes naming `data`, and `ExitWorktree` while a link is present | commands issued outside this project's Claude Code sessions; a link created from *inside* a script, since the hook reads the command text |
+| `.claude/hooks/guard-data.ps1` (PreToolUse) | link creation, `git worktree remove/prune`, `git clean -x`, `git stash --all`, recursive deletes naming `data`, and `ExitWorktree` while a link is present | commands issued outside this project's Claude Code sessions; a link created from *inside* a script, since the hook reads the command text |
 | `.claude/settings.json` deny rules | the bare worktree commands, and `Edit`/`Write` into `data/` | anything phrased differently — the hook is the real check |
 | `scripts/protect_data.ps1` | any deleter, including git itself | elevated sessions (see above) |
 | Session-exit "keep or remove worktree?" prompt | — | not a tool call, so no hook sees it; answer **keep** if the worktree ever held a link |
