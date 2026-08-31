@@ -169,3 +169,64 @@ end
         excluded="good", methods=["mgwr"],
     )
 end
+
+@testset "mask_cost_table sees correlated failure only when excluded as a group" begin
+    # The failure mode on the real run: the joint models share their predictor matrices and
+    # their `valid` guard, so a station-hour with a missing covariate is dropped by all three at
+    # once. Excluding any one of them recovers nothing, because the other two still mask the
+    # cell — which is why the one-at-a-time table reported `cells_recovered = 0` and read as
+    # "the shared mask is harmless".
+    y_obs = fill(2.0, 3, 4)
+    good = fill(2.0, 3, 4)
+    joint = ["residual_gwr", "mixed_gwr", "mgwr"]
+    predictions = Dict{String,Matrix{Float64}}("good" => good)
+    for name in joint
+        shared_failure = fill(2.0, 3, 4)
+        shared_failure[1, 1] = NaN
+        shared_failure[2, 3] = NaN
+        predictions[name] = shared_failure
+    end
+    methods = vcat("good", joint)
+
+    for name in joint
+        one_at_a_time = BD.mask_cost_table(
+            y_obs, predictions; scheme="balanced_spatial", product="GPM",
+            excluded=name, methods,
+        )
+        @test all(one_at_a_time.cells_recovered .== 0)
+    end
+    as_a_group = BD.mask_cost_table(
+        y_obs, predictions; scheme="balanced_spatial", product="GPM",
+        excluded=joint, methods,
+    )
+    @test all(as_a_group.cells_recovered .== 2)
+    @test all(as_a_group.mask_cells_full .== 10)
+    @test all(as_a_group.mask_cells_reduced .== 12)
+    # One label per row, so the CSV keeps its shape and a single-name call is unchanged.
+    @test all(as_a_group.excluded_method .== "residual_gwr,mixed_gwr,mgwr")
+    @test all(BD.mask_cost_table(
+        y_obs, predictions; scheme="balanced_spatial", product="GPM",
+        excluded="mgwr", methods,
+    ).excluded_method .== "mgwr")
+    # `JOINT_MASK_METHODS` is the set the benchmark actually needs excluded together.
+    @test BD.JOINT_MASK_METHODS == joint
+
+    # A group must still name only mask-defining methods, name none of them twice, and leave
+    # something behind to compare against.
+    @test_throws ArgumentError BD.mask_cost_table(
+        y_obs, predictions; scheme="balanced_spatial", product="GPM",
+        excluded=["mgwr", "absent"], methods,
+    )
+    @test_throws ArgumentError BD.mask_cost_table(
+        y_obs, predictions; scheme="balanced_spatial", product="GPM",
+        excluded=["mgwr", "mgwr"], methods,
+    )
+    @test_throws ArgumentError BD.mask_cost_table(
+        y_obs, predictions; scheme="balanced_spatial", product="GPM",
+        excluded=methods, methods,
+    )
+    @test_throws ArgumentError BD.mask_cost_table(
+        y_obs, predictions; scheme="balanced_spatial", product="GPM",
+        excluded=String[], methods,
+    )
+end

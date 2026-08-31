@@ -25,6 +25,7 @@ export null_baseline_matrices, satellite_rescale_matrix
 export null_baseline_table, satellite_offset_table, mse_decomposition_table
 export bandwidth_saturation_table, covariate_contribution_table
 export rebuild_common_mask, dropout_table, mask_cost_table, run_comparison_table
+export JOINT_MASK_METHODS
 export benchmark_diagnostics_outdir
 export RAIN_CLASSES, MASK_METHODS
 
@@ -454,30 +455,64 @@ function dropout_table(
 end
 
 """
-What one mask-defining method's failures cost every other method.
+Methods whose mask failures are correlated, and must therefore be excluded together to be seen.
+
+The joint-covariate models share `build_joint_fold_context`'s predictor matrices and
+`dynamic_covariate_predict`'s `valid` guard, so a station-hour with a missing covariate is
+dropped by all three at once. See [`mask_cost_table`](@ref) for why that defeats a one-at-a-time
+exclusion.
+"""
+const JOINT_MASK_METHODS = ["residual_gwr", "mixed_gwr", "mgwr"]
+
+"""
+What the mask-defining methods in `excluded` cost every other method.
 
 The shared mask keeps only cells where *every* method in `MASK_METHODS` is finite, so an
 unstable method silently shrinks the denominator the whole field is scored on. This rebuilds
 the mask with `excluded` removed from the defining set and rescores everyone on both, so the
 cost is a number rather than an argument. Cells recovered are by construction the harder ones
-(the excluded method could not fit them), so a method's RMSE is expected to rise on the wider
+(the excluded methods could not fit them), so a method's RMSE is expected to rise on the wider
 mask — the comparison of interest is between methods, not against zero.
+
+`excluded` takes a **set**, not just one name, and that is the point. Excluding one method at a
+time is blind to correlated failure, which on this data is the only failure there is: measured on
+the full nested run (`balanced_spatial`), every one of the 3,963 / 3,986 / 3,986 cells the mask
+drops for FY4B / GPM / GSMaP is dropped by `residual_gwr`, `mixed_gwr` **and** `mgwr` together —
+they share the same predictor matrices and the same `valid` guard, so a station-hour with a
+missing covariate fails all three. `raw`, `idw`, `adw`, `tps` and direct `gwr` cost nothing at all.
+Excluding `mgwr` alone therefore recovers 48 cells on FY4B and *zero* on GPM and GSMaP, because
+the other two still mask them, and that zero reads as "the shared mask is harmless" when it only
+means "one at a time cannot see this". Pass `JOINT_MASK_METHODS` to get the honest number.
 """
 function mask_cost_table(
     y_obs::Matrix{Float64}, predictions::AbstractDict{String,Matrix{Float64}};
-    scheme::String, product::String, excluded::String="mgwr",
+    scheme::String, product::String,
+    excluded::Union{AbstractString,AbstractVector{<:AbstractString}}="mgwr",
     methods::Vector{String}=MASK_METHODS,
 )
-    excluded in methods ||
-        throw(ArgumentError("$excluded does not define the mask, so removing it changes nothing"))
+    dropped = excluded isa AbstractString ? [String(excluded)] : String.(excluded)
+    isempty(dropped) &&
+        throw(ArgumentError("excluded must name at least one mask-defining method"))
+    allunique(dropped) || throw(ArgumentError("excluded names a method twice: $(dropped)"))
+    for name in dropped
+        name in methods || throw(ArgumentError(
+            "$name does not define the mask, so removing it changes nothing",
+        ))
+    end
+    length(dropped) < length(methods) || throw(ArgumentError(
+        "excluding every mask-defining method leaves no mask to compare against",
+    ))
     full = rebuild_common_mask(y_obs, predictions; methods)
-    reduced = rebuild_common_mask(y_obs, predictions; methods=filter(!=(excluded), methods))
+    reduced = rebuild_common_mask(y_obs, predictions; methods=filter(!in(dropped), methods))
+    # One row per method carries the same `excluded_method`; joined rather than one column per
+    # name so the CSV keeps its shape, and a single-name call still writes exactly that name.
+    excluded_label = join(dropped, ",")
     rows = NamedTuple[]
     for method in sort(collect(keys(predictions)))
         on_full = _metrics(y_obs, predictions[method], full)
         on_reduced = _metrics(y_obs, predictions[method], reduced)
         push!(rows, (;
-            scheme, product, excluded_method=excluded, method,
+            scheme, product, excluded_method=excluded_label, method,
             mask_cells_full=count(full), mask_cells_reduced=count(reduced),
             cells_recovered=count(reduced) - count(full),
             n_full=on_full.n, RMSE_full=on_full.RMSE,

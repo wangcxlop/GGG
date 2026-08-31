@@ -1095,7 +1095,24 @@ end
         end
         scope = CSV.read(joinpath(outdir, "benchmark_scope.csv"), DataFrame)
         common_mask_scope = only(scope.value[scope.key .== "common_evaluation_mask"])
-        @test common_mask_scope == "true across all eight methods"
+        # The scope row now states what the rule produced, not only what the rule was. The mask
+        # is an intersection over MASK_METHODS, so one masked method's coverage moving re-scores
+        # every method including the traditional baselines; without a number here, nothing in a
+        # run's own output changes when that happens.
+        @test startswith(common_mask_scope,
+            "true across all eight methods; cells kept of obs+satellite evaluable: ")
+        for product in ("fy4b", "gpm", "gsmap")
+            written = CSV.read(
+                joinpath(outdir, "balanced_spatial", product, "common_evaluation_mask.csv"),
+                DataFrame,
+            )
+            kept = count(Matrix(written[:, Not(:time)]))
+            # `product` here is the directory name, which is `lowercase(product)`; the scope
+            # row carries the product's own casing (GSMaP, not GSMAP), so compare lowercased.
+            @test occursin(
+                "balanced_spatial/$(product) $(kept)/", lowercase(common_mask_scope),
+            )
+        end
         @test only(scope.value[scope.key .== "repeated_cv_partitions"]) == "1"
 
         # Two partitions: rows are stamped per repeat and the spread tables are populated.

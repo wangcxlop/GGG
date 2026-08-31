@@ -37,6 +37,25 @@ _prediction_coverage(eligible, prediction) =
         count(eligible .& .!isnan.(prediction)) / count(eligible)
 
 """
+Human-readable summary of the evaluation mask each (scheme, product) was scored on.
+
+`benchmark_scope.csv` used to assert only that the mask was "true across all eight methods",
+which is a statement about the rule and not about what the rule produced. The mask is an
+intersection, so one masked method's coverage moving re-scores every method including the
+traditional baselines the GWR claim is assessed against, and the run's own outputs recorded no
+number that would change when that happened. This puts the count in the scope table, where a
+plain diff between two runs shows it.
+"""
+function _mask_scope_value(mask_scope_rows)
+    isempty(mask_scope_rows) && return "true across all eight methods"
+    parts = ["$(row.scheme)/$(row.product) $(row.mask_cells)/$(row.evaluable) " *
+        "(" * (row.evaluable > 0 ? string(round(row.mask_cells / row.evaluable; digits=5)) : "NaN") * ")"
+        for row in mask_scope_rows if row.repeat == 1]
+    return "true across all eight methods; cells kept of obs+satellite evaluable: " *
+        join(parts, ", ")
+end
+
+"""
 One row of `run_status.csv`.
 
 The fold loop assembles this row in three places - a method that predicted, a method that raised,
@@ -137,7 +156,7 @@ function _write_benchmark_outputs(
     cfg::InterpolationBenchmarkConfig, products, seeds, nested_joint::Bool, joint_inputs,
     dem_store, joint_store, joint_scaling_tables, joint_qc_tables,
     all_metric_rows, all_scan_rows, all_bootstrap_rows, run_status_rows,
-    auto_selection_rows, hurdle_rows, selection_fallback_cells,
+    auto_selection_rows, hurdle_rows, selection_fallback_cells, mask_scope_rows,
 )
     metrics = DataFrame(all_metric_rows)
     scans = DataFrame(all_scan_rows)
@@ -220,7 +239,7 @@ function _write_benchmark_outputs(
             "held-out stations at matched observation/satellite timestamps",
             "concurrent training-station observations for direct methods; observation-minus-satellite residuals plus fold-selected DEM variables for residual_gwr, mixed_gwr, and mgwr",
             "false", "balanced two-dimensional spatial 5-fold", "random station 5-fold",
-            "true across all eight methods", string(cfg.tuning_max_times),
+            _mask_scope_value(mask_scope_rows), string(cfg.tuning_max_times),
             cfg.tuning_time_weighting === :stratified ?
                 "stratified: wettest eighth taken with certainty, remaining hours systematically subsampled and inverse-probability weighted so the tuning RMSE estimates the reported pooled RMSE" :
                 "uniform (default): unweighted RMSE over a wet-oversampled subsample, so the tuning RMSE runs ~3x the reported pooled RMSE it stands in for; the level error is close to a constant multiplier and cancels in the candidate ranking",
@@ -634,6 +653,7 @@ function run_interpolation_benchmark(cfg::InterpolationBenchmarkConfig)
     all_bootstrap_rows = NamedTuple[]
     run_status_rows = NamedTuple[]
     auto_selection_rows = NamedTuple[]
+    mask_scope_rows = NamedTuple[]
     hurdle_rows = NamedTuple[]
     # Cells where the fold was too small for an inner selection split and fell back to
     # leave-one-out. Reported in `benchmark_scope.csv` so the fallback is never silent.
@@ -683,6 +703,16 @@ function run_interpolation_benchmark(cfg::InterpolationBenchmarkConfig)
                 end
 
                 common_mask = _common_method_mask(y_obs, predictions)
+                # Recorded so a run states the size of its own evaluation set. The mask is an
+                # intersection over `MASK_METHODS`, so any change to any one of those methods
+                # moves the denominator every method is scored on - the traditional baselines
+                # included - and without this the only way to notice was to reload the mask CSV
+                # from both runs. `compare_benchmark_runs.jl` warns when two runs differ.
+                push!(mask_scope_rows, (;
+                    scheme, product, repeat=repeat_index,
+                    evaluable=count(.!isnan.(y_obs) .& .!isnan.(predictions["raw"])),
+                    mask_cells=count(common_mask),
+                ))
                 if !any(common_mask)
                     failures = ["fold=$(row.fold) method=$(row.method): $(row.error)" for
                         row in run_status_rows if row.scheme == scheme && row.product == product &&
@@ -724,6 +754,6 @@ function run_interpolation_benchmark(cfg::InterpolationBenchmarkConfig)
         cfg, products, seeds, nested_joint, joint_inputs,
         dem_store, joint_store, joint_scaling_tables, joint_qc_tables,
         all_metric_rows, all_scan_rows, all_bootstrap_rows, run_status_rows,
-        auto_selection_rows, hurdle_rows, selection_fallback_cells,
+        auto_selection_rows, hurdle_rows, selection_fallback_cells, mask_scope_rows,
     )
 end

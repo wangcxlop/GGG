@@ -102,6 +102,15 @@ function main(args=ARGS)
             push!(mask_cost_rows, mask_cost_table(
                 data.Y_obs, predictions; scheme, product, excluded="mgwr",
             ))
+            # The mgwr-only row above is kept for continuity, but on its own it is misleading:
+            # the joint models share their predictor matrices and their `valid` guard, so they
+            # drop the same station-hours together and excluding one recovers next to nothing
+            # while the other two still mask those cells. Excluding the family is what shows
+            # the shared mask's real cost. Both rows are written so the gap between them is
+            # visible in one table.
+            push!(mask_cost_rows, mask_cost_table(
+                data.Y_obs, predictions; scheme, product, excluded=JOINT_MASK_METHODS,
+            ))
             println("  $scheme / $product: mask $(count(stored)) cells, " *
                 "$(disagreements) rebuild disagreements")
         end

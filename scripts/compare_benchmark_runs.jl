@@ -80,6 +80,7 @@ function main(args=ARGS)
     outdir = joinpath(ROOT, "output", "benchmark_diagnostics", out_name)
     mkpath(outdir)
 
+    mask_moved = String[]
     println("before: $before_dir")
     println("after:  $after_dir")
     products, ids, product_data = load_common_data(outdir; smoke)
@@ -107,9 +108,25 @@ function main(args=ARGS)
             @printf("  %-17s %-6s mask %d -> %d, shared %d (%.1f%% of the wider)\n",
                 scheme, product, count(before_mask), count(after_mask), shared,
                 100 * shared / max(count(before_mask), count(after_mask)))
+            count(before_mask) == count(after_mask) || push!(
+                mask_moved,
+                "$scheme/$product $(count(before_mask))->$(count(after_mask))",
+            )
         end
     end
     isempty(comparison_rows) && error("the two runs share no scheme/product directory")
+    # The mask is an intersection over `MASK_METHODS`, so a change to any one of those
+    # methods moves the denominator *every* method is scored on, the traditional
+    # baselines included. When that happens the unpaired columns of
+    # `run_comparison.csv` are not comparable between the two runs - only the
+    # `*_paired` ones, which are restricted to cells both runs evaluated. Raised as a
+    # warning rather than left as two numbers on a line, because reading a mask change
+    # as a method result is the mistake this table exists to prevent.
+    isempty(mask_moved) || @warn(
+        "the evaluation mask changed between these runs; compare the *_paired columns " *
+        "only, since RMSE_before and RMSE_after are computed over different cell sets",
+        cells=join(mask_moved, ", "),
+    )
 
     comparison = vcat(comparison_rows...)
     CSV.write(joinpath(outdir, "run_comparison.csv"), comparison)
