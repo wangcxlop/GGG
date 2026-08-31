@@ -131,6 +131,76 @@ end
     )
 end
 
+"""Rebuild the fixture's context with a chosen grouping and back-fit tolerance."""
+function nesting_context(fixture, grouping::Symbol, roles::Dict{String,String}; tolerance=1e-12)
+    cfg = JCM.JointCovariateBenchmarkConfig(
+        spec_path="unused", terrain_path="unused", era5_paths=Dict{Int,String}(),
+        bandwidth_candidates=[10, 15, 20], max_iterations=200_000, tolerance=tolerance,
+        mgwr_spatial_grouping=grouping,
+    )
+    return JCM.build_joint_fold_context(
+        "GPM", roles, fixture.train, fixture.target, fixture.lonlat,
+        fixture.Yobs, fixture.Ysat, fixture.terrain, fixture.era5, nothing, cfg,
+    )
+end
+
+"""Largest relative gap between `mixed_gwr` and `mgwr` with every bandwidth set to `bw`."""
+function nesting_gap(context, residuals, bw)
+    kernel = JCM.DEMTerrainExperiment._bisquare_kernel
+    groups = length(JCM.joint_group_names(context, "mgwr"))
+    mixed, _ = JCM.dynamic_covariate_predict(context, residuals, "mixed_gwr", [bw], kernel)
+    multi, _ = JCM.dynamic_covariate_predict(context, residuals, "mgwr", fill(bw, groups), kernel)
+    finite = filter(isfinite, vec(mixed))
+    difference = maximum(abs.(filter(isfinite, vec(mixed .- multi))); init=0.0)
+    return difference / maximum(abs.(finite))
+end
+
+@testset "mgwr is not mixed_gwr with the bandwidth constraint relaxed" begin
+    # The reported `mgwr` and `mixed_gwr` columns are two models, not a before/after on
+    # multiscale bandwidths. `:intercept_only` (the default) cannot be nested — it drops
+    # `z_lon`/`z_lat` — and even `:shared`, which keeps them, only approximates `mixed_gwr`
+    # because `_local_hat` is a local-linear smoother rather than a projection, so back-fitting
+    # settles on an additive fixed point instead of the joint weighted least squares.
+    fixture = joint_model_fixture()
+    residuals = fixture.Yobs[fixture.train, :] .- fixture.Ysat[fixture.train, :]
+    all_local = Dict("elevation" => "local", "u10" => "local")
+    no_local = Dict("elevation" => "global", "u10" => "global")
+
+    # Structure first: equal group count, two fewer columns.
+    shared = nesting_context(fixture, :shared, all_local)
+    intercept_only = nesting_context(fixture, :intercept_only, all_local)
+    shared_design = JCM._design_at(shared, "mgwr", 1)
+    intercept_design = JCM._design_at(intercept_only, "mgwr", 1)
+    @test length(shared_design.local_groups) == length(intercept_design.local_groups)
+    @test sum(size(X, 2) for X in shared_design.local_groups) ==
+        sum(size(X, 2) for X in intercept_design.local_groups) + 2
+    # `:shared` carries exactly the columns `mixed_gwr` does, only grouped differently.
+    mixed_design = JCM._design_at(shared, "mixed_gwr", 1)
+    @test size(only(mixed_design.local_groups), 2) ==
+        sum(size(X, 2) for X in shared_design.local_groups)
+
+    # One group on each side is the only case where the back-fit and the joint solve coincide.
+    single = nesting_context(fixture, :shared, no_local)
+    @test length(JCM.joint_group_names(single, "mgwr")) == 1
+    @test nesting_gap(single, residuals, 15.0) < 1e-12
+
+    # With covariate groups they do not, and tightening the tolerance by four orders does not
+    # close the gap — which is what makes it a different fixed point rather than an unconverged
+    # one. Were it convergence error, the loose run would not be ~100x the tight one.
+    loose = nesting_gap(nesting_context(fixture, :shared, all_local; tolerance=1e-5), residuals, 15.0)
+    tight = nesting_gap(nesting_context(fixture, :shared, all_local; tolerance=1e-9), residuals, 15.0)
+    tighter = nesting_gap(nesting_context(fixture, :shared, all_local; tolerance=1e-13), residuals, 15.0)
+    @test loose > 10tight
+    @test tight > 0
+    @test isapprox(tight, tighter; rtol=1e-3)      # plateaued
+    @test tighter < 1e-4                            # far below reporting precision
+
+    # `:intercept_only` is not nested at any bandwidth: the columns are absent.
+    for bw in (10.0, 15.0, 20.0)
+        @test nesting_gap(nesting_context(fixture, :intercept_only, all_local), residuals, bw) > 0
+    end
+end
+
 @testset "back-fitting rejects a bandwidth vector of the wrong length" begin
     bisquare = JCM.DEMTerrainExperiment._bisquare_kernel
     fixture = joint_model_fixture()

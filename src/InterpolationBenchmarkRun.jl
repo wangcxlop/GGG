@@ -292,7 +292,7 @@ function _write_benchmark_outputs(
                     "split (default): the intercept, longitude and latitude each form their own single-column back-fitting group" :
                     joint.mgwr_spatial_grouping === :shared ?
                         "shared: intercept, longitude and latitude solved as one weighted least squares, so only the covariates carry separate bandwidths" :
-                        "intercept_only: the coordinate columns are dropped; a locally varying intercept plus one group per local covariate",
+                        "intercept_only: the coordinate columns are dropped; a locally varying intercept plus one group per local covariate. mgwr is therefore NOT mixed_gwr with the single-bandwidth constraint relaxed - it has two fewer design columns at the same group count, so no bandwidth vector recovers mixed_gwr - and the difference between the two reported columns is not attributable to multiscale bandwidths alone. --mgwr-grouping shared keeps the coordinate columns and is the nested contrast; no such run exists yet",
                 "$(joint.relaxation) (successive over-relaxation on the back-fitting sweeps; converges to the same fixed point for any admissible value, so this trades rate only — plain Gauss-Seidel at 1.0 fails to converge on most hours)",
                 string(joint.max_iterations),
                 length(cfg.residual_shrinkage_candidates) == 1 &&

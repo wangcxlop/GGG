@@ -102,6 +102,13 @@ end
 # `mgwr` runs a per-group coordinate descent. Only the preamble that builds the candidate grid is
 # genuinely shared, and it stays in the dispatcher.
 #
+# The bandwidth split is the *whole* difference between `mixed_gwr` and `mgwr` only under
+# `mgwr_spatial_grouping = :split` or `:shared`. Under the default `:intercept_only` the design
+# also loses `z_lon` and `z_lat` (see `_design_at`), so `mgwr` is **not** `mixed_gwr` with the
+# bandwidth constraint relaxed: no setting of its per-group bandwidths recovers `mixed_gwr`,
+# because the columns are not there. Read the two methods' reported RMSEs as two models, not as a
+# before/after on multiscale bandwidths.
+#
 # The descent below is deliberately NOT merged with `select_mgwr_bandwidths!` or
 # `_select_dem_multiscale_bandwidths!`. All three walk groups to a fixed point, but they differ in
 # what they fit and how they score, and unifying them is exactly the kind of change that moves

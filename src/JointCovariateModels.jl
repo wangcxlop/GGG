@@ -84,7 +84,9 @@ Base.@kwdef struct JointCovariateBenchmarkConfig
     #   :split           - one single-column group each for the intercept, longitude and latitude
     #                      (the historical layout).
     #   :shared          - one three-column group, solved by a single weighted least squares the
-    #                      way `mixed_gwr` does.
+    #                      way `mixed_gwr` solves its spatial block. That is a statement about the
+    #                      block, not about the model: the covariates stay in their own groups, so
+    #                      `:shared` is not `mixed_gwr` with extra bandwidths either.
     #   :intercept_only  - drop the coordinate columns; a locally varying intercept plus the
     #                      covariate groups.
     #
@@ -105,6 +107,20 @@ Base.@kwdef struct JointCovariateBenchmarkConfig
     # fewer cells, and is the only one that never discards an hour. Dropping the coordinate plane
     # also frees the intercept to go genuinely local (8-80 neighbours) instead of pinning near the
     # grid maximum, which is the multiscale behaviour the method is supposed to have.
+    #
+    # What none of the layouts is, is `mixed_gwr` with the single-bandwidth constraint relaxed.
+    # `:intercept_only` cannot be: it has two fewer design columns at the same group count, so no
+    # bandwidth vector recovers `mixed_gwr`. Even `:shared`, which carries the identical columns,
+    # only approximates it — driving every group to the same bandwidth and comparing against
+    # `mixed_gwr` gives machine precision (7.8e-16) when there are no local covariates and a
+    # single group on each side, but with covariate groups the difference plateaus under a
+    # tightening tolerance rather than vanishing: 1.6e-7 relative, worst case 1.3e-5 at the
+    # narrowest bandwidth, falling to 4e-10 by bw=24. `_local_hat` is a local-linear smoother and
+    # is not idempotent, so back-fitting converges to an additive fixed point rather than to the
+    # joint weighted least squares `mixed_gwr` solves; the two agree only in the one-group case
+    # and as the bandwidth widens toward a projection. Four orders below reporting precision, so
+    # `:shared` is a usable nested comparison in practice - but it is not an identity, and
+    # `:intercept_only` is not nested at all.
     mgwr_spatial_grouping::Symbol = :intercept_only
     # How a local group's fit at a target with too few supporting stations is recorded.
     #
