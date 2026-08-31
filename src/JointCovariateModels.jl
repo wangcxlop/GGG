@@ -383,6 +383,29 @@ function joint_group_names(context::JointFoldContext, method::String)
     return design.group_names
 end
 
+"""
+Turn this fold's role map into one hour's design.
+
+Where the roles become geometry, so it is where the role test and the bandwidth search meet. Two
+asymmetries worth knowing when reading `joint_fold_roles.csv` beside `joint_bandwidths.csv`:
+
+**The roles are a gate, not a ranking.** A `"global"` covariate goes into `global_design` and is
+never handed a bandwidth. So `mgwr` can demote a `"local"` covariate to global but can never
+promote a `"global"` one back.
+
+**`bw = Inf` is the global block.** At an infinite bandwidth every kernel returns 1.0, so
+`_local_hat` reduces to `_global_projection` exactly (verified to machine precision for all five
+kernels in `test-dem-terrain-experiment.jl`). A local group at `Inf` and a column in
+`global_design` are the same unweighted least squares. That is what makes "the role test said
+local, MGWR chose Inf" a real statement rather than a units mismatch - and MGWR made that choice
+for 35 of the 51 `"local"` cells on the canonical full run. See
+`joint_spatial_variability_test`'s docstring for why the two criteria differ without either
+being wrong.
+
+`mixed_gwr` has no equivalent freedom: its single shared bandwidth spans the whole local block
+including the coordinate columns, so `Inf` would globalise the spatial trend too. It is bound to
+whatever the role test decided.
+"""
 function _design_at(context::JointFoldContext, method::String, time::Int; target::Bool=false)
     spatial = target ? context.spatial_target : context.spatial_train
     predictors = target ? context.predictor_target : context.predictor_train

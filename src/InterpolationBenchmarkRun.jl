@@ -286,7 +286,7 @@ function _write_benchmark_outputs(
         joint = something(cfg.joint_covariates)
         append!(scope, DataFrame(
             key=["mgwr_spatial_grouping", "backfit_relaxation", "backfit_max_iterations",
-                "residual_shrinkage"],
+                "covariate_role_vs_bandwidth", "residual_shrinkage"],
             value=[
                 joint.mgwr_spatial_grouping === :split ?
                     "split (default): the intercept, longitude and latitude each form their own single-column back-fitting group" :
@@ -295,6 +295,7 @@ function _write_benchmark_outputs(
                         "intercept_only: the coordinate columns are dropped; a locally varying intercept plus one group per local covariate. mgwr is therefore NOT mixed_gwr with the single-bandwidth constraint relaxed - it has two fewer design columns at the same group count, so no bandwidth vector recovers mixed_gwr - and the difference between the two reported columns is not attributable to multiscale bandwidths alone. --mgwr-grouping shared keeps the coordinate columns and is the nested contrast; no such run exists yet",
                 "$(joint.relaxation) (successive over-relaxation on the back-fitting sweeps; converges to the same fixed point for any admissible value, so this trades rate only — plain Gauss-Seidel at 1.0 fails to converge on most hours)",
                 string(joint.max_iterations),
+                "joint_fold_roles.csv and joint_bandwidths.csv answer different questions and disagree freely: the permutation role test asks whether a TIME-POOLED coefficient surface is non-stationary (inference, BH q<0.05, null = stationary, so global is an acceptance of the null), while the bandwidth search asks which bandwidth minimises held-out RMSE for a PER-HOUR cross-section. The roles gate membership of the local block - a global covariate never receives a bandwidth - so mgwr can demote local to global via bw=Inf (operationally identical to the global block) but never the reverse; mixed_gwr cannot demote at all. On the canonical full run mgwr chose Inf for 35 of 51 role-local cells, and that is neither a thresholding artefact (27 of the 35 sit at the permutation floor p=0.001) nor tuning noise (none had a runner-up within 0.01%)",
                 length(cfg.residual_shrinkage_candidates) == 1 &&
                     only(cfg.residual_shrinkage_candidates) == 1.0 ?
                     "disabled: the residual correction is added back unshrunk, as GWR produces it" :

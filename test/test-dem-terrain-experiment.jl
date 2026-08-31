@@ -339,6 +339,29 @@ end
         end
     end
 
+    # At an infinite bandwidth every kernel returns 1.0, so the local hat collapses to the
+    # unweighted least-squares projection. This identity is what makes `bw = Inf` in the MGWR
+    # bandwidth search mean the same thing as putting a covariate in the global block, and so
+    # what makes "the permutation role test said local, MGWR chose Inf" a comparison of like
+    # with like rather than a units mismatch. Nothing else checks it.
+    Xproj = hcat(ones(n), randn(rng, n, 2))
+    global_projection = DEMTerrainExperiment._global_projection(Xproj; ridge=1e-8)
+    # The five GWR kernels, written out rather than imported: this file loads only
+    # `DEMTerrainExperiment`, and the point is the formulas' behaviour at an infinite bandwidth.
+    every_kernel = (
+        (d, bw) -> exp(d^2 / (-2 * bw^2)),          # gaussian
+        (d, bw) -> exp(-d / bw),                    # exponential
+        bisquare,
+        (d, bw) -> d > bw ? 0.0 : (1 - (d / bw)^3)^3,   # tricube
+        (d, bw) -> d > bw ? 0.0 : 1.0,              # boxcar
+    )
+    for kernel_fn in every_kernel
+        at_infinity = DEMTerrainExperiment._local_hat(
+            Xproj, Xproj, train_distances, Inf, kernel_fn; adaptive=false, ridge=1e-8,
+        )
+        @test at_infinity ≈ global_projection atol=1e-12
+    end
+
     # The ridge is applied to the normal equations, so a larger one shrinks the operator.
     Xtrain = hcat(ones(n), randn(rng, n, 2))
     weak = DEMTerrainExperiment._local_hat(

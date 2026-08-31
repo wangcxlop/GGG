@@ -484,6 +484,41 @@ function _loocv(stats, distances, neighbors, cfg)
     return station_count == n ? sqrt(total / n) : Inf
 end
 
+"""
+Assign each surviving covariate group a `"local"` or `"global"` role by a station-block
+permutation test on its coefficient surface.
+
+The statistic is the summed variance of the group's local coefficients across stations; the null
+is that surface's distribution under a station-block permutation; `p = (exceed + 1)/(perms + 1)`,
+BH-adjusted, and `role = "local"` iff `q < cfg.q_threshold`.
+
+Two things about that verdict are easy to over-read.
+
+**`"global"` is an acceptance of the null, not evidence of constancy.** It means only that this
+sample could not reject stationarity at BH q < 0.05. It is the default branch, so a group with a
+failed or low-power test lands there.
+
+**The surface is pooled over time.** `_panel_stats` accumulates `A[station] += w * x*x'` across
+*every wet station-hour*, so this fits one time-averaged coefficient per station — on the full run,
+roughly 11k hours behind each. MGWR fits a *separate cross-section per hour* and picks one
+bandwidth to use for all of them, re-estimating the coefficient locally from a single hour of
+~190 stations.
+
+So this test and MGWR's bandwidth search are not two answers to one question, and they disagree
+freely without either being wrong. Measured on the canonical full nested run: of 51 cells this
+test called `"local"`, MGWR chose `bw = Inf` — which `_local_hat` makes operationally identical to
+the global block — for **35**. That is not a thresholding artefact: 27 of those 35 sit at
+`p = 0.001`, the permutation floor, where zero of 999 permutations exceeded the observed
+statistic, and the p-distributions of the agreeing and disagreeing cells are indistinguishable.
+Nor is it tuning noise: none of the 35 had a runner-up bandwidth within 0.01%. A time-pooled
+surface can be decisively non-stationary while an hourly local estimate of the same coefficient is
+too noisy to beat a constant. That is the bias-variance trade the two criteria weigh differently,
+and it is the expected direction.
+
+The roles are also a *gate*, not a ranking: a group sent here to `"global"` enters
+`global_design` and never reaches the bandwidth search at all (0 of 13 such cells on that run), so
+MGWR can demote `"local"` to global but can never promote the reverse.
+"""
 function joint_spatial_variability_test(
     panel, groups::Vector{String}, lonlat::Matrix{Float64}, cfg::JointSelectionConfig;
     rng::AbstractRNG=MersenneTwister(cfg.seed),
