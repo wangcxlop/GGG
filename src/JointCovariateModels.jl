@@ -20,6 +20,7 @@ using Main.DEMTerrainExperiment: mixed_gwr_predict, multiscale_gwr_predict
 export JointCovariateBenchmarkConfig, JointFoldContext
 export load_joint_covariate_spec, joint_spec_sha256, build_joint_fold_context
 export dynamic_covariate_predict, joint_effective_roles, joint_group_names
+export joint_models_coincide
 
 const JOINT_GROUP_ORDER = [
     "elevation", "slope", "aspect", "t2m_c", "d2m_c",
@@ -333,6 +334,32 @@ function joint_effective_roles(context::JointFoldContext, method::String)
     method == "residual_gwr" && return Dict(group => "local" for group in context.variables)
     method in ("mixed_gwr", "mgwr") || throw(ArgumentError("unsupported joint model $method"))
     return copy(context.roles)
+end
+
+"""
+Whether two joint models reduce to the same fit on this fold's covariate roles.
+
+`residual_gwr` forces every covariate local; `mixed_gwr` honours the fold's role map. When that
+map contains no `"global"` the two build the identical design — `_design_at` then differs only in
+the group *name* (`"shared_all_local"` vs `"shared_local"`) — and they search the identical grid
+through the identical scorer, so they are one model reported under two names. On the full nested
+run that held at 19 of 30 fold-cells, with bit-identical selected kernel, bandwidth, shrinkage and
+inner RMSE; `joint_role_stability.csv` shows why, a `"global"` role appearing in only 6 of 54
+group-cells.
+
+`mgwr` is never a duplicate of either: it gives every group its own bandwidth whatever the roles
+say, and under `:intercept_only` it also drops the coordinate columns.
+
+This is what `run_status.csv`'s `duplicate_of` column and `select_auto_method`'s contender
+collapsing are keyed on, so a reader does not have to infer "same model" from matching RMSEs.
+"""
+function joint_models_coincide(
+    context::JointFoldContext, first_method::AbstractString, second_method::AbstractString,
+)
+    first_method == second_method && return true
+    ("mgwr" in (first_method, second_method)) && return false
+    return joint_effective_roles(context, String(first_method)) ==
+        joint_effective_roles(context, String(second_method))
 end
 
 function joint_group_names(context::JointFoldContext, method::String)

@@ -299,6 +299,41 @@ end
     end
 end
 
+@testset "residual_gwr and mixed_gwr coincide when no covariate is global" begin
+    # `residual_gwr` forces every covariate local; `mixed_gwr` honours the role map. With no
+    # "global" in that map the two designs are the same matrix and only the group name differs,
+    # so the benchmark reports one model under two names. The fixture has elevation global, so
+    # it is the distinct case; dropping that role gives the degenerate one.
+    distinct = joint_model_fixture()
+    @test !JCM.joint_models_coincide(distinct.context, "mixed_gwr", "residual_gwr")
+
+    all_local = JCM.build_joint_fold_context(
+        "GPM", Dict("elevation" => "local", "u10" => "local"),
+        distinct.train, distinct.target, distinct.lonlat, distinct.Yobs, distinct.Ysat,
+        distinct.terrain, distinct.era5, nothing, distinct.cfg,
+    )
+    @test JCM.joint_models_coincide(all_local, "mixed_gwr", "residual_gwr")
+    # The claim the predicate is standing in for: same local design, same global design, same
+    # predictions — only the group name differs.
+    residual_design = JCM._design_at(all_local, "residual_gwr", 1)
+    mixed_design = JCM._design_at(all_local, "mixed_gwr", 1)
+    @test residual_design.local_groups == mixed_design.local_groups
+    @test residual_design.global_design == mixed_design.global_design
+    @test residual_design.group_names != mixed_design.group_names
+
+    bisquare = JCM.DEMTerrainExperiment._bisquare_kernel
+    residuals = distinct.Yobs[distinct.train, :] .- distinct.Ysat[distinct.train, :]
+    same = [JCM.dynamic_covariate_predict(all_local, residuals, method, [15.0], bisquare)[1]
+        for method in ("residual_gwr", "mixed_gwr")]
+    @test isequal(same[1], same[2])
+
+    # `mgwr` is never a duplicate: per-group bandwidths make it a different model whatever the
+    # roles say, and `:intercept_only` also drops the coordinate columns.
+    @test !JCM.joint_models_coincide(all_local, "mgwr", "residual_gwr")
+    @test !JCM.joint_models_coincide(all_local, "mgwr", "mixed_gwr")
+    @test JCM.joint_models_coincide(all_local, "mgwr", "mgwr")
+end
+
 @testset "global leave-one-out excludes held response" begin
     rng = MersenneTwister(19)
     X = hcat(randn(rng, 25), randn(rng, 25))

@@ -537,6 +537,17 @@ means some contender was patchy and the comparison rests on less than the full r
 not the same quantity as `run_status.csv`'s `prediction_coverage`, which is measured on the
 outer held-out stations.
 
+Contenders that produced the *same* prediction are collapsed to the first of them, and the
+`collapsed` field names each dropped one against its twin. `residual_gwr` and `mixed_gwr` build
+the identical design whenever the fold's role map has no `"global"` role — 19 of 30 fold-cells on
+the full nested run (see `joint_models_coincide`) — and left in, that duplicate makes
+`n_contenders` overstate how much of a choice was actually made and makes `runner_up` the winner's
+own twin at a margin of zero. Equality is tested on the predictions rather than on the role map so
+the check is local to what `auto` actually compares, and `isequal` is used so `NaN` cells match.
+
+`AUTO_CANDIDATE_RUNS` order decides which name survives, which keeps the more constrained model
+(`residual_gwr` before `mixed_gwr`) rather than letting the alphabetical tie-break below pick.
+
 Returns `nothing` when there is no shared mask to score on — the caller then leaves `auto`
 unpredicted for the fold rather than guessing, and `run_status.csv` records it.
 """
@@ -545,14 +556,21 @@ function select_auto_method(
     time_weights::Union{Nothing,Vector{Float64}}=nothing,
 )
     isempty(contenders) && return nothing
-    shared = .!isnan.(y_obs) .& .!isnan.(y_sat)
+    distinct = empty(contenders)
+    collapsed = String[]
     for contender in contenders
+        twin = findfirst(kept -> isequal(kept.prediction, contender.prediction), distinct)
+        twin === nothing ? push!(distinct, contender) :
+            push!(collapsed, "$(contender.method)=$(distinct[twin].method)")
+    end
+    shared = .!isnan.(y_obs) .& .!isnan.(y_sat)
+    for contender in distinct
         shared = shared .& .!isnan.(contender.prediction)
     end
     any(shared) || return nothing
     scored = [merge((; contender.method), _candidate_metrics(
         y_obs, y_sat, ifelse.(shared, contender.prediction, NaN); time_weights,
-    )) for contender in contenders]
+    )) for contender in distinct]
     # Method name breaks ties so a fold's choice does not depend on `BENCHMARK_RUNS` ordering.
     order = sortperm(scored; by=row -> (row.RMSE, row.MAE, row.method))
     best = scored[order[1]]
@@ -561,6 +579,7 @@ function select_auto_method(
         chosen=best.method, chosen_rmse=best.RMSE, chosen_mae=best.MAE,
         runner_up=runner_up === nothing ? "" : runner_up.method,
         runner_up_rmse=runner_up === nothing ? NaN : runner_up.RMSE,
-        n=best.n, shared_mask_coverage=best.coverage, n_contenders=length(contenders),
+        n=best.n, shared_mask_coverage=best.coverage, n_contenders=length(distinct),
+        collapsed=join(collapsed, " | "),
     )
 end

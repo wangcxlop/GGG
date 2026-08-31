@@ -920,6 +920,40 @@ end
     @test choice.shared_mask_coverage ≈ 0.5
     @test choice.chosen_rmse ≈ 0.1
 
+    # An undeduplicated contender list makes `auto` look like a wider choice than it was:
+    # `residual_gwr` and `mixed_gwr` are the same model whenever the fold's role map has no
+    # "global" role, so one of them is the other's twin at a margin of zero.
+    twin = select_auto_method(
+        [(; method="residual_gwr", prediction=steady),
+         (; method="mixed_gwr", prediction=copy(steady)),
+         (; method="patchy", prediction=patchy)],
+        y_obs, y_sat,
+    )
+    @test twin.n_contenders == 2                       # not 3
+    @test twin.collapsed == "mixed_gwr=residual_gwr"   # first occurrence keeps the name
+    @test twin.chosen == "residual_gwr"
+    @test twin.runner_up == "patchy"                   # a real alternative, not the twin
+    # Collapsing must not change what wins or what it scored.
+    plain = select_auto_method(
+        [(; method="residual_gwr", prediction=steady), (; method="patchy", prediction=patchy)],
+        y_obs, y_sat,
+    )
+    @test twin.chosen == plain.chosen
+    @test twin.chosen_rmse == plain.chosen_rmse
+    @test twin.n == plain.n
+    @test isempty(plain.collapsed)
+    # `isequal`, not `==`: these matrices carry NaN, and two contenders that both gave up on the
+    # same cells are still the same contender.
+    @test select_auto_method(
+        [(; method="a", prediction=patchy), (; method="b", prediction=copy(patchy))],
+        y_obs, y_sat,
+    ).n_contenders == 1
+    # Predictions that differ anywhere are two contenders, however close.
+    nudged = copy(steady); nudged[1, 1] = nextfloat(nudged[1, 1])
+    @test select_auto_method(
+        [(; method="a", prediction=steady), (; method="b", prediction=nudged)], y_obs, y_sat,
+    ).n_contenders == 2
+
     # Nothing to score on: the caller must be told, not handed a default.
     @test select_auto_method(
         [(; method="empty", prediction=fill(NaN, 2, 4))], y_obs, y_sat,

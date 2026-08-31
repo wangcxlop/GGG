@@ -20,7 +20,15 @@ function _run_status_role_fields(
     effective_roles = uses_joint ? join([
         "$group=$(effective_role_map[group])" for group in joint_context.variables
     ], ";") : ""
-    return (; uses_dem, uses_joint, selected_roles, effective_role_map, effective_roles)
+    # `mixed_gwr` collapses onto `residual_gwr` whenever this fold's role map has no "global":
+    # identical design, identical grid, identical numbers (see `joint_models_coincide`). Recorded
+    # as a column so a reader of `run_status.csv` can see the two rows are one model, instead of
+    # having to notice that their RMSEs match to the last digit.
+    duplicate_of = uses_joint && output_method == "mixed_gwr" &&
+        joint_models_coincide(joint_context, "mixed_gwr", "residual_gwr") ? "residual_gwr" : ""
+    return (;
+        uses_dem, uses_joint, selected_roles, effective_role_map, effective_roles, duplicate_of,
+    )
 end
 
 """Non-NaN share of the held-out cells a method could have predicted."""
@@ -44,7 +52,7 @@ function _benchmark_status_row(
     scheme, product, fold, repeat::Int, seed::Int, mode::String, method::String,
     output_method::String, status::String, error::String, prediction_coverage::Float64,
 )
-    (; uses_dem, uses_joint, selected_roles, effective_roles) =
+    (; uses_dem, uses_joint, selected_roles, effective_roles, duplicate_of) =
         _run_status_role_fields(dem_context, joint_context, mode, method, output_method)
     return (;
         scheme, product, fold, repeat, seed, method=output_method, status, error,
@@ -60,6 +68,10 @@ function _benchmark_status_row(
         covariate_selected_roles=selected_roles,
         covariate_effective_roles=effective_roles,
         covariate_spec_sha256=uses_joint ? something(joint_inputs.spec_sha256, "") : "",
+        # Appended rather than grouped with the other status fields: existing readers of this
+        # table index it by name, but the ad-hoc awk/pandas kind does not, and a new column at
+        # the end cannot shift anything that already exists.
+        duplicate_of,
     )
 end
 
@@ -554,6 +566,22 @@ function _run_benchmark_fold!(
                 error=sprint(showerror, e), prediction_coverage=0.0,
             ))
         end
+    end
+
+    # `mixed_gwr` and `residual_gwr` are the same model whenever this fold's role map has no
+    # "global" role, so the second of the two scans is redundant work. It is kept rather than
+    # skipped, and turned into a check: the two search the same grid through the same scorer over
+    # the same designs, so if they ever disagree here, the designs or the grids have drifted
+    # apart and the `duplicate_of` column in `run_status.csv` is lying.
+    if joint_context !== nothing &&
+            haskey(fold_predictions, "mixed_gwr") && haskey(fold_predictions, "residual_gwr") &&
+            joint_models_coincide(joint_context, "mixed_gwr", "residual_gwr") &&
+            !isequal(fold_predictions["mixed_gwr"], fold_predictions["residual_gwr"])
+        @warn(
+            "mixed_gwr and residual_gwr have identical designs on this fold but produced " *
+            "different predictions",
+            scheme, product, fold, repeat=repeat_index,
+        )
     end
 
     for index in scan_start:length(all_scan_rows)
