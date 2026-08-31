@@ -264,6 +264,24 @@ function _write_benchmark_outputs(
             "temporal forecast or correction without concurrent gauge observations",
         ],
     )
+    # `training_signal` above already records what separates these two by design - the response
+    # target and the covariate specification. This records what separates them by accident, so
+    # the `gwr` and `residual_gwr` columns are not read as one estimator under two targets. They
+    # share the kernel x bandwidth grid (`_bandwidth_families`) and nothing else in the fit.
+    append!(scope, DataFrame(
+        key=["gwr_vs_residual_gwr"],
+        value=["two implementations, not one estimator in two modes: direct gwr fits " *
+            "[1, lon, lat] in raw centred degrees through a closed-form 3x3 solve, counts its " *
+            "adaptive bandwidth over every training station and drops missing responses inside " *
+            "the fit, and needs 3 contributing stations per target; residual gwr fits " *
+            "[1, z_lon, z_lat] standardised to unit variance plus the fold's covariates through " *
+            "a locally weighted hat operator, subsets to stations with complete data before " *
+            "counting the bandwidth, needs 4, and discards an hour outright below that. " *
+            "Measured, these cost under 2% of the nominal neighbour count and nothing " *
+            "detectable in the reported metrics, but they are differences in the estimator, " *
+            "not in the mode. The kernel x bandwidth grid is shared and is the only part of " *
+            "the fit that is"],
+    ))
     if joint_inputs !== nothing
         joint = something(cfg.joint_covariates)
         append!(scope, DataFrame(

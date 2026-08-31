@@ -368,7 +368,20 @@ function _scan_tps!(
     return scan_rows
 end
 
-"""Direct or residual GWR over the shared kernel x bandwidth-family grid."""
+"""
+Direct GWR over the shared kernel x bandwidth-family grid.
+
+Despite the `mode` in `row`, this only ever scans `("direct", "gwr")` in a run the benchmark
+script can produce: `select_interpolation_parameter!` routes residual `gwr` to
+`select_dem_parameter!` or `select_joint_parameter!` before reaching here, and one of those two
+contexts is always present (`run_interpolation_benchmark.jl` sets `joint_covariates` unless
+`--legacy-dem`, which sets `dem`). The residual branch below is reachable only from a direct
+caller that supplies neither context.
+
+That routing is also why direct `gwr` and `residual_gwr` are not one estimator under two response
+targets: they share this grid, and nothing else. See `benchmark_scope.csv`'s
+`gwr_vs_residual_gwr` row for what differs.
+"""
 function _scan_gwr!(
     scan_rows::Vector{NamedTuple}, cfg::InterpolationBenchmarkConfig, row::NamedTuple, scored,
     train_lonlat::Matrix{Float64}, target_values::Matrix{Float64},
@@ -401,8 +414,13 @@ function _scan_gwr!(
 end
 
 """
-Mixed GWR: same grid as `_scan_gwr!`, residual mode only, so the family stays at equal search
-budget.
+Mixed GWR: same grid as [`_scan_gwr!`](@ref), residual mode only, so the family stays at equal
+search budget.
+
+Unreachable from `run_interpolation_benchmark.jl`. `mixed_gwr` exists only in residual mode, and
+residual mode always carries a DEM or joint context that routes it away before this is reached, so
+this scan serves only a direct caller that supplies neither. Kept because that caller is what the
+tests use, and because `_scan_gwr!` documents the same routing.
 """
 function _scan_mixed_gwr!(
     scan_rows::Vector{NamedTuple}, cfg::InterpolationBenchmarkConfig, row::NamedTuple, scored,

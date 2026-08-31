@@ -628,6 +628,73 @@ end
     end
 end
 
+@testset "direct and residual gwr share a grid, and only a grid" begin
+    # F3: `gwr` and `residual_gwr` are two implementations, not one estimator under two response
+    # targets. What they genuinely share is the kernel x bandwidth search, and that sharing rests
+    # on two pairs of independent computations that happen to agree. Both are pinned here, because
+    # nothing else checks them and a divergence would silently reintroduce the unequal search
+    # budget `_bandwidth_families` was written to remove.
+
+    # (1) The weight formulas. `gw_weight!` (MixedGWR, used by direct gwr) takes the `Int(bw)`-th
+    # smallest distance and falls through to `dn * maximum` when `bw > n`; `_gw_local_weights!`
+    # (DEMTerrainExperiment, used by every residual path) takes the `clamp(round(bw), 2, ...)`-th
+    # over finite distances only. The in-tree comment at DEMTerrainExperiment.jl calls these
+    # "different weights for the same nominal bandwidth", which is true in general — and false on
+    # the grids this benchmark actually searches, because every candidate is a whole number, the
+    # clamp floor is below all of them, and the callers keep `bw <= n` so the fallthrough is
+    # unreachable. That is what makes the shared grid meaningful rather than nominal.
+    rng = MersenneTwister(20260901)
+    n = 60
+    lon = 109.0 .+ 4rand(rng, n)
+    lat = 29.5 .+ 2rand(rng, n)
+    lonlat = hcat(lon, lat)
+    distances = haversine_distance_matrix(lonlat, lonlat)
+    buffer = Vector{Float64}(undef, n)
+    adaptive_grid = [8.0, 12.0, 16.0, 20.0, 30.0, 50.0]   # full and --local-grid candidates < n
+    fixed_grid = [5.0, 10.0, 20.0, 30.0, 50.0, Inf]        # bw_fixed_km plus the global candidate
+    for (grid, adaptive) in ((adaptive_grid, true), (fixed_grid, false))
+        for bw in grid, kernel in 0:4
+            kernel_fn = MixedGWR.GWR_KERNELS[kernel + 1]
+            for target in 1:n
+                column = distances[:, target]
+                library = zeros(n)
+                MixedGWR.gw_weight!(library, copy(column), bw; kernel=kernel, adaptive=adaptive)
+                benchmark = zeros(n)
+                DEMTerrainExperiment._gw_local_weights!(
+                    benchmark, copy(column), bw, kernel_fn, buffer; adaptive=adaptive,
+                )
+                @test isequal(library, benchmark)
+            end
+        end
+    end
+
+    # (2) The candidate filters. Direct gwr reaches the grid through
+    # `_usable_adaptive_candidates`; the joint path recomputes the same bound as
+    # `inner_train_minimum` in `select_joint_parameter!` — the smallest inner-selection training
+    # size, which is `n_train - max group size`. Two computations, one invariant.
+    candidates = [8.0, 12.0, 16.0, 20.0, 30.0, 50.0, 80.0, 120.0]
+    grid_cfg = InterpolationBenchmarkConfig(mger=MGERConfig(
+        station_meta_path="unused.csv", obs_hourly_wide_path="unused.csv",
+        sat_paths=Dict("FY4B" => "unused.csv"), outdir="unused",
+        bw_adaptive=candidates, bw_fixed_km=[10.0, 20.0, 30.0, 50.0],
+    ))
+    for (n_train, groups) in (
+            (190, [collect(1:38), collect(39:76), collect(77:114), collect(115:152), collect(153:190)]),
+            (60, [collect(1:20), collect(21:40), collect(41:60)]),
+            (37, [collect(1:12), collect(13:25), collect(26:37)]))
+        direct = _usable_adaptive_candidates(candidates, n_train, groups)
+        inner_train_minimum = minimum(n_train - length(group) for group in groups)
+        joint = filter(<=(inner_train_minimum), candidates)
+        @test direct == joint
+        @test _selection_train_minimum(n_train, groups) == inner_train_minimum
+        # And both families are then built by the one helper, so the fixed side cannot diverge.
+        @test _bandwidth_families(grid_cfg, direct) ==
+            _bandwidth_families(grid_cfg, joint)
+    end
+    # Leave-one-out geometry keeps the historical `n_train - 1` bound.
+    @test _selection_train_minimum(190, nothing) == 189
+end
+
 @testset "Explicit global bandwidth candidate" begin
     # The whole design rests on `bw = Inf` meaning "unweighted OLS over the training stations"
     # for every kernel, so that global can ride the existing bandwidth plumbing instead of
@@ -1113,6 +1180,13 @@ end
                 "balanced_spatial/$(product) $(kept)/", lowercase(common_mask_scope),
             )
         end
+        # `training_signal` records what separates gwr from residual_gwr by design; this row
+        # records what separates them by accident, so the two columns are not read as one
+        # estimator under two response targets.
+        gwr_difference = only(scope.value[scope.key .== "gwr_vs_residual_gwr"])
+        @test occursin("two implementations", gwr_difference)
+        @test occursin("raw centred degrees", gwr_difference)
+        @test occursin("unit variance", gwr_difference)
         @test only(scope.value[scope.key .== "repeated_cv_partitions"]) == "1"
 
         # Two partitions: rows are stamped per repeat and the spread tables are populated.
