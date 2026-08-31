@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "deny": [
+      "Bash(git worktree remove:*)",
+      "Bash(git worktree prune:*)",
+      "PowerShell(git worktree remove:*)",
+      "PowerShell(git worktree prune:*)",
+      "Edit(data/**)",
+      "Write(data/**)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "pwsh",
+            "args": [
+              "-NoProfile",
+              "-File",
+              "C:/Users/qw123/GG/GeoWeightedRegression.jl/.claude/hooks/guard-data.ps1"
+            ],
+            "timeout": 15,
+            "statusMessage": "Checking data-safety guard..."
+          }
+        ]
+      },
+      {
+        "matcher": "ExitWorktree",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "pwsh",
+            "args": [
+              "-NoProfile",
+              "-File",
+              "C:/Users/qw123/GG/GeoWeightedRegression.jl/.claude/hooks/guard-data.ps1"
+            ],
+            "timeout": 30,
+            "statusMessage": "Scanning worktree for junctions..."
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "pwsh",
+            "args": [
+              "-NoProfile",
+              "-File",
+              "C:/Users/qw123/GG/GeoWeightedRegression.jl/.claude/hooks/guard-data.ps1",
+              "-Mode",
+              "Tripwire"
+            ],
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -10,3 +10,7 @@ data/raw/copernicus_glo30/
 
 data/
 output/
+
+# Claude Code: settings.json and hooks/ are tracked; local session state is not
+.claude/scheduled_tasks.lock
+.claude/worktrees/
