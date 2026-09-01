@@ -203,6 +203,100 @@ When adding a new file to `src/`, follow the existing pattern: if it's a reusabl
 
 `scripts/` calls into `src/` — algorithms and reusable logic live in `src/`, not in scripts. A script typically: sets `LOAD_PATH`, does `using MixedGWR`, `include`s any standalone modules/pipeline files it needs, then builds a config struct and calls a pipeline function.
 
+## GWR-family design review — findings not yet acted on
+
+A design review of the GWR-family methods (2026-08-31) produced nine findings. Five were fixed on
+branch `fix/local-hat-unsupported-target-nan`, each commit carrying its own analysis: `2996b07`
+F1 (unsupported local targets), `8ff27c6` F2 (duplicate methods), `f7967d8` E1+E2 (evaluation
+mask), `81b8602` F3 (direct vs residual gwr), `6ee1497` F5 (mgwr nesting), `fb92dd8` F6 (role test
+vs bandwidth search).
+
+The four below were **not** acted on. They are recorded here rather than in an issue tracker
+because each is a statement about how the benchmark is put together, and the evidence for it is
+worth more than the one-line summary.
+
+### F4 — residual mode is a property of the family, not a factor
+
+`BENCHMARK_METHODS` (`src/InterpolationBenchmarkConfig.jl:1`) offers both `gwr` and
+`residual_gwr`, but `TRADITIONAL_METHODS = ["idw", "adw", "tps"]` (line 6) has no residual
+counterpart — there is no `residual_idw` or `residual_tps`. Every method that corrects satellite
+residuals is therefore also a GWR, and every non-GWR method interpolates the gauge field directly.
+"`residual_gwr` beats `tps`" consequently varies the framing and the estimator at the same time,
+and the design cannot separate them. Making residual mode an orthogonal factor would need a
+residual variant of at least one traditional method.
+
+### F7 — two back-fits, two stopping rules, one nominal tolerance
+
+`DEMTerrainExperiment._backfit_components` (`src/DEMTerrainExperiment.jl:597` and `:708`) stops on
+the relative change in **RSS**. `JointCovariateModels._multiscale_predict_damped`
+(`src/JointCovariateModels.jl:607`) stops on the relative **L2 change in the fitted vector**. Both
+default to `tolerance = 1e-5`, so the same configured number means two different things depending
+on which path a model takes. They also disagree on failure: the joint one returns all-NaN with
+`converged=false`, discarding the hour; the DEM one returns its last iterate.
+
+### F8 — non-convergence removes a candidate instead of penalising it
+
+`converged || continue` at `src/InterpolationBenchmarkTuning.jl:199` drops an entire
+kernel/bandwidth-family combination from the mgwr comparison when its coordinate descent has not
+stabilised within `mgwr_max_tuning_iterations`; `src/InterpolationBenchmarkJoint.jl:236` does the
+same one level down. A combination that converges slowly is not scored worse — it is not scored at
+all, so convergence speed can decide which kernel wins.
+
+Not currently firing: on the canonical full run, 74 of 81 descent rows converge at iteration 2 and
+none reaches the 5-iteration cap. The finding is about fragility under a harder configuration, not
+a live error in the published numbers.
+
+### F9 — minor items
+
+- `any_converged .|= group_converged` (`src/InterpolationBenchmarkJoint.jl:76`) should be `.&=` if
+  the flag is meant to say "every group converged". Inert while the value is only consumed as
+  "any", but the variable name already claims the stronger reading.
+- `_predict_time` (`src/JointCovariateModels.jl:540`) is dead — zero callers — and carries a
+  *third* back-fit with its own stopping rule, so F7's divergence is latent in triplicate.
+  `_mixed_predict_complete` and `_multiscale_predict_complete` in `src/DEMTerrainExperiment.jl`
+  are dead as well.
+- The ridge is an absolute constant applied to designs whose columns differ in scale by orders of
+  magnitude, so it does not regularise them comparably.
+- GPM and GSMaP emit bit-identical baseline rows, which is worth confirming is intended.
+- The bandwidth grid still saturates at its endpoints in some fold-cells.
+
+### Outstanding verification: F1's benchmark-level gate
+
+F1 changed unfittable local targets from a fabricated all-zero hat row to NaN. Unit tests cover
+it; the benchmark-level regression gate has never run, because the full dataset was absent. Run it
+when the data is back. **Step 1 is not optional** — the legacy run writes to the same directory as
+the existing baseline, so skipping it destroys the thing being compared against:
+
+```sh
+# 1. Snapshot the existing baseline FIRST.
+cp -r output/interpolation_benchmark_smoke_joint_covariates_nested_mgwrintercept_only \
+      output/_f1_baseline_smoke
+# 2. Re-run with the pre-fix behaviour restored.
+julia -t 4 --project=. scripts/run_interpolation_benchmark.jl smoke \
+      --nested-covariates --legacy-unsupported-zero
+# 3. Byte-identical to the baseline is the pass condition.
+julia --project=. scripts/verify_perf_invariance.jl output/_f1_baseline_smoke \
+      output/interpolation_benchmark_smoke_joint_covariates_nested_mgwrintercept_only
+```
+
+Then run the new default (its output directory gains a `_nanunsupported` suffix, so it cannot
+collide with either of the above) and compare with `scripts/compare_benchmark_runs.jl --smoke`,
+watching the shared evaluation mask. F1 is *expected* to shrink the mask: targets that were
+silently counted as fitted now drop out honestly. A mask that does not move is the surprising
+outcome, not a passing one.
+
+### Queued experiment
+
+A `--mgwr-grouping shared` full run needs no new code and would settle two open questions at once:
+F5's decomposition (is `:intercept_only` mgwr a distinct model, or a nested extension of
+`mixed_gwr`?) and F6's corollary (how much of mgwr's advantage over `mixed_gwr` is its ability to
+demote an over-eager `local` role assignment to `bw = Inf`, rather than multiscale resolution?).
+
+### Re-running the review's diagnostics
+
+`scripts/verify_shared_mask_composition.jl` and `scripts/verify_role_vs_bandwidth.jl` reproduce
+the measurements behind E1/E2 and F6 from a completed run directory.
+
 ## Coding Requirements
 
 - Use Julia.
