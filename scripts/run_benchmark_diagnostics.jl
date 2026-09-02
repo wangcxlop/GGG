@@ -18,9 +18,14 @@ load_standalone_modules("BenchmarkDiagnostics")
 using Main.BenchmarkDiagnostics
 
 const STUDY_DATA = joinpath(ROOT, "data", "processed", "study_area")
+# The canonical baseline: default full mode + `--nested-covariates`, on the dataset rebuilt
+# 2026-09-02. This used to point at the `_localgrid` run, which is now retired to
+# `output/_legacy_11426h_20260829/`. Repointing is not cosmetic: `load_common_data` below
+# rebuilds the common grid from *current* data (13471 hours), so aiming this at an
+# 11426-hour run would diagnose one run's stored predictions against another run's grid.
 const DEFAULT_RUN = joinpath(
     ROOT, "output",
-    "interpolation_benchmark_full_joint_covariates_nested_localgrid_mgwrintercept_only",
+    "interpolation_benchmark_full_joint_covariates_nested_mgwrintercept_only",
 )
 const NULLS = ["zero", "train_clim", "hour_field_mean"]
 
