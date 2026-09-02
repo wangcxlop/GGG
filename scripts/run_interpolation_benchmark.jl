@@ -22,7 +22,7 @@ repeat_seeds(repeats::Int) = repeats <= 1 ? Int[] : [20260627 + 1000 * i for i i
 
 function benchmark_config(
     mode::Symbol; with_random::Bool=false, legacy_dem::Bool=false, repeats::Int=1,
-    nested_covariates::Bool=false, local_grid::Bool=false,
+    nested_covariates::Bool=false, local_grid::Bool=false, equal_grids::Bool=false,
     stratified_tuning_weights::Bool=false, legacy_tuning_geometry::Bool=false,
     mgwr_grouping::Symbol=:intercept_only, residual_shrinkage::Bool=true,
     unsupported_local_target::Symbol=:missing, free_satellite_coefficient::Bool=false,
@@ -44,6 +44,7 @@ function benchmark_config(
                 "interpolation_benchmark_full_joint_covariates")) *
             (nested_covariates ? "_nested" : "") *
             (local_grid ? "_localgrid" : "") *
+            (equal_grids ? "_equalgrids" : "") *
             (stratified_tuning_weights ? "_strattuning" : "") *
             (legacy_tuning_geometry ? "_loocvtuning" : "") *
             # Keyed on the historical layout rather than on the current default, so the pre-fix
@@ -95,7 +96,17 @@ function benchmark_config(
     # 5 km is already well under Hubei's ~28 km mean station spacing. Read a floor-pinned
     # selection as "this cell wants an interpolator, not a regression", which is what the
     # GWR-family-versus-adw gap says too.
-    bw_adaptive = local_grid ? [8.0, 12.0, 16.0, 20.0, 30.0, 50.0, 80.0, 120.0] :
+    #
+    # `--equal-grids` is `--local-grid`'s bandwidths *plus* a correspondingly widened grid for
+    # IDW/ADW/TPS. `--local-grid` widened only the GWR family, which left the comparison tuned
+    # unevenly: on the canonical full run `idw`/`adw` selected `power = 3.0` and `neighbors = all`
+    # - both grid maxima - in 15 of 15 balanced_spatial folds, and `tps` selected the maximum
+    # `smooth = 1.0` in 9 of 15, so the baselines were pinned against their own ceilings while the
+    # GWR family got more room. Widening one side only is the criticism this design invites, so
+    # the two move together or not at all. Kept separate from `--local-grid` rather than
+    # redefining it: the `_localgrid` run directories already on disk were produced under the
+    # narrow-baseline meaning and must keep it.
+    bw_adaptive = local_grid || equal_grids ? [8.0, 12.0, 16.0, 20.0, 30.0, 50.0, 80.0, 120.0] :
         (smoke ? [30.0, 80.0] : [30.0, 50.0, 80.0, 120.0])
     mger = MGERConfig(
         station_meta_path=joinpath(STUDY_DATA, "station_meta.csv"),
@@ -121,7 +132,7 @@ function benchmark_config(
         kernels=smoke ? [GAUSSIAN, BISQUARE] :
             [GAUSSIAN, EXPONENTIAL, BISQUARE, TRICUBE, BOXCAR],
         bw_adaptive=bw_adaptive,
-        bw_fixed_km=local_grid ? [5.0, 10.0, 20.0, 30.0, 50.0] :
+        bw_fixed_km=local_grid || equal_grids ? [5.0, 10.0, 20.0, 30.0, 50.0] :
             (smoke ? [30.0, 50.0] : [10.0, 20.0, 30.0, 50.0]),
         rain_threshold=0.1,
         use_loocv_eval=true,
@@ -222,11 +233,19 @@ function benchmark_config(
         seed=20260627,
         seeds=repeat_seeds(repeats),
         cv_schemes=schemes,
-        idw_powers=smoke ? [1.5, 2.0, 2.5] : [1.0, 1.5, 2.0, 2.5, 3.0],
-        neighbor_candidates=smoke ? Union{Nothing,Int}[16, 32] :
-            Union{Nothing,Int}[8, 16, 32, 64, nothing],
-        tps_smooth_candidates=smoke ? [1e-3, 1e-2, 1e-1] :
-            [1e-4, 1e-3, 1e-2, 1e-1, 1.0],
+        # Extended past the endpoints the canonical run selected at: `power` beyond 3.0 and
+        # `smooth` beyond 1.0, plus a lower neighbour floor matching the GWR family's 8. The
+        # unbounded `nothing` neighbour candidate is already the widest possible, so that end of
+        # the grid cannot be opened further - a selection landing there stays a real answer.
+        idw_powers=equal_grids ? [1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0] :
+            (smoke ? [1.5, 2.0, 2.5] : [1.0, 1.5, 2.0, 2.5, 3.0]),
+        neighbor_candidates=equal_grids ?
+            Union{Nothing,Int}[4, 8, 16, 32, 64, 128, nothing] :
+            (smoke ? Union{Nothing,Int}[16, 32] :
+                Union{Nothing,Int}[8, 16, 32, 64, nothing]),
+        tps_smooth_candidates=equal_grids ?
+            [1e-4, 1e-3, 1e-2, 1e-1, 1.0, 10.0, 100.0] :
+            (smoke ? [1e-3, 1e-2, 1e-1] : [1e-4, 1e-3, 1e-2, 1e-1, 1.0]),
         min_tuning_coverage=0.95,
         tuning_max_times=smoke ? 72 : 336,
         tuning_time_weighting=stratified_tuning_weights ? :stratified : :uniform,
@@ -287,6 +306,8 @@ function main(args=ARGS)
     end
     repeats = parse_repeats(args)
     local_grid = "--local-grid" in args
+    # Widen both families' search grids together. See the comment above `bw_adaptive`.
+    equal_grids = "--equal-grids" in args
     # Hyperparameters are tuned on a wet-oversampled subsample but scored on every hour, so the
     # tuning RMSE runs ~3x the metric it estimates. --stratified-tuning-weights reweights the
     # subsample to remove that. It is opt-in, not the default: the level error turned out to be
@@ -322,8 +343,8 @@ function main(args=ARGS)
     # per location. Opt-in, so every earlier run reproduces unchanged.
     free_satellite_coefficient = "--free-satellite-coefficient" in args
     cfg = benchmark_config(mode; with_random, legacy_dem, repeats, nested_covariates,
-        local_grid, stratified_tuning_weights, legacy_tuning_geometry, mgwr_grouping,
-        residual_shrinkage, unsupported_local_target, free_satellite_coefficient)
+        local_grid, equal_grids, stratified_tuning_weights, legacy_tuning_geometry,
+        mgwr_grouping, residual_shrinkage, unsupported_local_target, free_satellite_coefficient)
     !legacy_dem && Threads.nthreads() == 1 && @warn(
         "Joint dynamic models are compute intensive; use julia -t auto for parallel hourly fits",
     )
@@ -334,6 +355,7 @@ function main(args=ARGS)
     )
     println("Running interpolation benchmark: mode=$mode, repeats=$repeats, " *
         "nested_covariates=$nested_covariates, local_grid=$local_grid, " *
+        "equal_grids=$equal_grids, " *
         "tuning_time_weighting=$(cfg.tuning_time_weighting), " *
         "tuning_geometry=$(cfg.tuning_geometry), " *
         "mgwr_grouping=$mgwr_grouping, " *
