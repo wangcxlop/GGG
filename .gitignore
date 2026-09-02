@@ -14,3 +14,6 @@ output/
 # Claude Code: settings.json and hooks/ are tracked; local session state is not
 .claude/scheduled_tasks.lock
 .claude/worktrees/
+
+# GMT scratch, written into the working directory by any plotting call
+gmt.history

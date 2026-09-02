@@ -32,7 +32,8 @@
 param(
     [Parameter(ParameterSetName = 'Lock')]   [switch]$Lock,
     [Parameter(ParameterSetName = 'Unlock')] [switch]$Unlock,
-    [Parameter(ParameterSetName = 'Status')] [switch]$Status
+    [Parameter(ParameterSetName = 'Status')] [switch]$Status,
+    [switch]$RawOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -100,6 +101,7 @@ function Invoke-Icacls {
 
 function Set-DenyDelete {
     param([pscustomobject]$Entry)
+    if (Test-Locked $Entry.Path) { return $true }
     # DE = delete this object. DC = delete a child through the parent's right.
     # (OI)(CI) makes the ACE inherit to every descendant, which is what actually
     # saves the files inside a directory.
@@ -109,6 +111,7 @@ function Set-DenyDelete {
 
 function Remove-DenyDelete {
     param([pscustomobject]$Entry)
+    if (-not (Test-Locked $Entry.Path)) { return $true }
     Invoke-Icacls @($Entry.Path, '/remove:d', $Identity)
 }
 
@@ -118,11 +121,20 @@ function Test-Locked {
     return [bool]($acl | Select-String -SimpleMatch '(DENY)' -Quiet)
 }
 
-$all = @(Get-ProtectedEntry) + @(Get-ShellEntry)
+$all = if ($RawOnly) {
+    @([pscustomobject]@{
+        Path        = Join-Path $DataDir 'raw'
+        IsContainer = $true
+        Inherited   = $true
+    })
+} else {
+    @(Get-ProtectedEntry) + @(Get-ShellEntry)
+}
 
 switch ($PSCmdlet.ParameterSetName) {
     'Lock' {
-        Write-Host "Locking $($all.Count) path(s) under $DataDir against deletion..."
+        $scope = if ($RawOnly) { 'data/raw' } else { $DataDir }
+        Write-Host "Locking $($all.Count) path(s) under $scope against deletion..."
         $failed = 0
         foreach ($e in $all) {
             if (-not (Set-DenyDelete $e)) { $failed++ }
@@ -130,13 +142,15 @@ switch ($PSCmdlet.ParameterSetName) {
         Write-Host ''
         if ($failed -gt 0) {
             Write-Warning "$failed path(s) could not be locked -- see the warnings above."
+            exit 1
         }
         Write-Host "Locked. Run with -Unlock before any data re-download: the download"
         Write-Host "scripts delete their own .partial temporaries under data/raw/."
         Write-ElevationWarning
     }
     'Unlock' {
-        Write-Host "Unlocking $($all.Count) path(s) under $DataDir..."
+        $scope = if ($RawOnly) { 'data/raw' } else { $DataDir }
+        Write-Host "Unlocking $($all.Count) path(s) under $scope..."
         $failed = 0
         foreach ($e in $all) {
             if (-not (Remove-DenyDelete $e)) { $failed++ }
@@ -144,6 +158,7 @@ switch ($PSCmdlet.ParameterSetName) {
         Write-Host ''
         if ($failed -gt 0) {
             Write-Warning "$failed path(s) could not be unlocked -- see the warnings above."
+            exit 1
         }
         Write-Host "Unlocked. data/ is now deletable -- re-run with -Lock as soon as the"
         Write-Host "download or cleanup you needed this for is finished."

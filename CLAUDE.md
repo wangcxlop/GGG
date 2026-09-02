@@ -123,6 +123,13 @@ output — the results do not depend on the thread count, only the wall clock do
 julia -t 4 --project=. scripts/run_interpolation_benchmark.jl full --nested-covariates
 ```
 
+Every option that changes what is fitted also changes the output directory name, so a run can
+never overwrite the baseline it is measured against. Two recent ones:
+`--free-satellite-coefficient` (`_freesat`) fits the satellite's coefficient locally instead of
+forcing it to 1 — see F4 below for what it is for — and `--equal-grids` (`_equalgrids`) widens the
+GWR *and* the IDW/ADW/TPS search grids together, unlike `--local-grid`, which widened only the GWR
+family and so left the baselines pinned against their own ceilings.
+
 Four is not a magic number: it is where this machine's allocation contention starts to bite.
 Re-derive it on new hardware with `scripts/profile_hour_fit.jl`, which prints the per-hour cost
 and the loop's speedup at the thread count it is given. Do not run single-threaded — that is
@@ -225,6 +232,34 @@ residuals is therefore also a GWR, and every non-GWR method interpolates the gau
 and the design cannot separate them. Making residual mode an orthogonal factor would need a
 residual variant of at least one traditional method.
 
+**Measured, 2026-09-01.** The framing is not just unseparated from the estimator — it is where the
+whole loss comes from. `satellite_quadrant.csv` splits the MSE gap against `adw` on the joint
+wet/dry state of gauge and satellite (balanced_spatial, `mgwr`, the 2026-08-29 full run — now
+legacy, see below; these numbers have not been recomputed on the current baseline):
+
+| quadrant | share | `mgwr` FY4B / GPM / GSMaP | `adw` | gap contribution |
+|---|---|---|---|---|
+| gauge dry, satellite dry | 86.5% | 0.056 / 0.019 / 0.026 | 0.057 / 0.045 / 0.050 | **−0.001 / −0.022 / −0.021** |
+| gauge dry, satellite wet | 6.2% | 3.669 / 2.080 / 1.383 | 0.675 / 0.742 / 0.758 | **+0.185 / +0.092 / +0.038** |
+| gauge wet, satellite dry | 4.6% | 6.385 / 6.681 / 5.463 | 6.126 / 6.048 / 5.134 | +0.012 / +0.015 / +0.009 |
+| gauge wet, satellite wet | 2.7% | 19.41 / 13.62 / 13.47 | 19.44 / 13.38 / 14.44 | −0.001 / +0.012 / −0.045 |
+
+The family *beats* `adw` in the dominant dry/dry quadrant and on heavy rain, and loses only where
+the satellite falsely reports rain. A false alarm is patchy at the satellite's own error scale, so
+the training stations' residuals carry no information about it and a spatially smooth correction
+cannot cancel a value the model was handed. Two things follow:
+
+- Gating the *correction* cannot help — it only reaches the satellite-dry quadrants, where
+  nothing is wrong. Measured: a dry-cell gate buys 0.3–0.4% RMSE and costs 3–4% relative POD.
+- Discounting the *anchor* does, and lifts RMSE and POD together. `anchor_discount_bounds.csv`
+  puts `mgwr`/GSMaP at 0.910 against `adw`'s 0.944 with POD rising 0.813 → 0.831, and shows a
+  single global discount constant is not enough — the coefficient has to vary.
+
+`--free-satellite-coefficient` acts on this: it puts the satellite into the local design as
+`JointCovariateModels.SATELLITE_GROUP` so the effective coefficient becomes `1 + b_sat(u)` rather
+than a forced 1. Off by default, output directory suffix `_freesat`. Not yet run on the
+benchmark, but no longer blocked: `data/processed/covariates/` was rebuilt on 2026-09-02.
+
 ### F7 — two back-fits, two stopping rules, one nominal tolerance
 
 `DEMTerrainExperiment._backfit_components` (`src/DEMTerrainExperiment.jl:597` and `:708`) stops on
@@ -242,7 +277,7 @@ stabilised within `mgwr_max_tuning_iterations`; `src/InterpolationBenchmarkJoint
 same one level down. A combination that converges slowly is not scored worse — it is not scored at
 all, so convergence speed can decide which kernel wins.
 
-Not currently firing: on the canonical full run, 74 of 81 descent rows converge at iteration 2 and
+Not currently firing: on the 2026-08-29 full run (now legacy), 74 of 81 descent rows converge at iteration 2 and
 none reaches the 5-iteration cap. The finding is about fragility under a harder configuration, not
 a live error in the published numbers.
 
@@ -263,39 +298,92 @@ a live error in the published numbers.
 ### Outstanding verification: F1's benchmark-level gate
 
 F1 changed unfittable local targets from a fabricated all-zero hat row to NaN. Unit tests cover
-it; the benchmark-level regression gate has never run, because the full dataset was absent. Run it
-when the data is back. **Step 1 is not optional** — the legacy run writes to the same directory as
-the existing baseline, so skipping it destroys the thing being compared against:
+it; the benchmark-level gate has never run.
+
+**The protocol this section used to describe is now unreachable, and must not be followed.** It
+asked for a `--legacy-unsupported-zero` re-run to come out *byte-identical* to the baseline
+directory on disk. Three separate things now make that impossible, and none of them is F1: the
+data was rebuilt (11426 → 13471 full-mode hours, and 8067 → 8069 even in the Jun–Sep window), the
+IDW/ADW kernel was rewritten to form its weights per availability group, and the old baseline is
+archived under `output/_legacy_11426h_20260829/`. A byte comparison against it would fail for
+reasons that have nothing to do with unsupported local targets.
+
+The achievable replacement is a **paired run on one code and one dataset**, where the flag is the
+only thing that differs (~10 h total):
 
 ```sh
-# 1. Snapshot the existing baseline FIRST.
-cp -r output/interpolation_benchmark_smoke_joint_covariates_nested_mgwrintercept_only \
-      output/_f1_baseline_smoke
-# 2. Re-run with the pre-fix behaviour restored.
-julia -t 4 --project=. scripts/run_interpolation_benchmark.jl smoke \
-      --nested-covariates --legacy-unsupported-zero
-# 3. Byte-identical to the baseline is the pass condition.
-julia --project=. scripts/verify_perf_invariance.jl output/_f1_baseline_smoke \
-      output/interpolation_benchmark_smoke_joint_covariates_nested_mgwrintercept_only
+julia -t 4 --project=. scripts/run_interpolation_benchmark.jl full --nested-covariates
+julia -t 4 --project=. scripts/run_interpolation_benchmark.jl full --nested-covariates \
+      --legacy-unsupported-zero
+julia --project=. scripts/compare_benchmark_runs.jl \
+      output/interpolation_benchmark_full_joint_covariates_nested_mgwrintercept_only \
+      output/interpolation_benchmark_full_joint_covariates_nested_mgwrintercept_only_legacyzero
 ```
 
-Then run the new default (its output directory gains a `_nanunsupported` suffix, so it cannot
-collide with either of the above) and compare with `scripts/compare_benchmark_runs.jl --smoke`,
-watching the shared evaluation mask. F1 is *expected* to shrink the mask: targets that were
-silently counted as fitted now drop out honestly. A mask that does not move is the surprising
-outcome, not a passing one.
+No snapshot step is needed any more: the two runs land in different directories by construction,
+because the suffix is keyed on the legacy flag (see below). Watch the shared evaluation mask. F1
+is *expected* to shrink it — targets that were silently counted as fitted now drop out honestly —
+so a mask that does not move is the surprising outcome, not a passing one.
 
-### Queued experiment
+### Output directory naming: the clean name is the corrected default
 
-A `--mgwr-grouping shared` full run needs no new code and would settle two open questions at once:
-F5's decomposition (is `:intercept_only` mgwr a distinct model, or a nested extension of
-`mixed_gwr`?) and F6's corollary (how much of mgwr's advantage over `mixed_gwr` is its ability to
-demote an over-eager `local` role assignment to `bw = Inf`, rather than multiscale resolution?).
+Every option that changes what is fitted adds a suffix, so a run can never overwrite the baseline
+it is measured against. The unsupported-target suffix was keyed the other way round until
+2026-09-02: the *corrected* default carried `_nanunsupported` and the pre-fix path took the clean
+name, so that a corrected run could not overwrite the pre-fix baseline it was being compared with.
+That baseline is now archived and the comparison retired, so the key was inverted — the default
+owns the clean name and `--legacy-unsupported-zero` produces `_legacyzero`. Left as it was, the
+clean name would have sat empty and free for a future legacy run to claim, which is exactly the
+collision the suffixes exist to prevent.
+
+### The canonical baseline, and what is legacy
+
+**Canonical:** `output/interpolation_benchmark_full_joint_covariates_nested_mgwrintercept_only`,
+produced by `run_interpolation_benchmark.jl full --nested-covariates` on the dataset rebuilt
+2026-09-02 — 13471 common hours spanning 2022-06-01T09 → 2025-01-01T08. Which commit produced it
+is recorded *in the run*: `benchmark_scope.csv` now carries `git_commit`, `git_branch` and
+`git_dirty`. Read those rather than inferring from a date, and treat `git_dirty = true` as saying
+the run is not citable.
+
+**Legacy:** every result computed on the 11426-hour grid ending 2024-10-01 is retired under
+`output/_legacy_11426h_20260829/`, together with the matching `benchmark_diagnostics/`
+subdirectories. See the `README.txt` there for what each one was.
+
+Do **not** run `scripts/compare_benchmark_runs.jl` against anything in that archive. It rebuilds
+the time grid from current data (13471 hours) and would intersect it with stored `oof_*.csv`
+covering 11426, so it would print a delta between two different cell populations and nothing would
+mark it as such.
+
+### Queued experiments
+
+All four need no new code, cost ~5 h each, and land in their own suffixed directory, so none can
+overwrite the baseline. Run them only once the canonical baseline above stands.
+
+- `--mgwr-grouping shared` settles two open questions at once: F5's decomposition (is
+  `:intercept_only` mgwr a distinct model, or a nested extension of `mixed_gwr`?) and F6's
+  corollary (how much of mgwr's advantage over `mixed_gwr` is its ability to demote an over-eager
+  `local` role assignment to `bw = Inf`, rather than multiscale resolution?).
+- `--free-satellite-coefficient` (`_freesat`) — F4's lever, the one measurement that suggested
+  RMSE and POD can move together.
+- `--equal-grids` (`_equalgrids`) — whether the GWR family's margin survives giving IDW/ADW/TPS
+  the same search budget.
+- The paired F1 gate described under "Outstanding verification" above.
 
 ### Re-running the review's diagnostics
 
 `scripts/verify_shared_mask_composition.jl` and `scripts/verify_role_vs_bandwidth.jl` reproduce
 the measurements behind E1/E2 and F6 from a completed run directory.
+
+`scripts/verify_dry_gate_replay.jl` and `scripts/verify_anchor_discount_bounds.jl` reproduce F4's
+measurement. Both rescore a completed run's stored `oof_*.csv` under a counterfactual instead of
+refitting, so they need only the run directory and `data/processed/study_area/` — they run while
+the covariate inputs are missing. Each asserts an identity that must return the stored prediction
+unchanged (`gate = 1`, `a = 1`) before reporting anything; treat a failure there as a broken
+reading path, not a finding. Outputs land beside the other diagnostics as `dry_gate_replay.csv`,
+`satellite_quadrant.csv` and `anchor_discount_bounds.csv`.
+
+Both hold the run's selected bandwidth, kernel and shrinkage fixed, so neither can see how the
+tuner would re-select them. They bound what is worth building; they are not results.
 
 ## Coding Requirements
 
