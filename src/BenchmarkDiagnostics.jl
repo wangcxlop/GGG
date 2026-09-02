@@ -21,8 +21,10 @@ module BenchmarkDiagnostics
 using CSV, DataFrames, Dates, Statistics
 
 export read_wide_matrix, read_mask_matrix, read_fold_map, load_prediction_matrices
+export read_run_grid, load_gauge_matrix
 export null_baseline_matrices, satellite_rescale_matrix
 export null_baseline_table, satellite_offset_table, mse_decomposition_table
+export satellite_quadrant_table
 export bandwidth_saturation_table, covariate_contribution_table
 export rebuild_common_mask, dropout_table, mask_cost_table, run_comparison_table
 export JOINT_MASK_METHODS
@@ -99,6 +101,52 @@ end
 function read_fold_map(path::AbstractString)
     df = CSV.read(path, DataFrame; types=Dict(:station_id => String))
     return Dict(String(row.station_id) => Int(row.fold) for row in eachrow(df))
+end
+
+_as_datetime(value::DateTime) = value
+# Gauge files stamp a trailing `Z` where the benchmark's own artefacts do not; stripped the same
+# way `MGERDataPrep.jl:9` and `MGERPipeline.jl:62` already do.
+_as_datetime(value::AbstractString) = DateTime(replace(strip(String(value)), "Z" => ""))
+
+"""
+Station ids and timestamps of a wide `time × station` benchmark CSV, in file order.
+
+The run's own artefacts define the grid a diagnosis has to score on, so it is read off one of
+them rather than rebuilt from a config - which also means a diagnosis needs none of the inputs
+the run itself consumed.
+"""
+function read_run_grid(path::AbstractString)
+    df = CSV.read(path, DataFrame)
+    ids = String.(names(df)[2:end])
+    times = [_as_datetime(value) for value in df[!, 1]]
+    return ids, times
+end
+
+"""
+Gauge observations as a `station × time` matrix on a run's own grid, plus the number of the
+run's hours the file does not cover.
+
+Callers are expected to treat a non-zero shortfall as an error: silently scoring against a
+partly-absent truth is worse than not scoring at all.
+"""
+function load_gauge_matrix(path::AbstractString, ids::Vector{String}, times::Vector{DateTime})
+    df = CSV.read(path, DataFrame)
+    row_of = Dict(_as_datetime(value) => row for (row, value) in enumerate(df[!, 1]))
+    columns = [df[!, Symbol(id)] for id in ids]
+    out = fill(NaN, length(ids), length(times))
+    unmatched = 0
+    for (t, time) in enumerate(times)
+        row = get(row_of, time, 0)
+        if row == 0
+            unmatched += 1
+            continue
+        end
+        for s in eachindex(columns)
+            value = columns[s][row]
+            out[s, t] = value === missing ? NaN : Float64(value)
+        end
+    end
+    return out, unmatched
 end
 
 # ---------------------------------------------------------------------------- scoring
@@ -361,6 +409,69 @@ function mse_decomposition_table(
                 sample_share=weight, RMSE=score.RMSE, MSE=score.MSE,
                 bias_squared=score.Bias^2, variance=score.variance,
                 reference_MSE=reference_score.MSE,
+                mse_gap_contribution=contribution,
+                gap_share=total_gap != 0 ? contribution / total_gap : NaN,
+            ))
+        end
+    end
+    return DataFrame(rows)
+end
+
+"""
+The same gap split, but by the *joint* wet/dry state of gauge and satellite rather than by
+rain class alone.
+
+`mse_decomposition_table` says the GWR family's loss lives in the dry gauge cells; it cannot say
+*which* dry cells, and the two halves behave in opposite directions. The residual framing
+predicts `y_sat + correction`, so a satellite false alarm (`obs` dry, `sat` wet) is an error the
+correction has to cancel out of a value it was handed, while a cell both agree is dry costs the
+correction nothing. Splitting on both is what separates "the estimator is worse" from "the
+anchor is wrong", and those have different fixes.
+
+Quadrants are named `<obs>_<sat>` over `{dry, wet}` at `threshold`, matching the benchmark's
+`rain_threshold`. `mean_sat` is reported because the size of the anchor is the size of the
+problem in the false-alarm quadrant.
+"""
+function satellite_quadrant_table(
+    y_obs::Matrix{Float64}, predictions::Dict{String,Matrix{Float64}},
+    mask::AbstractMatrix; scheme::String, product::String, reference::String="adw",
+    satellite::String="raw", threshold::Float64=0.1,
+)
+    overall_n = count(mask)
+    y_sat = predictions[satellite]
+    reference_overall = _metrics(y_obs, predictions[reference], mask)
+    quadrants = [
+        ("dry_dry", false, false), ("dry_wet", false, true),
+        ("wet_dry", true, false), ("wet_wet", true, true),
+    ]
+    rows = NamedTuple[]
+    for method in sort(collect(keys(predictions)))
+        method == reference && continue
+        total_gap = _metrics(y_obs, predictions[method], mask).MSE - reference_overall.MSE
+        for (name, obs_wet, sat_wet) in quadrants
+            cell = falses(size(mask))
+            satellite_sum = 0.0
+            @inbounds for index in eachindex(mask)
+                mask[index] || continue
+                observed = y_obs[index]
+                anchor = y_sat[index]
+                (isnan(observed) || isnan(anchor)) && continue
+                (observed >= threshold) == obs_wet && (anchor >= threshold) == sat_wet || continue
+                cell[index] = true
+                satellite_sum += anchor
+            end
+            score = _metrics(y_obs, predictions[method], cell)
+            score.n == 0 && continue
+            reference_score = _metrics(y_obs, predictions[reference], cell)
+            weight = count(cell) / overall_n
+            contribution = weight * (score.MSE - reference_score.MSE)
+            push!(rows, (;
+                scheme, product, method, reference, quadrant=name, n=score.n,
+                sample_share=weight, mean_satellite=satellite_sum / count(cell),
+                RMSE=score.RMSE, MSE=score.MSE,
+                bias_squared=score.Bias^2, variance=score.variance,
+                reference_MSE=reference_score.MSE,
+                satellite_MSE=_metrics(y_obs, y_sat, cell).MSE,
                 mse_gap_contribution=contribution,
                 gap_share=total_gap != 0 ? contribution / total_gap : NaN,
             ))

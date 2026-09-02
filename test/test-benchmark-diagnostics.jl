@@ -1,4 +1,4 @@
-using Test, DataFrames
+using Test, DataFrames, Dates
 
 include(joinpath(@__DIR__, "..", "src", "load_modules.jl"))
 load_standalone_modules("BenchmarkDiagnostics")
@@ -229,4 +229,87 @@ end
         y_obs, predictions; scheme="balanced_spatial", product="GPM",
         excluded=String[], methods,
     )
+end
+
+@testset "satellite_quadrant_table splits the gap by gauge and satellite state" begin
+    # One cell per quadrant, plus a fifth that would land in `dry_wet` but is masked out.
+    y_obs = [0.0 0.0 5.0 5.0 0.0]
+    y_sat = [0.0 2.0 0.0 3.0 2.0]
+    adw = [0.0 0.0 4.0 4.0 0.0]
+    mgwr = [1.0 2.0 5.0 5.0 9.0]
+    mask = BitMatrix([true true true true false])
+    predictions = Dict{String,Matrix{Float64}}("raw" => y_sat, "adw" => adw, "mgwr" => mgwr)
+
+    table = BD.satellite_quadrant_table(
+        y_obs, predictions, mask; scheme="balanced_spatial", product="GSMaP",
+    )
+    rows = Dict(row.quadrant => row for row in eachrow(filter(r -> r.method == "mgwr", table)))
+    @test sort(collect(keys(rows))) == ["dry_dry", "dry_wet", "wet_dry", "wet_wet"]
+
+    # The masked-out cell would have been `dry_wet`; it is neither counted nor scored.
+    @test all(row.n == 1 for row in values(rows))
+    @test all(row.sample_share == 0.25 for row in values(rows))
+
+    @test rows["dry_dry"].MSE == 1.0 && rows["dry_dry"].reference_MSE == 0.0
+    @test rows["dry_wet"].MSE == 4.0 && rows["dry_wet"].reference_MSE == 0.0
+    @test rows["wet_dry"].MSE == 0.0 && rows["wet_dry"].reference_MSE == 1.0
+    @test rows["wet_wet"].MSE == 0.0 && rows["wet_wet"].reference_MSE == 1.0
+
+    @test rows["dry_dry"].mean_satellite == 0.0
+    @test rows["dry_wet"].mean_satellite == 2.0
+    @test rows["wet_wet"].mean_satellite == 3.0
+    # The satellite's own error in each quadrant, i.e. how much the residual anchor is off by.
+    @test rows["dry_wet"].satellite_MSE == 4.0
+    @test rows["wet_dry"].satellite_MSE == 25.0
+
+    # The whole point of the table: the contributions decompose the pooled MSE gap exactly.
+    total_gap = 5.0 / 4 - 2.0 / 4
+    @test sum(row.mse_gap_contribution for row in values(rows)) ≈ total_gap
+    @test rows["dry_wet"].gap_share ≈ 1.0 / total_gap
+end
+
+@testset "satellite_quadrant_table counts a cell at the threshold as wet" begin
+    y_obs = [0.0 0.0]
+    y_sat = [0.1 0.09999]
+    predictions = Dict{String,Matrix{Float64}}(
+        "raw" => y_sat, "adw" => [0.0 0.0], "mgwr" => [1.0 1.0],
+    )
+    table = BD.satellite_quadrant_table(
+        y_obs, predictions, trues(1, 2); scheme="random", product="GPM", threshold=0.1,
+    )
+    rows = Dict(row.quadrant => row for row in eachrow(filter(r -> r.method == "mgwr", table)))
+    @test rows["dry_wet"].n == 1
+    @test rows["dry_dry"].n == 1
+end
+
+@testset "read_run_grid and load_gauge_matrix align a gauge file onto a run's grid" begin
+    dir = mktempdir()
+    # A run artefact: no `Z` on its timestamps, two stations, three hours.
+    run_path = joinpath(dir, "oof_raw.csv")
+    write(run_path, """
+    time,s1,s2
+    2022-06-01T09:00:00,0.0,1.0
+    2022-06-01T10:00:00,2.0,3.0
+    2022-06-01T11:00:00,4.0,5.0
+    """)
+    ids, times = BD.read_run_grid(run_path)
+    @test ids == ["s1", "s2"]
+    @test times == [DateTime(2022, 6, 1, 9), DateTime(2022, 6, 1, 10), DateTime(2022, 6, 1, 11)]
+
+    # A gauge file: `Z`-suffixed, out of order, wider than the run, and missing the run's last
+    # hour. Column order differs from the run's, so ordering by `ids` is what is being checked.
+    gauge_path = joinpath(dir, "obs.csv")
+    write(gauge_path, """
+    time,s2,s1,s3
+    2022-06-01T10:00:00Z,30.0,20.0,0.0
+    2022-06-01T08:00:00Z,99.0,99.0,0.0
+    2022-06-01T09:00:00Z,10.0,,0.0
+    """)
+    y_obs, unmatched = BD.load_gauge_matrix(gauge_path, ids, times)
+    @test size(y_obs) == (2, 3)
+    @test unmatched == 1                      # 11:00 is absent from the gauge file
+    @test y_obs[1, 1] === NaN                 # s1 at 09:00 is empty in the gauge file
+    @test y_obs[2, 1] == 10.0
+    @test y_obs[:, 2] == [20.0, 30.0]
+    @test all(isnan, y_obs[:, 3])             # the unmatched hour stays NaN, never zero
 end
