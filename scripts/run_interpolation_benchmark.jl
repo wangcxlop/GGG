@@ -25,11 +25,14 @@ function benchmark_config(
     nested_covariates::Bool=false, local_grid::Bool=false,
     stratified_tuning_weights::Bool=false, legacy_tuning_geometry::Bool=false,
     mgwr_grouping::Symbol=:intercept_only, residual_shrinkage::Bool=true,
-    unsupported_local_target::Symbol=:missing,
+    unsupported_local_target::Symbol=:missing, free_satellite_coefficient::Bool=false,
 )
     mode in (:smoke, :full) || throw(ArgumentError("mode must be :smoke or :full"))
     nested_covariates && legacy_dem && throw(ArgumentError(
         "--nested-covariates only applies to the joint-covariate path, not --legacy-dem",
+    ))
+    free_satellite_coefficient && legacy_dem && throw(ArgumentError(
+        "--free-satellite-coefficient only applies to the joint-covariate path, not --legacy-dem",
     ))
     smoke = mode == :smoke
     # Repeated runs, and nested-selection runs, get their own directory so they never overwrite
@@ -53,6 +56,10 @@ function benchmark_config(
             # its name and a corrected run lands somewhere new instead of overwriting the
             # before-picture. `--legacy-unsupported-zero` therefore reproduces the old path.
             (unsupported_local_target === :missing ? "_nanunsupported" : "") *
+            # Keyed on the new behaviour, like `_nanunsupported`: a freed-coefficient run lands
+            # somewhere new rather than overwriting the forced-offset baseline it is measured
+            # against.
+            (free_satellite_coefficient ? "_freesat" : "") *
             (repeats > 1 ? "_repeats$(repeats)" : ""),
     )
     mkpath(outdir)
@@ -175,6 +182,7 @@ function benchmark_config(
         max_iterations=1000,
         mgwr_spatial_grouping=mgwr_grouping,
         unsupported_local_target=unsupported_local_target,
+        free_satellite_coefficient=free_satellite_coefficient,
     )
     # Same permutation rigor as the per-fold nested selection is asked to match the legacy DEM
     # path's precedent (999 full / 99 smoke), rather than reducing it for speed.
@@ -307,9 +315,15 @@ function main(args=ARGS)
     # `mgwr`'s reported GPM own-coverage from an honest 0.79 to 0.9985. See the field comment in
     # `JointCovariateBenchmarkConfig`. --legacy-unsupported-zero reproduces the pre-fix numbers.
     unsupported_local_target = "--legacy-unsupported-zero" in args ? :zero : :missing
+    # The residual framing hands the model `y_sat` with its coefficient forced to 1, and
+    # `output/benchmark_diagnostics/*/satellite_quadrant.csv` puts the entire GWR-family gap
+    # against `adw` in the cells where that anchor is a false alarm. --free-satellite-coefficient
+    # puts the satellite into the local design instead, so the effective coefficient is fitted
+    # per location. Opt-in, so every earlier run reproduces unchanged.
+    free_satellite_coefficient = "--free-satellite-coefficient" in args
     cfg = benchmark_config(mode; with_random, legacy_dem, repeats, nested_covariates,
         local_grid, stratified_tuning_weights, legacy_tuning_geometry, mgwr_grouping,
-        residual_shrinkage, unsupported_local_target)
+        residual_shrinkage, unsupported_local_target, free_satellite_coefficient)
     !legacy_dem && Threads.nthreads() == 1 && @warn(
         "Joint dynamic models are compute intensive; use julia -t auto for parallel hourly fits",
     )
@@ -325,6 +339,7 @@ function main(args=ARGS)
         "mgwr_grouping=$mgwr_grouping, " *
         "residual_shrinkage=$residual_shrinkage, " *
         "unsupported_local_target=$unsupported_local_target, " *
+        "free_satellite_coefficient=$free_satellite_coefficient, " *
         "output=$(cfg.mger.outdir)")
     result = run_interpolation_benchmark(cfg)
     println("Finished: $(nrow(result.metrics)) metric rows, $(nrow(result.scans)) scan rows")

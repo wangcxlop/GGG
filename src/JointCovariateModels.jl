@@ -20,13 +20,37 @@ using Main.DEMTerrainExperiment: mixed_gwr_predict, multiscale_gwr_predict
 export JointCovariateBenchmarkConfig, JointFoldContext
 export load_joint_covariate_spec, joint_spec_sha256, build_joint_fold_context
 export dynamic_covariate_predict, joint_effective_roles, joint_group_names
-export joint_models_coincide
+export joint_models_coincide, SATELLITE_GROUP
 
 const JOINT_GROUP_ORDER = [
     "elevation", "slope", "aspect", "t2m_c", "d2m_c",
     "u10", "v10", "sp_hpa", "ndvi",
 ]
+"""
+The satellite field, offered to the design as a covariate instead of only as a fixed offset.
+
+Deliberately **not** a member of `JOINT_GROUP_ORDER`. That list is the *screened* covariates:
+`JointVariableSelection` correlation-screens them, VIF-prunes them and role-tests them, and
+`joint_fold_roles.csv` reports one row per member. The satellite is none of those things - it is
+the model's own anchor, and freeing it is a change of functional form, not a variable that earned
+its place. Keeping it out of that list is also what stops it appearing in the roles table as
+`not_selected` when it is in fact always in the design.
+
+What it does: the response stays `y_obs - y_sat`, so a local satellite column makes the fit
+`r = b0(u) + b_sat(u) * y_sat + ...` and the prediction `y_sat + r` therefore carries an
+*effective* satellite coefficient of `1 + b_sat(u)`. Forcing the offset is the special case
+`b_sat == 0`; the model can now discount the satellite locally, all the way to ignoring it.
+
+Why that is the lever: `output/benchmark_diagnostics/*/satellite_quadrant.csv` puts the whole
+GWR-family gap against `adw` in the cells where the gauge is dry and the satellite falsely
+reports rain, and `anchor_discount_bounds.csv` shows that discounting the anchor on
+satellite-wet cells lifts RMSE *and* POD together - while a single global discount constant does
+not, so the coefficient has to be allowed to vary.
+"""
+const SATELLITE_GROUP = "satellite"
+
 const GROUP_COLUMNS = Dict(
+    SATELLITE_GROUP => [:satellite],
     "elevation" => [:elevation_m],
     "slope" => [:slope_deg],
     "aspect" => [:aspect_sin, :aspect_cos],
@@ -52,6 +76,11 @@ Base.@kwdef struct JointCovariateBenchmarkConfig
     feature_time_offset_hours::Int = 9
     max_ndvi_age_days::Int = 32
     wet_threshold::Float64 = 0.1
+    # Put the satellite field into the local design as `SATELLITE_GROUP`, so its effective
+    # coefficient is fitted per location instead of forced to 1. Off by default: every run
+    # recorded before this existed reproduces exactly, and a run that turns it on lands in its
+    # own output directory.
+    free_satellite_coefficient::Bool = false
     ridge::Float64 = 1e-8
     tolerance::Float64 = 1e-5
     # The back-fit routinely needs several hundred sweeps once smooth covariate groups are in
@@ -198,8 +227,17 @@ end
 
 function _raw_group(
     group::String, indices::Vector{Int}, nt::Int, terrain::DataFrame,
-    era5::AbstractDict, ndvi_aligned,
+    era5::AbstractDict, ndvi_aligned, satellite::Union{Nothing,Matrix{Float64}}=nothing,
 )
+    # Checked before `GROUP_FAMILY`, which only covers the screened covariates.
+    if group == SATELLITE_GROUP
+        satellite === nothing &&
+            throw(ArgumentError("the satellite group needs the satellite field"))
+        size(satellite, 2) == nt || throw(DimensionMismatch(
+            "satellite field has $(size(satellite, 2)) hours, expected $nt",
+        ))
+        return reshape(Float64.(satellite[indices, :]), length(indices), 1, nt)
+    end
     columns = GROUP_COLUMNS[group]
     values = Array{Float64}(undef, length(indices), length(columns), nt)
     for (column_index, column) in enumerate(columns)
@@ -260,17 +298,30 @@ function build_joint_fold_context(
     cfg::JointCovariateBenchmarkConfig,
 )
     variables = [group for group in JOINT_GROUP_ORDER if haskey(roles, group)]
+    roles = copy(roles)
+    if cfg.free_satellite_coefficient
+        haskey(roles, SATELLITE_GROUP) && throw(ArgumentError(
+            "$SATELLITE_GROUP is supplied by free_satellite_coefficient and must not be a " *
+            "screened covariate role",
+        ))
+        # Appended, not inserted: the screened groups keep the back-fit order they had before
+        # this option existed, so turning it on perturbs the sweep as little as it can. Always
+        # `"local"` - a global satellite coefficient is the one thing `anchor_discount_bounds.csv`
+        # measured and found insufficient.
+        roles[SATELLITE_GROUP] = "local"
+        push!(variables, SATELLITE_GROUP)
+    end
     nt = size(Yobs, 2)
     train_lonlat = Matrix{Float64}(lonlat[train_indices, :])
     target_lonlat = Matrix{Float64}(lonlat[target_indices, :])
     spatial_train, spatial_target = _spatial_design(train_lonlat, target_lonlat)
     raw_train = Dict(group => _raw_group(
         group, train_indices, nt, terrain, era5,
-        group == "ndvi" ? ndvi_aligned : nothing,
+        group == "ndvi" ? ndvi_aligned : nothing, Ysat,
     ) for group in variables)
     raw_target = Dict(group => _raw_group(
         group, target_indices, nt, terrain, era5,
-        group == "ndvi" ? ndvi_aligned : nothing,
+        group == "ndvi" ? ndvi_aligned : nothing, Ysat,
     ) for group in variables)
 
     mask = isfinite.(Yobs[train_indices, :]) .& isfinite.(Ysat[train_indices, :]) .&

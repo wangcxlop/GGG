@@ -1,4 +1,4 @@
-using Test, CSV, DataFrames, LinearAlgebra, Random
+using Test, CSV, DataFrames, LinearAlgebra, Random, Statistics
 
 include(joinpath(@__DIR__, "..", "src", "load_modules.jl"))
 load_standalone_modules("JointCovariateModels")
@@ -429,4 +429,91 @@ end
         beta = (Xtrain' * (w .* Xtrain) + ridge * I) \ (Xtrain' * (w .* y))
         @test prediction[target] ≈ dot(Xtarget[target, :], beta)
     end
+end
+
+"""Rebuild `joint_model_fixture`'s context with the satellite anchor freed."""
+function freed_satellite_context(fixture; roles=fixture.roles)
+    cfg = JCM.JointCovariateBenchmarkConfig(
+        spec_path="unused", terrain_path="unused", era5_paths=Dict{Int,String}(),
+        bandwidth_candidates=[10, 15, 20], max_iterations=200, tolerance=1e-5,
+        free_satellite_coefficient=true,
+    )
+    return JCM.build_joint_fold_context(
+        "GPM", roles, fixture.train, fixture.target, fixture.lonlat,
+        fixture.Yobs, fixture.Ysat, fixture.terrain, fixture.era5, nothing, cfg,
+    )
+end
+
+@testset "a freed satellite coefficient enters the design as its own local group" begin
+    fixture = joint_model_fixture()
+    baseline = fixture.context
+    freed = freed_satellite_context(fixture)
+
+    # Off by default, so every run recorded before this option existed is unaffected.
+    @test baseline.variables == ["elevation", "u10"]
+    @test !haskey(baseline.roles, JCM.SATELLITE_GROUP)
+    @test !haskey(baseline.predictor_train, JCM.SATELLITE_GROUP)
+
+    # On: appended last and always local, so the screened groups keep their back-fit order.
+    @test freed.variables == ["elevation", "u10", JCM.SATELLITE_GROUP]
+    @test freed.roles[JCM.SATELLITE_GROUP] == "local"
+    @test JCM.joint_effective_roles(freed, "mixed_gwr")[JCM.SATELLITE_GROUP] == "local"
+    # The screened roles are untouched by the injection.
+    @test freed.roles["elevation"] == "global" && freed.roles["u10"] == "local"
+    # mgwr hands every local group its own bandwidth, so the satellite gets its own scale.
+    @test JCM.joint_group_names(freed, "mgwr") == ["intercept", "u10", JCM.SATELLITE_GROUP]
+
+    # One extra local column everywhere the roles put it, and none in the global block.
+    for method in ("residual_gwr", "mixed_gwr")
+        before = sum(size(X, 2) for X in JCM._design_at(baseline, method, 2).local_groups)
+        after = JCM._design_at(freed, method, 2)
+        @test sum(size(X, 2) for X in after.local_groups) == before + 1
+        @test size(after.global_design, 2) ==
+            size(JCM._design_at(baseline, method, 2).global_design, 2)
+    end
+
+    # The column is the satellite field carried through the same per-hour demeaning and
+    # training-fold standardisation as every other covariate, i.e. an affine map of the hour's
+    # satellite anomaly over the training stations.
+    column = freed.predictor_train[JCM.SATELLITE_GROUP][:, 1, 2]
+    anomaly = fixture.Ysat[fixture.train, 2] .- mean(fixture.Ysat[fixture.train, 2])
+    @test cor(column, anomaly) ≈ 1.0
+    # Target rows are centred on the *training* hour mean, never on their own.
+    target_column = freed.predictor_target[JCM.SATELLITE_GROUP][:, 1, 2]
+    target_anomaly = fixture.Ysat[fixture.target, 2] .- mean(fixture.Ysat[fixture.train, 2])
+    @test cor(target_column, target_anomaly) ≈ 1.0
+end
+
+@testset "a freed satellite coefficient predicts through the existing joint path" begin
+    fixture = joint_model_fixture()
+    freed = freed_satellite_context(fixture)
+    residuals = fixture.Yobs[fixture.train, :] .- fixture.Ysat[fixture.train, :]
+    bisquare = JCM.DEMTerrainExperiment._bisquare_kernel
+    for method in ("residual_gwr", "mixed_gwr", "mgwr")
+        bandwidths = fill(15.0, length(JCM.joint_group_names(freed, method)))
+        prediction, converged = JCM.dynamic_covariate_predict(
+            freed, residuals, method, bandwidths, bisquare,
+        )
+        @test size(prediction) == (length(fixture.target), size(residuals, 2))
+        @test all(converged)
+        @test all(isfinite, prediction)
+    end
+end
+
+@testset "the satellite group is supplied by the option, not by the role map" begin
+    fixture = joint_model_fixture()
+    # A screened covariate may not claim the name the option owns; silently letting one win
+    # would make `joint_fold_roles.csv` and the design disagree about what is being fitted.
+    @test_throws ArgumentError freed_satellite_context(
+        fixture; roles=merge(fixture.roles, Dict(JCM.SATELLITE_GROUP => "global")),
+    )
+    # And the group cannot be built without the field it names.
+    @test_throws ArgumentError JCM._raw_group(
+        JCM.SATELLITE_GROUP, fixture.train, size(fixture.Ysat, 2),
+        fixture.terrain, fixture.era5, nothing,
+    )
+    @test_throws DimensionMismatch JCM._raw_group(
+        JCM.SATELLITE_GROUP, fixture.train, size(fixture.Ysat, 2) + 1,
+        fixture.terrain, fixture.era5, nothing, fixture.Ysat,
+    )
 end
