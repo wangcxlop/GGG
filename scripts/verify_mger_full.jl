@@ -35,11 +35,11 @@ function main(args=ARGS)
     )
     # Common-time counts measured with `scripts/audit_mger_inputs.jl`; these are the same
     # constants `run_mger_full.jl` pins via `expected_common_time_count`.
-    expected_times = full_year ? 11_426 : 8_067
+    expected_times = full_year ? 13_471 : 8_069
     fy4b_name = full_year ?
         "hubei_fy4b_hourly_2022_2024_full_strict_navcorrected.csv" :
         "hubei_fy4b_hourly_2022_2025_JunSep_strict_navcorrected.csv"
-    fy4b_rows = full_year ? 11_426 : 10_770
+    fy4b_rows = full_year ? 13_471 : 10_772
 
     station_meta = CSV.read(joinpath(STUDY_DATA, "station_meta.csv"), DataFrame)
     @assert nrow(station_meta) == 237

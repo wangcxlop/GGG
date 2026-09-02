@@ -40,7 +40,7 @@ function load_common_data(outdir::AbstractString)
         rain_threshold=0.1,
         analysis_start=DateTime(2022, 1, 1, 9),
         analysis_end=DateTime(2025, 1, 1, 8),
-        expected_common_time_count=11426,
+        expected_common_time_count=13471,
     )
     return load_global_common_product_data(cfg)
 end

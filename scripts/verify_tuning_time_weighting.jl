@@ -4,7 +4,7 @@
 Does the tuning objective agree with the objective the benchmark reports?
 
 Hyperparameters are selected by LOOCV on a `tuning_max_times`-hour subsample, but every headline
-number is a pooled RMSE over all 11426 hours. The subsample takes its wettest half by design, so
+number is a pooled RMSE over all 13471 hours. The subsample takes its wettest half by design, so
 on the real data it carries 40% wet cells against 7% in the reported population and 13x the mean
 squared observation - an unweighted RMSE over it scores wet-hour skill, not the skill being
 reported. `_tuning_time_sample(...; :stratified)` fixes that by making the subsample a

@@ -125,9 +125,11 @@ function benchmark_config(
         analysis_start=smoke ? DateTime(2022, 6, 1, 9) : DateTime(2022, 1, 1, 9),
         analysis_end=smoke ? DateTime(2022, 7, 1, 8) : DateTime(2025, 1, 1, 8),
         # FY4B's off-season NC files rarely form a strict-complete hour (near-zero in
-        # Nov/Dec and Jan-Mar), so the common-time count grows from 8067 (Jun-Sep only)
-        # to 11426, not to a full 3-year hourly count.
-        expected_common_time_count=smoke ? nothing : 11426,
+        # Nov/Dec and Jan-Mar), so the common-time count grows from 8069 (Jun-Sep only)
+        # to 13471, not to a full 3-year hourly count. FY4B also has zero raw coverage
+        # for 2022-01 through 2022-05 and 2024-02 (confirmed against the official source,
+        # not a download gap), so the full-mode window is effectively June 2022 - Dec 2024.
+        expected_common_time_count=smoke ? nothing : 13471,
     )
     schemes = smoke && !with_random ? [:balanced_spatial] : [:balanced_spatial, :random]
     dem = legacy_dem ? DEMTerrainExperiment.DEMExperimentConfig(

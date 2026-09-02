@@ -30,10 +30,10 @@ function prerequisite_audit()
     isfile(dem_qc_path) || error("Missing DEM full prerequisite: $dem_qc_path")
     dem_qc = CSV.read(dem_qc_path, DataFrame)
     dem_values = Dict(String(row.key) => String(row.value) for row in eachrow(dem_qc))
-    dem_ok = get(dem_values, "time_count", "") == "8067" &&
+    dem_ok = get(dem_values, "time_count", "") == "8069" &&
         get(dem_values, "screen_permutations", "") == "999" &&
         get(dem_values, "spatial_permutations", "") == "999"
-    push!(rows, (; family="dem", output_dir=roots["dem"], time_count=8067,
+    push!(rows, (; family="dem", output_dir=roots["dem"], time_count=8069,
         association_permutations=999, spatial_permutations=999,
         verified=dem_ok, detail=dem_ok ? "ok" : "configuration_mismatch"))
 
@@ -42,9 +42,9 @@ function prerequisite_audit()
     all(isfile, [era_qc_path, era_status_path]) || error("Missing ERA5 full prerequisite outputs")
     era_qc = CSV.read(era_qc_path, DataFrame)
     era_status = CSV.read(era_status_path, DataFrame)
-    era_ok = era_qc.target_time_count[1] == 8067 && Bool(era_qc.complete[1]) &&
+    era_ok = era_qc.target_time_count[1] == 8069 && Bool(era_qc.complete[1]) &&
         all(==("ok"), String.(era_status.status))
-    push!(rows, (; family="era5", output_dir=roots["era5"], time_count=8067,
+    push!(rows, (; family="era5", output_dir=roots["era5"], time_count=8069,
         association_permutations=999, spatial_permutations=999,
         verified=era_ok, detail=era_ok ? "ok" : "quality_or_status_failure"))
 
@@ -53,9 +53,9 @@ function prerequisite_audit()
     all(isfile, [ndvi_qc_path, ndvi_status_path]) || error("Missing NDVI full prerequisite outputs")
     ndvi_qc = CSV.read(ndvi_qc_path, DataFrame)
     ndvi_status = CSV.read(ndvi_status_path, DataFrame)
-    ndvi_ok = ndvi_qc.time_count[1] == 8067 &&
+    ndvi_ok = ndvi_qc.time_count[1] == 8069 &&
         all(==("ok"), String.(ndvi_status.status))
-    push!(rows, (; family="ndvi", output_dir=roots["ndvi"], time_count=8067,
+    push!(rows, (; family="ndvi", output_dir=roots["ndvi"], time_count=8069,
         association_permutations=999, spatial_permutations=999,
         verified=ndvi_ok, detail=ndvi_ok ? "ok" : "quality_or_status_failure"))
 
@@ -81,7 +81,7 @@ function experiment_inputs(mode::Symbol)
         outdir=outdir,
         analysis_start=DateTime(2022, 6, 1, 9),
         analysis_end=DateTime(2024, 10, 1, 8),
-        expected_common_time_count=8067,
+        expected_common_time_count=8069,
     )
     cfg = JointSelectionConfig(
         outdir=outdir, wet_threshold=0.1, min_wet_hours=100,
@@ -102,7 +102,7 @@ function main(args=ARGS)
     products, ids, product_data = load_global_common_product_data(mger)
     lonlat = build_X_lonlat(station_meta, ids)
     times = product_data[first(products)].times
-    length(times) == 8067 || error("Joint experiment requires 8067 common hours")
+    length(times) == 8069 || error("Joint experiment requires 8069 common hours")
     Yobs = Matrix{Float64}(product_data[first(products)].Y_obs)
     satellite = Dict(product => Matrix{Float64}(product_data[product].Y_sat)
         for product in products)

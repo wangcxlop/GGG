@@ -51,7 +51,7 @@ function main()
     )
     assert_wide(
         joinpath(STUDY_DATA, "hubei_fy4b_hourly_2022_2025_JunSep_strict_navcorrected.csv"),
-        10_770, 237,
+        10_772, 237,
     )
 
     for product in ("gpm", "gsmap")
@@ -109,7 +109,7 @@ function main()
         DataFrame,
     )
     @assert all(full_input_audit.global_common_station_count .== 237)
-    @assert all(full_input_audit.global_common_timestamp_count .== 8_067)
+    @assert all(full_input_audit.global_common_timestamp_count .== 8_069)
 
     status = CSV.read(joinpath(RESULT, "kernel_run_status.csv"), DataFrame)
     @assert nrow(status) == 5

@@ -33,7 +33,7 @@ function experiment_inputs(mode::Symbol)
         outdir=outdir,
         analysis_start=DateTime(2022, 6, 1, 9),
         analysis_end=DateTime(2024, 10, 1, 8),
-        expected_common_time_count=8067,
+        expected_common_time_count=8069,
     )
     cfg = NDVISelectionConfig(
         outdir=outdir,

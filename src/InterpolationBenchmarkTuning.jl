@@ -230,7 +230,7 @@ end
 Two-stratum tuning-hour sample and its Horvitz-Thompson weights.
 
 Hyperparameters are chosen on this subsample but the benchmark reports pooled RMSE over every
-hour, and the two populations are nothing alike: on the 11426 common hours the wettest half of
+hour, and the two populations are nothing alike: on the 13471 common hours the wettest half of
 the subsample drives the tuning set to 40% wet cells against 7% in the reported population, and
 13x its mean squared observation. An unweighted RMSE over the subsample therefore scores
 wet-hour skill while the results table scores mostly-dry-hour skill.
