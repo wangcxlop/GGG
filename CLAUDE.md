@@ -232,33 +232,57 @@ residuals is therefore also a GWR, and every non-GWR method interpolates the gau
 and the design cannot separate them. Making residual mode an orthogonal factor would need a
 residual variant of at least one traditional method.
 
-**Measured, 2026-09-01.** The framing is not just unseparated from the estimator — it is where the
-whole loss comes from. `satellite_quadrant.csv` splits the MSE gap against `adw` on the joint
-wet/dry state of gauge and satellite (balanced_spatial, `mgwr`, the 2026-08-29 full run — now
-legacy, see below; these numbers have not been recomputed on the current baseline):
+**Re-measured on the canonical baseline, 2026-09-02.** The framing is not just unseparated from
+the estimator — it is where the whole loss comes from. `satellite_quadrant.csv` splits the MSE gap
+against `adw` on the joint wet/dry state of gauge and satellite (balanced_spatial, `mgwr`; shares
+are FY4B's, the other two differ by a point or two):
 
-| quadrant | share | `mgwr` FY4B / GPM / GSMaP | `adw` | gap contribution |
+| quadrant | share | `mgwr` MSE FY4B / GPM / GSMaP | `adw` MSE | gap contribution |
 |---|---|---|---|---|
-| gauge dry, satellite dry | 86.5% | 0.056 / 0.019 / 0.026 | 0.057 / 0.045 / 0.050 | **−0.001 / −0.022 / −0.021** |
-| gauge dry, satellite wet | 6.2% | 3.669 / 2.080 / 1.383 | 0.675 / 0.742 / 0.758 | **+0.185 / +0.092 / +0.038** |
-| gauge wet, satellite dry | 4.6% | 6.385 / 6.681 / 5.463 | 6.126 / 6.048 / 5.134 | +0.012 / +0.015 / +0.009 |
-| gauge wet, satellite wet | 2.7% | 19.41 / 13.62 / 13.47 | 19.44 / 13.38 / 14.44 | −0.001 / +0.012 / −0.045 |
+| gauge dry, satellite dry | 87.4% | 0.047 / 0.015 / 0.039 | 0.049 / 0.039 / 0.040 | **−0.001 / −0.021 / −0.001** |
+| gauge dry, satellite wet | 5.7% | 3.424 / 1.895 / 1.867 | 0.631 / 0.680 / 0.647 | **+0.158 / +0.079 / +0.081** |
+| gauge wet, satellite dry | 4.6% | 5.567 / 5.670 / 4.333 | 5.340 / 5.162 / 4.191 | +0.010 / +0.012 / +0.003 |
+| gauge wet, satellite wet | 2.4% | 18.220 / 12.468 / 14.376 | 18.296 / 12.187 / 12.665 | −0.002 / +0.013 / **+0.078** |
 
-The family *beats* `adw` in the dominant dry/dry quadrant and on heavy rain, and loses only where
-the satellite falsely reports rain. A false alarm is patchy at the satellite's own error scale, so
-the training stations' residuals carry no information about it and a spatially smooth correction
-cannot cancel a value the model was handed. Two things follow:
+The core finding survives the rebuild and the IDW/ADW correction. The family still *beats* `adw`
+in the dominant dry/dry quadrant, and the dry-gauge/wet-satellite quadrant is 5.7% of cells but
+**95.7% of the gap** for FY4B and 94.7% for GPM. A false alarm is patchy at the satellite's own
+error scale, so the training stations' residuals carry no information about it and a spatially
+smooth correction cannot cancel a value the model was handed.
 
-- Gating the *correction* cannot help — it only reaches the satellite-dry quadrants, where
-  nothing is wrong. Measured: a dry-cell gate buys 0.3–0.4% RMSE and costs 3–4% relative POD.
-- Discounting the *anchor* does, and lifts RMSE and POD together. `anchor_discount_bounds.csv`
-  puts `mgwr`/GSMaP at 0.910 against `adw`'s 0.944 with POD rising 0.813 → 0.831, and shows a
-  single global discount constant is not enough — the coefficient has to vary.
+One thing did change: **GSMaP is no longer a one-quadrant story.** Its gap is now split roughly
+evenly between dry/wet (50.2%) and wet/wet (48.5%), where it previously lost almost nothing on
+heavy rain. Anything inferred from GSMaP alone needs re-checking against that.
 
-`--free-satellite-coefficient` acts on this: it puts the satellite into the local design as
+Three things follow, the first two unchanged in direction and the third **reversed**:
+
+- Gating the *correction* still cannot help — it only reaches the satellite-dry quadrants, where
+  nothing is wrong. Measured on `mgwr`: the best dry-cell gate buys 0.1–1.0% RMSE and costs
+  2.3–6.1% relative POD.
+- The loss is reachable, but only by acting on satellite-wet cells. `satellite_wet_blend->adw` —
+  blend toward `adw` where the satellite reports rain — is the **only** counterfactual in
+  `anchor_discount_bounds.csv` that beats `adw` at all, and it lifts RMSE and POD together:
+  `mgwr` goes **+0.27% / +2.98% / +2.21%** vs `adw` with POD rising 0.802→0.822, 0.787→0.811,
+  0.792→0.846. It beats even the `oracle_dry_wet` variants, which are allowed to see the true
+  gauge state — so the win is not about detecting false alarms, it is about not trusting the
+  satellite's magnitude where it claims rain.
+- **A plain anchor discount no longer works.** On the legacy run it lifted RMSE and POD together;
+  on this baseline it loses to `adw` on all three products (−2.03% / −0.13% / −2.16%) *and* costs
+  5–9 points of POD (0.802→0.759, 0.787→0.739, 0.792→0.703). Do not cite the old
+  "0.910 against `adw`'s 0.944 with POD rising 0.813 → 0.831" result; it was measured against
+  weaker `idw`/`adw` baselines, before those formed their weights per availability group.
+
+`--free-satellite-coefficient` acts on the anchor: it puts the satellite into the local design as
 `JointCovariateModels.SATELLITE_GROUP` so the effective coefficient becomes `1 + b_sat(u)` rather
-than a forced 1. Off by default, output directory suffix `_freesat`. Not yet run on the
-benchmark, but no longer blocked: `data/processed/covariates/` was rebuilt on 2026-09-02.
+than a forced 1. Off by default, output directory suffix `_freesat`. Not yet run on the benchmark,
+and no longer blocked — `data/processed/covariates/` was rebuilt on 2026-09-02.
+
+Read it as an open question rather than a queued win. It generalises the *global discount* that
+just came out negative, so it is a test of whether letting the coefficient vary in space rescues
+what a constant could not. The counterfactual that actually wins does something the flag cannot
+express: fall back to a gauge-only interpolator on satellite-wet cells, rather than rescale the
+satellite. If `_freesat` disappoints, that gap is the reason, and a `satellite_wet_blend` model
+would be the thing to build.
 
 ### F7 — two back-fits, two stopping rules, one nominal tolerance
 
