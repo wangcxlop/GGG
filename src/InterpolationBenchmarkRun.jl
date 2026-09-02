@@ -327,9 +327,44 @@ function _write_benchmark_outputs(
             ],
         ))
     end
+    append!(scope, _git_provenance())
     CSV.write(joinpath(cfg.mger.outdir, "benchmark_scope.csv"), scope)
     return (; metrics, scans, bootstrap, status, claim, repeat_summary, fold_summary,
         rank_stability, auto_selection=DataFrame(auto_selection_rows))
+end
+
+"""
+Which code produced this run, as `scope` rows.
+
+`benchmark_scope.csv` recorded the CV scope and nothing about provenance, so a published run
+could be dated but not attributed. `git_dirty` is the load-bearing one: a clean tree means
+`git_commit` fully determines the code, and a dirty tree means it does not, which is the
+difference between a citable baseline and a plausible one.
+
+Every call is wrapped. A missing git, a checkout that is not a repository, or an ownership check
+that refuses records `"unavailable"` rather than aborting a run that takes hours.
+"""
+function _git_provenance()
+    # This file lives in `src/`, so the repository root is one level up. Derived rather than
+    # configured: `src/` must not read fixed absolute paths, and the process working directory
+    # is whatever the calling script was launched from.
+    root = dirname(@__DIR__)
+    run_git(args::Vector{String}) = try
+        String(strip(read(pipeline(`git -C $root $args`; stderr=devnull), String)))
+    catch
+        nothing
+    end
+    commit = run_git(["rev-parse", "HEAD"])
+    branch = run_git(["rev-parse", "--abbrev-ref", "HEAD"])
+    porcelain = run_git(["status", "--porcelain"])
+    return DataFrame(
+        key=["git_commit", "git_branch", "git_dirty"],
+        value=[
+            something(commit, "unavailable"),
+            something(branch, "unavailable"),
+            porcelain === nothing ? "unavailable" : string(!isempty(porcelain)),
+        ],
+    )
 end
 
 """

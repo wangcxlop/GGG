@@ -52,14 +52,15 @@ function benchmark_config(
             # overwriting the before-picture.
             (mgwr_grouping === :split ? "" : "_mgwr$(mgwr_grouping)") *
             (residual_shrinkage ? "" : "_noshrink") *
-            # Keyed on the *new* default rather than the historical one, for the same reason
-            # `mgwr_grouping` is keyed on the historical layout: a pre-fix run directory keeps
-            # its name and a corrected run lands somewhere new instead of overwriting the
-            # before-picture. `--legacy-unsupported-zero` therefore reproduces the old path.
-            (unsupported_local_target === :missing ? "_nanunsupported" : "") *
-            # Keyed on the new behaviour, like `_nanunsupported`: a freed-coefficient run lands
-            # somewhere new rather than overwriting the forced-offset baseline it is measured
-            # against.
+            # Keyed on the *legacy* behaviour, so the corrected default owns the clean name.
+            # This used to be keyed the other way, to stop a corrected run overwriting the
+            # pre-fix baseline it was measured against. That baseline is now retired to
+            # `output/_legacy_11426h_20260829/` - it was computed on an 11426-hour grid that the
+            # current data no longer reproduces - so the distinction the suffix drew is gone,
+            # and leaving it would strand the clean name for a future legacy run to claim.
+            (unsupported_local_target === :zero ? "_legacyzero" : "") *
+            # Keyed on the opt-in: a freed-coefficient run lands somewhere new rather than
+            # overwriting the forced-offset baseline it is measured against.
             (free_satellite_coefficient ? "_freesat" : "") *
             (repeats > 1 ? "_repeats$(repeats)" : ""),
     )
