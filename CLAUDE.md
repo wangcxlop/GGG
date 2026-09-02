@@ -301,9 +301,18 @@ stabilised within `mgwr_max_tuning_iterations`; `src/InterpolationBenchmarkJoint
 same one level down. A combination that converges slowly is not scored worse — it is not scored at
 all, so convergence speed can decide which kernel wins.
 
-Not currently firing: on the 2026-08-29 full run (now legacy), 74 of 81 descent rows converge at iteration 2 and
-none reaches the 5-iteration cap. The finding is about fragility under a harder configuration, not
-a live error in the published numbers.
+Not currently firing, and re-checked on the canonical baseline (2026-09-02). Of the 81 selected
+mgwr descent rows in `parameter_scan.csv`, 70 converge at iteration 2, 7 at 3 and 4 at 4; the
+deepest is 4 and **none reaches the 5-iteration cap**, so `converged || continue` discards nothing
+and no published number depends on it. The legacy run was 74 / 3 / 4 over the same 81 rows — the
+descent got marginally slower with the larger dataset without approaching the cap.
+
+The margin is thinner than "none at the cap" suggests, though. The cap is 5 and the deepest
+observed descent is 4, so a single extra sweep separates the current numbers from the regime where
+combinations start being dropped silently. The finding is about fragility under a harder
+configuration — more covariate groups, a wider bandwidth grid, `--equal-grids` — not a live error.
+
+Reproduce with: selected `method == "mgwr"` rows of `parameter_scan.csv`, counted by `iteration`.
 
 ### F9 — minor items
 
