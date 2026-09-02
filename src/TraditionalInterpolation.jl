@@ -71,17 +71,67 @@ function local_km_coordinates(
     return hcat(x, y)
 end
 
-function _candidate_indices(distances::AbstractVector{<:Real}, neighbors::Union{Nothing,Int})
-    valid = findall(isfinite, distances)
-    isempty(valid) && return valid
-    if neighbors === nothing || neighbors >= length(valid)
-        return valid
+"""
+Rows of `values` grouped by which stations are finite, as `mask => times`.
+
+Keyed by a `BitVector` rather than a tuple of indices: the key is hashed once per hour, and a
+tuple of up to a few hundred `Int`s is both type-unstable and expensive to hash. Groups, and so
+every caller's output, are identical either way.
+"""
+function _valid_groups(values::AbstractMatrix{<:Real})
+    groups = Dict{BitVector,Vector{Int}}()
+    for time in axes(values, 2)
+        mask = BitVector(isfinite(value) for value in @view(values[:, time]))
+        push!(get!(groups, mask, Int[]), time)
     end
-    neighbors >= 1 || throw(ArgumentError("neighbors must be positive or nothing"))
-    order = partialsortperm(@view(distances[valid]), 1:neighbors)
-    return valid[order]
+    return groups
 end
 
+"""
+Distance-decay weights for one set of contributing stations, as
+`(rows, weights, total, coincident_rows)` where `rows` indexes into the training stations.
+
+`selection` holds local indices into `candidates`, and is expected to already be restricted to
+the stations that report at the hours these weights will be used for.
+"""
+function _selection_weights(selection::Vector{Int}, geometry, angular::Bool, coincident::Float64)
+    base, unit_x, unit_y = geometry.base, geometry.unit_x, geometry.unit_y
+    weights = [base[i] for i in selection]
+    if angular && length(selection) > 1
+        # Shepard's correction needs only the pairwise cosines, and `cos_ij = u_i . u_j` for unit
+        # vectors, so the k x k cosine matrix never has to be formed: `sum_j base_j cos_ij` is
+        # `u_i . (U' base)`, two components. That keeps the cost linear in the selection size.
+        decay = sum(weights)
+        sum_x = sum(weights[j] * unit_x[selection[j]] for j in eachindex(selection))
+        sum_y = sum(weights[j] * unit_y[selection[j]] for j in eachindex(selection))
+        for j in eachindex(selection)
+            denominator = decay - weights[j]
+            denominator > 0 || continue
+            i = selection[j]
+            weights[j] *= 1 + (decay - (unit_x[i] * sum_x + unit_y[i] * sum_y)) / denominator
+        end
+    end
+    return (
+        [geometry.candidates[i] for i in selection],
+        weights,
+        sum(weights),
+        [geometry.candidates[i] for i in selection if geometry.distances[i] <= coincident],
+    )
+end
+
+"""
+Shared IDW/ADW kernel: a distance-decay weighted mean, optionally with Shepard's directional
+correction.
+
+Both the neighbour selection and the angular correction are formed **per availability group** -
+over the stations that actually report at those hours - rather than over the geometric
+neighbourhood with the missing values filtered out afterwards. The latter is wrong in a way
+renormalising the weights does not repair: a station contributing no value would still consume
+a slot in the `neighbors` budget, and would still shadow (or still boost) its directional
+neighbours in the correction, leaving the surviving weights shaped against a station geometry
+that is not the one being used. `_valid_groups` is what keeps this affordable - the weights are
+rebuilt once per distinct missing pattern, not once per hour.
+"""
 function _weighted_predict(
     train_lonlat::AbstractMatrix{<:Real}, values::AbstractMatrix{<:Real},
     target_lonlat::AbstractMatrix{<:Real}; power::Real=2.0,
@@ -90,6 +140,8 @@ function _weighted_predict(
 )
     _check_inputs(train_lonlat, values, target_lonlat)
     power > 0 || throw(ArgumentError("power must be positive"))
+    neighbors === nothing || neighbors >= 1 ||
+        throw(ArgumentError("neighbors must be positive or nothing"))
     distances = haversine_distance_matrix(train_lonlat, target_lonlat)
     if exclude_self
         size(train_lonlat, 1) == size(target_lonlat, 1) ||
@@ -100,70 +152,81 @@ function _weighted_predict(
     end
 
     n_target = size(target_lonlat, 1)
-    n_time = size(values, 2)
-    prediction = fill(NaN, n_target, n_time)
-    @inbounds for target in 1:n_target
-        geom_idx = _candidate_indices(@view(distances[:, target]), neighbors)
-        isempty(geom_idx) && continue
-        target_xy = local_km_coordinates(
-            vcat(Float64.(train_lonlat[geom_idx, :]), Float64.(target_lonlat[target:target, :]));
-            center=(target_lonlat[target, 1], target_lonlat[target, 2]),
-        )
-        vectors = @view target_xy[1:end-1, :]
+    prediction = fill(NaN, n_target, size(values, 2))
+    # Missing entries are zeroed rather than skipped term by term: every station carrying a
+    # weight reports over its own group's hours, so these zeros never reach a weighted sum.
+    clean = [isfinite(value) ? Float64(value) : 0.0 for value in values]
+    groups = _valid_groups(values)
+    coincident = sqrt(eps(Float64))
 
-        zero_local = findall(
-            local_index -> distances[geom_idx[local_index], target] <= sqrt(eps(Float64)),
-            eachindex(geom_idx),
-        )
-        nonzero_local = [local_index for local_index in eachindex(geom_idx) if !(local_index in zero_local)]
-        base_all = Float64[
-            distances[geom_idx[local_index], target]^(-power) for local_index in nonzero_local
-        ]
+    for target in 1:n_target
+        target_distances = @view distances[:, target]
+        candidates = findall(isfinite, target_distances)
+        isempty(candidates) && continue
+        candidate_distances = Float64[target_distances[i] for i in candidates]
+        # A station on top of the target carries no distance-decay weight; it takes over through
+        # the exact-interpolation branch below instead.
+        base = [d <= coincident ? 0.0 : d^(-power) for d in candidate_distances]
+        # Directions to each candidate, in km about the target - only ADW needs them.
+        unit_x, unit_y = if angular
+            offsets = local_km_coordinates(
+                vcat(Float64.(train_lonlat[candidates, :]), Float64.(target_lonlat[target:target, :]));
+                center=(target_lonlat[target, 1], target_lonlat[target, 2]),
+            )
+            norms = [hypot(offsets[i, 1], offsets[i, 2]) for i in eachindex(candidates)]
+            ([norms[i] > 0 ? offsets[i, 1] / norms[i] : 0.0 for i in eachindex(candidates)],
+             [norms[i] > 0 ? offsets[i, 2] / norms[i] : 0.0 for i in eachindex(candidates)])
+        else
+            (Float64[], Float64[])
+        end
+        geometry = (; candidates, distances=candidate_distances, base, unit_x, unit_y)
+        # Nearest-first once per target, so a bounded neighbourhood is taken by walking this
+        # until enough stations report rather than by re-ranking the candidates per group.
+        nearest_first = neighbors === nothing ? Int[] : sortperm(candidate_distances)
+        # A bounded neighbourhood collapses many missing patterns onto the same few stations, so
+        # its weights are worth caching. An unbounded one selects every reporting station, which
+        # is as distinct as the pattern itself, and caching would only retain what it rebuilds.
+        cache = Dict{Vector{Int},Tuple{Vector{Int},Vector{Float64},Float64,Vector{Int}}}()
+        selection = Int[]
 
-        function angular_weights(local_positions::Vector{Int}, base::Vector{Float64})
-            weights = copy(base)
-            if angular && length(local_positions) > 1
-                unit_vectors = Matrix{Float64}(undef, length(local_positions), 2)
-                for (index, local_index) in enumerate(local_positions)
-                    vx = vectors[local_index, 1]
-                    vy = vectors[local_index, 2]
-                    vector_norm = hypot(vx, vy)
-                    unit_vectors[index, 1] = vx / vector_norm
-                    unit_vectors[index, 2] = vy / vector_norm
+        for (mask, times) in groups
+            # Kept in candidate order either way, so the weighted sum walks rows ascending.
+            empty!(selection)
+            if neighbors === nothing
+                for i in eachindex(candidates)
+                    mask[candidates[i]] && push!(selection, i)
                 end
-                cosine = clamp.(unit_vectors * transpose(unit_vectors), -1.0, 1.0)
-                total = sum(base)
-                numerator = total .- cosine * base
-                denominator = total .- base
-                correction = ifelse.(denominator .> 0, numerator ./ denominator, 0.0)
-                weights .*= 1 .+ correction
+            else
+                for i in nearest_first
+                    mask[candidates[i]] || continue
+                    push!(selection, i)
+                    length(selection) == neighbors && break
+                end
+                sort!(selection)
             end
-            return weights
-        end
+            isempty(selection) && continue
 
-        full_weights = angular_weights(nonzero_local, base_all)
-        if !isempty(nonzero_local)
-            selected_values = Float64.(values[geom_idx[nonzero_local], :])
-            valid = isfinite.(selected_values)
-            clean_values = ifelse.(valid, selected_values, 0.0)
-            numerator = vec(transpose(full_weights) * clean_values)
-            denominator = vec(transpose(full_weights) * Float64.(valid))
-            usable = isfinite.(denominator) .& (denominator .> 0)
-            prediction[target, usable] = numerator[usable] ./ denominator[usable]
-        end
+            rows, weights, total, exact = if neighbors === nothing
+                _selection_weights(selection, geometry, angular, coincident)
+            else
+                get!(() -> _selection_weights(selection, geometry, angular, coincident),
+                    cache, copy(selection))
+            end
 
-        if !isempty(zero_local)
-            zero_values = Float64.(values[geom_idx[zero_local], :])
-            for time in 1:n_time
-                available = filter(isfinite, @view(zero_values[:, time]))
-                if !isempty(available)
-                    prediction[target, time] = mean(available)
+            if !isempty(exact)
+                # A station on top of the target wins outright, averaged when several coincide.
+                for time in times
+                    prediction[target, time] = sum(clean[row, time] for row in exact) / length(exact)
                 end
+            elseif total > 0 && isfinite(total)
+                prediction[target, times] =
+                    vec(transpose(weights) * @view(clean[rows, times])) ./ total
             end
         end
     end
     return prediction
 end
+
 
 """Inverse-distance interpolation with NaN-aware values."""
 function idw_predict(
@@ -206,31 +269,50 @@ function _tps_kernel_matrix(a::AbstractMatrix{<:Real}, b::AbstractMatrix{<:Real}
     return out
 end
 
-function _tps_system(xy::Matrix{Float64}, smooth::Float64)
+"""
+The magnitude the dimensionless `smooth` is measured against: the median non-zero TPS kernel
+value over a station network. Since `K = 0.5 r^2 ln r^2` is monotone in `r` past `r = e^-0.5`
+km, this is the kernel evaluated at the median pairwise station distance - a proxy for the
+network's extent and density.
+
+Taken over the stations that report at least one hour, once per call. Deriving it per missing
+-value group instead - as this did until the hour-to-hour flicker was measured - made the
+effective smoothing depend on which gauges happened to report in a given hour, and re-sorted a
+fresh n^2/2 vector to do so for every group.
+"""
+function _tps_scale(xy::AbstractMatrix{<:Real})
+    K = _tps_kernel_matrix(xy, xy)
+    positive = abs.(K[.!iszero.(K)])
+    return isempty(positive) ? 1.0 : median(positive)
+end
+
+"""Stations reporting at some hour, and the `_tps_scale` of the network they form."""
+function _tps_reporting_scale(values::AbstractMatrix{<:Real}, xy::AbstractMatrix{<:Real})
+    reporting = findall(station -> any(isfinite, @view(values[station, :])), axes(values, 1))
+    return length(reporting) >= 2 ? _tps_scale(@view(xy[reporting, :])) : 1.0
+end
+
+function _tps_system(xy::Matrix{Float64}, smooth::Float64, scale::Float64)
     n = size(xy, 1)
     n >= 3 || throw(ArgumentError("TPS requires at least three valid stations"))
     P = hcat(ones(Float64, n), xy)
     rank(P) == 3 || throw(ArgumentError("TPS stations must not be collinear"))
     K = _tps_kernel_matrix(xy, xy)
-    positive = abs.(K[.!iszero.(K)])
-    scale = isempty(positive) ? 1.0 : median(positive)
-    lambda = smooth * scale
-    A = [K + lambda * I P; transpose(P) zeros(Float64, 3, 3)]
+    A = [K + smooth * scale * I P; transpose(P) zeros(Float64, 3, 3)]
     return A, K, P
 end
 
-function _valid_groups(values::AbstractMatrix{<:Real})
-    groups = Dict{Tuple,Vector{Int}}()
-    for time in axes(values, 2)
-        key = Tuple(findall(isfinite, @view(values[:, time])))
-        push!(get!(groups, key, Int[]), time)
-    end
-    return groups
-end
 
 """
-Two-dimensional thin-plate smoothing spline. `smooth` is dimensionless and is
-scaled by the median non-zero TPS kernel magnitude for the current station set.
+Two-dimensional thin-plate smoothing spline. `smooth` is dimensionless, scaled by the median
+non-zero TPS kernel magnitude over the stations that report at least one hour.
+
+That scale is fixed once per call, so the effective smoothing does not depend on which gauges
+reported in any given hour. It does still differ between training sets of different extent -
+the inner selection split spans a smaller network than the fold it is selected for, so the
+applied lambda is not exactly the one validated. That is deliberate, and matches every other
+method here: GWR's adaptive bandwidth is a neighbour count whose radius likewise grows when
+stations are withheld.
 """
 function tps_predict(
     train_lonlat::AbstractMatrix{<:Real}, values::AbstractMatrix{<:Real},
@@ -241,21 +323,24 @@ function tps_predict(
     center = (mean(train_lonlat[:, 1]), mean(train_lonlat[:, 2]))
     train_xy_all = local_km_coordinates(train_lonlat; center=center)
     target_xy = local_km_coordinates(target_lonlat; center=center)
+    scale = _tps_reporting_scale(values, train_xy_all)
     prediction = fill(NaN, size(target_lonlat, 1), size(values, 2))
 
-    for (key, times) in _valid_groups(values)
-        idx = collect(Int, key)
+    for (mask, times) in _valid_groups(values)
+        idx = findall(mask)
         length(idx) >= 3 || continue
         try
             train_xy = Matrix{Float64}(train_xy_all[idx, :])
-            A, _, _ = _tps_system(train_xy, Float64(smooth))
+            A, _, _ = _tps_system(train_xy, Float64(smooth), scale)
             rhs = vcat(Float64.(values[idx, times]), zeros(Float64, 3, length(times)))
             coefficients = A \ rhs
             K_target = transpose(_tps_kernel_matrix(train_xy, target_xy))
             P_target = hcat(ones(Float64, size(target_xy, 1)), target_xy)
             prediction[:, times] = hcat(K_target, P_target) * coefficients
-        catch
-            # The caller records missing output as a failed/insufficient candidate.
+        catch err
+            # Only an unusable system is absorbed here - the caller records the gap as a
+            # failed/insufficient candidate. Anything else must not become a silent NaN column.
+            (err isa InterruptException || err isa OutOfMemoryError) && rethrow()
         end
     end
     return prediction
@@ -270,14 +355,15 @@ function tps_loo_predict(
     smooth > 0 || throw(ArgumentError("TPS LOOCV requires positive smoothing"))
     center = (mean(train_lonlat[:, 1]), mean(train_lonlat[:, 2]))
     train_xy_all = local_km_coordinates(train_lonlat; center=center)
+    scale = _tps_reporting_scale(values, train_xy_all)
     prediction = fill(NaN, size(values))
 
-    for (key, times) in _valid_groups(values)
-        idx = collect(Int, key)
+    for (mask, times) in _valid_groups(values)
+        idx = findall(mask)
         length(idx) >= 4 || continue
         try
             xy = Matrix{Float64}(train_xy_all[idx, :])
-            A, K, P = _tps_system(xy, Float64(smooth))
+            A, K, P = _tps_system(xy, Float64(smooth), scale)
             selector = vcat(Matrix{Float64}(I, length(idx), length(idx)), zeros(3, length(idx)))
             mapping = A \ selector
             H = hcat(K, P) * mapping
@@ -289,8 +375,10 @@ function tps_loo_predict(
                     (Float64.(values[global_i, times]) .- fitted[local_i, :]) ./
                     leverage_den[local_i]
             end
-        catch
+        catch err
             # Leave this missing pattern as NaN; coverage checks reject unusable candidates.
+            # Interruption and exhaustion are not an "unusable system" and must surface.
+            (err isa InterruptException || err isa OutOfMemoryError) && rethrow()
         end
     end
     return prediction
