@@ -27,6 +27,7 @@ function standalone_module_dependencies(name::AbstractString)
     name == "ERA5VariableSelection" && return ["SelectionScaffolding"]
     name == "NDVIVariableSelection" && return ["SelectionScaffolding", "ERA5VariableSelection"]
     name == "JointCovariateModels" && return ["DEMTerrainExperiment"]
+    name == "BenchmarkDiagnostics" && return ["TraditionalInterpolation"]
     name == "JointVariableSelection" &&
         return ["SelectionScaffolding", "DEMTerrainExperiment", "ERA5VariableSelection",
                 "NDVIVariableSelection"]

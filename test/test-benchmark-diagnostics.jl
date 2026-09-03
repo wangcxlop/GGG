@@ -1,4 +1,4 @@
-using Test, DataFrames, Dates
+using Test, DataFrames, Dates, Statistics
 
 include(joinpath(@__DIR__, "..", "src", "load_modules.jl"))
 load_standalone_modules("BenchmarkDiagnostics")
@@ -312,4 +312,124 @@ end
     @test y_obs[2, 1] == 10.0
     @test y_obs[:, 2] == [20.0, 30.0]
     @test all(isnan, y_obs[:, 3])             # the unmatched hour stays NaN, never zero
+end
+
+"""
+Six stations on a line, far enough apart to be resolvable and close enough that a boxcar of 500 km
+covers all of them, so the weighted fit is an ordinary one over the other five.
+"""
+line_stations() = Float64[0.0 30.0; 0.2 30.0; 0.4 30.0; 0.6 30.0; 0.8 30.0; 1.0 30.0]
+
+@testset "station_weight_matrix excludes each station from its own neighbourhood" begin
+    lonlat = line_stations()
+    weights = BD.station_weight_matrix(lonlat; kernel=4, bw=500.0, adaptive=false)
+    @test size(weights) == (6, 6)
+    @test all(weights[i, i] == 0.0 for i in 1:6)
+    @test all(weights[i, j] == 1.0 for i in 1:6, j in 1:6 if i != j)
+
+    # The diagonal is Inf *before* weighting, so an adaptive bandwidth cannot spend one of its
+    # slots on the target itself.
+    adaptive = BD.station_weight_matrix(lonlat; kernel=2, bw=3.0, adaptive=true)
+    @test all(adaptive[i, i] == 0.0 for i in 1:6)
+    @test all(count(>(0.0), adaptive[:, j]) <= 3 for j in 1:6)
+    @test_throws ArgumentError BD.station_weight_matrix(
+        lonlat; kernel=2, bw=6.0, adaptive=true,
+    )
+end
+
+@testset "local_satellite_slope recovers a planted local slope" begin
+    lonlat = line_stations()
+    weights = BD.station_weight_matrix(lonlat; kernel=4, bw=500.0, adaptive=false)
+    y_sat = Float64[0.0 1.0; 2.0 3.0; 4.0 5.0; 6.0 7.0; 8.0 9.0; 10.0 11.0]
+    # r = y_obs - y_sat is exactly 3 - 0.5 * y_sat, so every neighbourhood must return -0.5.
+    y_obs = (3.0 .- 0.5 .* y_sat) .+ y_sat
+    fitted = BD.local_satellite_slope(y_obs, y_sat, weights)
+    @test size(fitted.slope) == (6, 2)
+    @test all(isapprox.(fitted.slope, -0.5; atol=1e-10))
+    @test fitted.degenerate_cells == 0
+    # `satellite_mean` is the neighbourhood's weighted mean, which excludes the target.
+    @test fitted.satellite_mean[1, 1] ≈ mean(y_sat[2:6, 1])
+
+    # A constant satellite field has no variance to regress on: the slope falls back to 0, the
+    # forced anchor, and the cell is counted rather than silently reported as a fit.
+    flat = BD.local_satellite_slope(fill(5.0, 6, 1), fill(2.0, 6, 1), weights)
+    @test flat.degenerate_cells == 6
+    @test all(iszero, flat.slope)
+
+    # Blocking must not change the answer.
+    blocked = BD.local_satellite_slope(y_obs, y_sat, weights; block=1)
+    @test blocked.slope == fitted.slope
+end
+
+@testset "local_anchor_prediction is exact at a zero slope and floors at zero" begin
+    lonlat = line_stations()
+    weights = BD.station_weight_matrix(lonlat; kernel=4, bw=500.0, adaptive=false)
+    y_sat = Float64[0.0 1.5; 2.0 3.0; 4.0 5.0; 6.0 7.0; 8.0 9.0; 10.0 11.0]
+    y_obs = (3.0 .- 0.5 .* y_sat) .+ y_sat
+    fitted = BD.local_satellite_slope(y_obs, y_sat, weights)
+    prediction = Float64[0.0 1.5; 2.0 0.0; 4.0 5.0; 6.0 7.0; 0.0 9.0; 10.0 11.0]
+
+    # The forced anchor is a zero slope; it must return the stored prediction bit for bit, which
+    # is what the replay script asserts before reporting anything.
+    identity = BD.local_anchor_prediction(
+        y_sat, prediction, zeros(6, 2), fitted.satellite_mean; shrink=0.8,
+    )
+    @test identity.prediction == prediction
+    @test identity.clipped_cells == 0
+
+    # The increment is `shrink * slope * (y_sat - neighbourhood mean)`, so it vanishes exactly
+    # where the target's satellite value is what its neighbours would have predicted.
+    slope = fill(-0.5, 6, 2)
+    replayed = BD.local_anchor_prediction(
+        y_sat, prediction, slope, fitted.satellite_mean; shrink=1.0,
+    )
+    expected = max.(
+        prediction .+ (-0.5) .* (y_sat .- fitted.satellite_mean), 0.0,
+    )
+    @test replayed.prediction ≈ expected
+
+    # Flooring stops the effective anchor going below zero: the satellite may be removed, never
+    # inverted, so the increment is never more negative than -y_sat.
+    steep = fill(-5.0, 6, 2)
+    floored = BD.local_anchor_prediction(
+        y_sat, prediction, steep, fitted.satellite_mean; shrink=1.0, floor_at_zero=true,
+    )
+    unfloored = BD.local_anchor_prediction(
+        y_sat, prediction, steep, fitted.satellite_mean; shrink=1.0,
+    )
+    @test all(floored.prediction .>= unfloored.prediction)
+    @test all(floored.prediction .>= max.(prediction .- y_sat, 0.0) .- 1e-9)
+
+    # NaN in either input propagates rather than being treated as zero.
+    holed = copy(prediction)
+    holed[1, 1] = NaN
+    @test isnan(BD.local_anchor_prediction(
+        y_sat, holed, slope, fitted.satellite_mean,
+    ).prediction[1, 1])
+end
+
+@testset "false_alarm_coherence_table measures lift against the same-hour null" begin
+    lonlat = line_stations()
+    weights = BD.station_weight_matrix(lonlat; kernel=4, bw=500.0, adaptive=false)
+    # Two hours, each with three gauge-dry/satellite-wet cells out of six. The boxcar covers every
+    # other station, so the neighbourhood share and the same-hour share are the same quantity by
+    # construction and the lift must be 1 - the null the table exists to compare against.
+    y_sat = fill(0.0, 6, 2)
+    y_obs = fill(0.0, 6, 2)
+    y_sat[1:3, :] .= 5.0
+    mask = trues(6, 2)
+    fitted = BD.local_satellite_slope(y_obs, y_sat, weights)
+    table = BD.false_alarm_coherence_table(
+        y_obs, y_sat, mask, weights, fitted.slope, fitted.satellite_mean;
+        scheme="balanced_spatial", product="fy4b", method="mgwr", kernel=4, bw=500.0,
+        adaptive=false,
+    )
+    wet = only(filter(row -> row.quadrant == "dry_wet", table))
+    @test wet.n == 6
+    @test wet.neighbour_share ≈ wet.hour_share
+    @test wet.lift ≈ 1.0
+    dry = only(filter(row -> row.quadrant == "dry_dry", table))
+    @test dry.n == 6
+    @test dry.lift ≈ 1.0
+    @test nrow(table) == 2                    # no wet gauge anywhere, so no wet_* quadrants
 end

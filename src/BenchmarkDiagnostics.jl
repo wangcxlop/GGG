@@ -19,12 +19,16 @@ duplication here is a choice rather than a constraint. The two also differ at th
 module BenchmarkDiagnostics
 
 using CSV, DataFrames, Dates, Statistics
+using MixedGWR
+using Main: TraditionalInterpolation
 
 export read_wide_matrix, read_mask_matrix, read_fold_map, load_prediction_matrices
 export read_run_grid, load_gauge_matrix
 export null_baseline_matrices, satellite_rescale_matrix
 export null_baseline_table, satellite_offset_table, mse_decomposition_table
 export satellite_quadrant_table
+export station_weight_matrix, local_satellite_slope, local_anchor_prediction
+export false_alarm_coherence_table
 export bandwidth_saturation_table, covariate_contribution_table
 export rebuild_common_mask, dropout_table, mask_cost_table, run_comparison_table
 export JOINT_MASK_METHODS
@@ -770,6 +774,291 @@ function covariate_contribution_table(status::DataFrame, folds::DataFrame; level
     )
     joined.rmse_gap_vs_adw = joined.RMSE .- joined.RMSE_adw
     return sort!(joined, [:scheme, :product, :method, :fold])
+end
+
+# ------------------------- D8: can a *locally* varying satellite coefficient close the gap?
+
+"""
+Mean-Earth radius, the metric `JointCovariateModels._design_at` measures its bandwidths on.
+
+`TraditionalInterpolation.haversine_distance_matrix` uses the WGS72 equatorial radius instead (see
+the comment at the top of that file: the two families are deliberately not on the same metric). A
+bandwidth read out of `joint_bandwidths.csv` belongs to the joint path, so distances are rescaled
+onto its radius rather than the trigonometry being written a third time - the haversine formula is
+linear in the radius, so the rescaling is exact.
+"""
+const JOINT_EARTH_RADIUS_KM = 6371.0088
+
+"""
+Geographic weights between a run's stations, on the joint-covariate path's distance metric.
+
+The diagonal is set to `Inf` before weighting rather than zeroed afterwards. Every kernel in
+`MixedGWR.GWR_KERNELS` returns 0 at an infinite distance, and under `adaptive` the self-distance
+would otherwise occupy one of the `bw` nearest slots and shift the bandwidth inward. Each row
+therefore describes a leave-one-out fit, which is what the benchmark does: a held-out station is
+never in its own training set.
+"""
+function station_weight_matrix(
+    lonlat::Matrix{Float64}; kernel::Int, bw::Float64, adaptive::Bool,
+)
+    n = size(lonlat, 1)
+    size(lonlat, 2) == 2 || throw(DimensionMismatch("lonlat must have two columns"))
+    adaptive && bw >= n && throw(ArgumentError(
+        "adaptive bandwidth $bw needs more than $n stations once the target is excluded",
+    ))
+    distances = TraditionalInterpolation.haversine_distance_matrix(lonlat, lonlat)
+    distances .*= JOINT_EARTH_RADIUS_KM / TraditionalInterpolation.EARTH_RADIUS_KM
+    @inbounds for index in 1:n
+        distances[index, index] = Inf
+    end
+    return MixedGWR.gw_weight(distances, bw; kernel, adaptive)
+end
+
+"""
+Geographically weighted slope of the satellite residual on the satellite itself, per cell.
+
+This is the one-dimensional analogue of the coefficient `--free-satellite-coefficient` fits. With
+that flag on, `JointCovariateModels.build_joint_fold_context` puts the satellite into the local
+design, so the residual model becomes `r = b0(u) + b_sat(u)*y_sat + ...` and the effective anchor
+is `1 + b_sat(u)` instead of a forced 1. Fitting the same weighted regression here, from an
+existing run's stored matrices, bounds how far that coefficient could move the predictions without
+paying for a re-run.
+
+Returns `slope` (the weighted least-squares slope of `r = y_obs - y_sat` on `y_sat` over the
+*other* stations), `satellite_mean` (the neighbourhood's weighted mean satellite value, which the
+increment is measured against) and `degenerate_cells`.
+
+`slope` is 0 wherever the local design is rank-deficient. That is overwhelmingly the dry/dry case:
+every neighbour reports `y_sat = 0`, so there is no variation to regress on. Zero is exactly the
+forced anchor, so a degenerate cell falls back to the model the run already fitted rather than to
+an arbitrary number, and the count comes back so its share is visible rather than assumed small.
+
+The per-hour weighted normal equations are accumulated as five matrix products rather than a solve
+per cell: at 237 stations x 13471 hours the loop would be 3.2M two-by-two systems.
+"""
+function local_satellite_slope(
+    y_obs::Matrix{Float64}, y_sat::Matrix{Float64}, weights::Matrix{Float64};
+    variance_floor::Float64=1e-8, block::Int=512,
+)
+    size(y_obs) == size(y_sat) ||
+        throw(DimensionMismatch("y_obs and y_sat must have the same shape"))
+    n, nt = size(y_obs)
+    size(weights) == (n, n) ||
+        throw(DimensionMismatch("weights must be station x station"))
+    slope = zeros(Float64, n, nt)
+    satellite_mean = fill(NaN, n, nt)
+    degenerate = 0
+    transposed = permutedims(weights)
+    V = Matrix{Float64}(undef, n, block)
+    VX = similar(V); VX2 = similar(V); VR = similar(V); VXR = similar(V)
+    for start in 1:block:nt
+        stop = min(start + block - 1, nt)
+        width = stop - start + 1
+        v = view(V, :, 1:width); vx = view(VX, :, 1:width); vx2 = view(VX2, :, 1:width)
+        vr = view(VR, :, 1:width); vxr = view(VXR, :, 1:width)
+        fill!(v, 0.0); fill!(vx, 0.0); fill!(vx2, 0.0); fill!(vr, 0.0); fill!(vxr, 0.0)
+        @inbounds for column in 1:width
+            time = start + column - 1
+            for i in 1:n
+                observed = y_obs[i, time]
+                x = y_sat[i, time]
+                (isnan(observed) || isnan(x)) && continue
+                r = observed - x
+                v[i, column] = 1.0
+                vx[i, column] = x
+                vx2[i, column] = x * x
+                vr[i, column] = r
+                vxr[i, column] = x * r
+            end
+        end
+        sum_w = transposed * v
+        sum_wx = transposed * vx
+        sum_wx2 = transposed * vx2
+        sum_wr = transposed * vr
+        sum_wxr = transposed * vxr
+        @inbounds for column in 1:width
+            time = start + column - 1
+            for j in 1:n
+                total = sum_w[j, column]
+                if !(total > 0)
+                    degenerate += 1
+                    continue
+                end
+                mean_x = sum_wx[j, column] / total
+                satellite_mean[j, time] = mean_x
+                variance_x = sum_wx2[j, column] / total - mean_x^2
+                if !(variance_x > variance_floor)
+                    degenerate += 1
+                    continue
+                end
+                mean_r = sum_wr[j, column] / total
+                covariance = sum_wxr[j, column] / total - mean_x * mean_r
+                slope[j, time] = covariance / variance_x
+            end
+        end
+    end
+    return (; slope, satellite_mean, degenerate_cells=degenerate)
+end
+
+"""
+Replay a run's stored predictions with the satellite anchor freed locally.
+
+The stored prediction is `p = max(y_sat + s*correction, 0)` with the anchor forced to 1. Freeing
+the coefficient adds a satellite column to the local design, and for a weighted least squares
+*that already carries an intercept* the fitted value moves by exactly
+`b_sat(u) * (y_sat(u) - xbar(u))`, where `xbar` is the neighbourhood's weighted mean satellite
+value - the intercept absorbs everything else. So the increment applied here is
+`shrink * slope * (y_sat - satellite_mean)`.
+
+That form, rather than the `a*y_sat + correction` of `verify_anchor_discount_bounds.jl`, is the
+whole point: a per-cell `a` would double-count the neighbourhood mean, which the run's stored
+correction already carries. It also makes the limit legible - the increment is 0 wherever the
+target's satellite value is what its neighbourhood would have predicted, which is the honest
+statement of what a coefficient varying in *location* can and cannot do about an error that varies
+with the satellite's *state*.
+
+`floor_at_zero` clamps the increment so the effective anchor never falls below 0: the satellite may
+be removed entirely, never inverted.
+
+`clipped_cells` counts where the replay is not exact. Where `p > 0` the applied correction is
+recoverable as `p - y_sat`, so the replay is exact. Where `p == 0` the true correction is only
+known to satisfy `y_sat + s*correction <= 0`; a negative increment still gives 0 and stays exact,
+so only a *positive* increment on a clipped cell is uncertain, and that is what is counted. On such
+a cell the freed model would return `max(y_sat + s*correction + increment, 0)`, which is at most
+the `increment` this returns - so the default over-predicts there.
+
+`suppress_clipped` takes the other end: it drops the increment on exactly those cells, returning
+the stored 0. The truth lies cellwise between the two, so running both brackets what the stored
+matrices can determine rather than reporting one side of it as though it were the answer.
+"""
+function local_anchor_prediction(
+    y_sat::Matrix{Float64}, prediction::Matrix{Float64},
+    slope::Matrix{Float64}, satellite_mean::Matrix{Float64};
+    shrink::Float64=1.0, floor_at_zero::Bool=false, suppress_clipped::Bool=false,
+)
+    out = similar(prediction)
+    clipped = 0
+    @inbounds for index in eachindex(prediction)
+        predicted = prediction[index]
+        satellite = y_sat[index]
+        if isnan(predicted) || isnan(satellite)
+            out[index] = NaN
+            continue
+        end
+        mean_x = satellite_mean[index]
+        increment = isnan(mean_x) ? 0.0 : shrink * slope[index] * (satellite - mean_x)
+        floor_at_zero && (increment = max(increment, -satellite))
+        if predicted == 0.0 && increment > 0
+            clipped += 1
+            suppress_clipped && (increment = 0.0)
+        end
+        out[index] = max(predicted + increment, 0.0)
+    end
+    return (; prediction=out, clipped_cells=clipped)
+end
+
+"""
+Is the satellite's false alarm spatially coherent enough for a local coefficient to see it?
+
+`satellite_quadrant_table` puts nearly the whole GWR-family gap in the gauge-dry/satellite-wet
+quadrant. A coefficient that varies with *location* can only correct that quadrant where the
+neighbouring stations are in it too, so this measures exactly that, per quadrant:
+
+- `neighbour_share` - the geographically weighted share of a cell's neighbours in the same
+  quadrant, averaged over the quadrant's own cells.
+- `hour_share` - the share of the *other* valid stations in that quadrant in the same hour,
+  averaged the same way. This is the null that matters. A false alarm is trivially more likely in
+  an hour that has many of them, and a per-hour effect is one the model's local intercept already
+  absorbs; only an excess over this hour share is spatial information a local coefficient could
+  use.
+- `lift` - `neighbour_share / hour_share`. At 1 there is no spatial structure beyond the hour.
+
+`mean_slope`, `share_slope_negative` and `mean_increment` summarise what `local_satellite_slope`
+actually produced on those cells, so the coherence measure and the replay can be read against each
+other.
+"""
+function false_alarm_coherence_table(
+    y_obs::Matrix{Float64}, y_sat::Matrix{Float64}, mask::AbstractMatrix,
+    weights::Matrix{Float64}, slope::Matrix{Float64}, satellite_mean::Matrix{Float64};
+    scheme::String, product::String, method::String, kernel::Int, bw::Float64,
+    adaptive::Bool, threshold::Float64=0.1, block::Int=512,
+)
+    n, nt = size(y_obs)
+    valid = falses(n, nt)
+    @inbounds for index in eachindex(valid)
+        valid[index] = !isnan(y_obs[index]) && !isnan(y_sat[index])
+    end
+    transposed = permutedims(weights)
+    overall_n = count(mask)
+    rows = NamedTuple[]
+    for (name, obs_wet, sat_wet) in (
+        ("dry_dry", false, false), ("dry_wet", false, true),
+        ("wet_dry", true, false), ("wet_wet", true, true),
+    )
+        indicator = falses(n, nt)
+        @inbounds for index in eachindex(valid)
+            valid[index] || continue
+            indicator[index] = (y_obs[index] >= threshold) == obs_wet &&
+                (y_sat[index] >= threshold) == sat_wet
+        end
+        cell = indicator .& mask
+        cell_count = count(cell)
+        cell_count == 0 && continue
+        neighbour_total = 0.0; hour_total = 0.0; scored = 0
+        slope_total = 0.0; negative = 0; increment_total = 0.0
+        indicator_block = Matrix{Float64}(undef, n, block)
+        valid_block = Matrix{Float64}(undef, n, block)
+        for start in 1:block:nt
+            stop = min(start + block - 1, nt)
+            width = stop - start + 1
+            ib = view(indicator_block, :, 1:width); vb = view(valid_block, :, 1:width)
+            @inbounds for column in 1:width, i in 1:n
+                time = start + column - 1
+                ib[i, column] = indicator[i, time] ? 1.0 : 0.0
+                vb[i, column] = valid[i, time] ? 1.0 : 0.0
+            end
+            weighted_hits = transposed * ib
+            weighted_valid = transposed * vb
+            @inbounds for column in 1:width
+                time = start + column - 1
+                hour_valid = 0; hour_hits = 0
+                for i in 1:n
+                    valid[i, time] || continue
+                    hour_valid += 1
+                    indicator[i, time] && (hour_hits += 1)
+                end
+                hour_valid > 1 || continue
+                for j in 1:n
+                    cell[j, time] || continue
+                    total = weighted_valid[j, column]
+                    total > 0 || continue
+                    scored += 1
+                    neighbour_total += weighted_hits[j, column] / total
+                    # The target is excluded from its own neighbourhood (the weight matrix has an
+                    # infinite diagonal), so the hour null excludes it too - otherwise the cell
+                    # would be compared against a rate it is itself counted in.
+                    hour_total += (hour_hits - 1) / (hour_valid - 1)
+                    slope_total += slope[j, time]
+                    slope[j, time] < 0 && (negative += 1)
+                    mean_x = satellite_mean[j, time]
+                    isnan(mean_x) ||
+                        (increment_total += slope[j, time] * (y_sat[j, time] - mean_x))
+                end
+            end
+        end
+        neighbour_share = scored > 0 ? neighbour_total / scored : NaN
+        hour_share = scored > 0 ? hour_total / scored : NaN
+        push!(rows, (;
+            scheme, product, method, kernel, bw, adaptive, quadrant=name,
+            n=cell_count, sample_share=cell_count / overall_n, scored,
+            neighbour_share, hour_share,
+            lift=hour_share > 0 ? neighbour_share / hour_share : NaN,
+            mean_slope=scored > 0 ? slope_total / scored : NaN,
+            share_slope_negative=scored > 0 ? negative / scored : NaN,
+            mean_increment=scored > 0 ? increment_total / scored : NaN,
+        ))
+    end
+    return DataFrame(rows)
 end
 
 end # module
