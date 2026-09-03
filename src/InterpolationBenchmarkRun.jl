@@ -156,7 +156,8 @@ function _write_benchmark_outputs(
     cfg::InterpolationBenchmarkConfig, products, seeds, nested_joint::Bool, joint_inputs,
     dem_store, joint_store, joint_scaling_tables, joint_qc_tables,
     all_metric_rows, all_scan_rows, all_bootstrap_rows, run_status_rows,
-    auto_selection_rows, hurdle_rows, selection_fallback_cells, mask_scope_rows,
+    auto_selection_rows, blend_selection_rows, hurdle_rows, selection_fallback_cells,
+    mask_scope_rows,
 )
     metrics = DataFrame(all_metric_rows)
     scans = DataFrame(all_scan_rows)
@@ -194,6 +195,8 @@ function _write_benchmark_outputs(
     # gap to `runner_up_rmse` says whether the choice was decisive or a coin flip.
     isempty(auto_selection_rows) ||
         CSV.write(joinpath(cfg.mger.outdir, "auto_selection.csv"), DataFrame(auto_selection_rows))
+    isempty(blend_selection_rows) ||
+        CSV.write(joinpath(cfg.mger.outdir, "blend_selection.csv"), DataFrame(blend_selection_rows))
     _dem_enabled(cfg) && _write_dem_outputs(cfg.mger.outdir, dem_store, scans, status)
     if joint_inputs !== nothing
         scaling = isempty(joint_scaling_tables) ? DataFrame() :
@@ -327,6 +330,21 @@ function _write_benchmark_outputs(
             ],
         ))
     end
+    if cfg.satellite_wet_blend
+        append!(scope, DataFrame(
+            key=["satellite_wet_blend", "satellite_wet_blend_selection"],
+            value=[
+                "blended counterparts of $(join(BLEND_SOURCE_METHODS, ", ")) reported as " *
+                "$(join([_blend_method(m) for m in BLEND_SOURCE_METHODS], ", ")): where the " *
+                "satellite reports at least $(cfg.mger.rain_threshold) mm, the prediction is " *
+                "blended toward $(BLEND_FALLBACK_METHOD)",
+                "blending weight chosen per fold on the inner selection split over " *
+                "$(BLEND_LAMBDAS), never on held-out cells; see blend_selection.csv. The " *
+                "blended methods are scored on the shared mask but do not define it, so adding " *
+                "them leaves every other method's denominator unchanged",
+            ],
+        ))
+    end
     append!(scope, _git_provenance())
     CSV.write(joinpath(cfg.mger.outdir, "benchmark_scope.csv"), scope)
     return (; metrics, scans, bootstrap, status, claim, repeat_summary, fold_summary,
@@ -375,6 +393,9 @@ Split out of `_run_benchmark_fold!`, which was 262 lines. Mutates `fold_predicti
 `auto` entry, NaN when no contender could be scored), `auto_selection_rows` and `run_status_rows`.
 Parameters keep the names the enclosing locals had, so the body is unchanged from when it was
 inline.
+
+Returns the inner-split contenders and the tuning hours they were scored over, which
+`_run_fold_blend!` reuses.
 """
 function _run_fold_auto!(
     cfg::InterpolationBenchmarkConfig, fold::Int, scheme, product, repeat_index::Int,
@@ -459,6 +480,134 @@ function _run_fold_auto!(
         mode="", method=AUTO_METHOD, output_method=AUTO_METHOD,
         status=auto_status, error=auto_error, prediction_coverage=auto_coverage,
     ))
+    # Handed back rather than discarded: `_run_fold_blend!` needs the same inner-split predictions
+    # for the same methods over the same tuning hours, and re-deriving them would double the most
+    # expensive thing this function does.
+    return (; contenders=auto_contenders, time_indices=auto_time_indices,
+        time_weights=auto_time_weights, applicable=auto_applicable)
+end
+
+"""
+Blended counterparts of the anchored methods: on satellite-wet cells, blend toward `adw`.
+
+Runs after `_run_fold_auto!` and reuses its inner-split contenders, so the only fit this adds is
+the fallback's - `adw` is deliberately not an `auto` candidate, so its inner prediction is the one
+thing not already on hand. Everything else here is arithmetic over matrices that exist.
+
+The weight is chosen on the inner selection split, never on the held-out cells. That is the whole
+distance between this and `verify_anchor_discount_bounds.jl`'s `satellite_wet_blend`
+counterfactual, which swept the weight over the test set to bound what was reachable. A method has
+to pick one without looking, and it will therefore score worse than that bound; the gap between
+them is the price of not cheating, and is worth reading off the two together.
+
+A fold with no inner split, or with no fallback prediction, leaves the blended methods NaN rather
+than falling back to the unblended source. Silently reporting the source under a blended name
+would make the method mean different things in different folds - the same reason `auto` leaves
+itself unpredicted rather than defaulting.
+
+Mutates `predictions`, `fold_predictions`, `blend_selection_rows` and `run_status_rows`.
+"""
+function _run_fold_blend!(
+    cfg::InterpolationBenchmarkConfig, fold::Int, scheme, product, repeat_index::Int,
+    repeat_seed::Int, val_idx, y_obs, y_sat_val, y_obs_train, y_sat_train, train_lonlat,
+    selection_groups, auto_inner, fold_selected, fold_predictions, predictions,
+    blend_selection_rows, run_status_rows,
+)
+    threshold = cfg.mger.rain_threshold
+    eligible = .!isnan.(y_obs[val_idx, :]) .& .!isnan.(y_sat_val)
+
+    """Leave every blended method unpredicted, with one status row each saying why."""
+    function skip_all(status::String, message::String)
+        for source in BLEND_SOURCE_METHODS
+            output_method = _blend_method(source)
+            fold_predictions[output_method] = fill(NaN, length(val_idx), size(y_obs, 2))
+            push!(run_status_rows, _benchmark_status_row(
+                nothing, nothing, nothing, false;
+                scheme, product, fold, repeat=repeat_index, seed=repeat_seed,
+                mode="", method=output_method, output_method,
+                status, error=message, prediction_coverage=0.0,
+            ))
+        end
+        return nothing
+    end
+
+    auto_inner.applicable || return skip_all(
+        "skipped", "fold has no inner selection split to choose a blending weight on",
+    )
+    haskey(fold_selected, BLEND_FALLBACK_METHOD) || return skip_all(
+        "skipped", "$BLEND_FALLBACK_METHOD did not fit on this fold, so there is nothing to " *
+        "blend toward",
+    )
+
+    # The one fit this adds. `adw` is not an `auto` candidate - the traditional baselines are what
+    # the GWR claim is assessed against - so its inner-split prediction is not already computed.
+    fallback_inner = try
+        inner_selection_prediction(
+            fold_selected[BLEND_FALLBACK_METHOD], BLEND_FALLBACK_METHOD, "direct",
+            train_lonlat, y_obs_train, y_sat_train, selection_groups;
+            time_indices=auto_inner.time_indices,
+        )
+    catch e
+        return skip_all("failed",
+            "$BLEND_FALLBACK_METHOD inner prediction failed: $(sprint(showerror, e))")
+    end
+
+    inner_obs = Matrix{Float64}(y_obs_train[:, auto_inner.time_indices])
+    inner_sat = Matrix{Float64}(y_sat_train[:, auto_inner.time_indices])
+
+    for source in BLEND_SOURCE_METHODS
+        output_method = _blend_method(source)
+        contender = findfirst(entry -> entry.method == source, auto_inner.contenders)
+        if contender === nothing || !haskey(fold_predictions, source) ||
+                !haskey(fold_predictions, BLEND_FALLBACK_METHOD)
+            fold_predictions[output_method] = fill(NaN, length(val_idx), size(y_obs, 2))
+            push!(run_status_rows, _benchmark_status_row(
+                nothing, nothing, nothing, false;
+                scheme, product, fold, repeat=repeat_index, seed=repeat_seed,
+                mode="", method=output_method, output_method, status="skipped",
+                error="$source has no inner-split prediction to choose a weight on",
+                prediction_coverage=0.0,
+            ))
+            continue
+        end
+        choice = select_blend_lambda(
+            inner_obs, inner_sat, auto_inner.contenders[contender].prediction, fallback_inner,
+            BLEND_LAMBDAS, threshold; time_weights=auto_inner.time_weights,
+        )
+        if choice === nothing
+            fold_predictions[output_method] = fill(NaN, length(val_idx), size(y_obs, 2))
+            push!(run_status_rows, _benchmark_status_row(
+                nothing, nothing, nothing, false;
+                scheme, product, fold, repeat=repeat_index, seed=repeat_seed,
+                mode="", method=output_method, output_method, status="failed",
+                error="no inner-split cell was scorable for $source and " *
+                    BLEND_FALLBACK_METHOD,
+                prediction_coverage=0.0,
+            ))
+            continue
+        end
+        blended = satellite_wet_blend_prediction(
+            y_sat_val, fold_predictions[source], fold_predictions[BLEND_FALLBACK_METHOD],
+            choice.lambda, threshold,
+        )
+        fold_predictions[output_method] = blended
+        predictions[output_method][val_idx, :] = blended
+        push!(blend_selection_rows, merge(
+            (; scheme, product, fold, repeat=repeat_index, seed=repeat_seed,
+                method=output_method, source, fallback=BLEND_FALLBACK_METHOD, threshold),
+            choice,
+        ))
+        coverage = _prediction_coverage(eligible, blended)
+        push!(run_status_rows, _benchmark_status_row(
+            nothing, nothing, nothing, false;
+            scheme, product, fold, repeat=repeat_index, seed=repeat_seed,
+            mode="", method=output_method, output_method,
+            status=coverage >= cfg.min_tuning_coverage ? "success" : "partial",
+            error=coverage >= cfg.min_tuning_coverage ? "" :
+                "prediction coverage below minimum",
+            prediction_coverage=coverage,
+        ))
+    end
     return nothing
 end
 
@@ -480,8 +629,8 @@ function _run_benchmark_fold!(
     scheme, scheme_symbol, repeat_index::Int, repeat_seed::Int,
     predictions, nearest_train_distance,
     dem_store, joint_store, joint_scaling_tables, joint_qc_tables,
-    all_metric_rows, all_scan_rows, run_status_rows, auto_selection_rows, hurdle_rows,
-    selection_fallback_cells,
+    all_metric_rows, all_scan_rows, run_status_rows, auto_selection_rows,
+    blend_selection_rows, hurdle_rows, selection_fallback_cells,
 )
 
     val_ids = folds[fold]
@@ -663,15 +812,20 @@ function _run_benchmark_fold!(
         )
     end
 
-    _run_fold_auto!(
+    auto_inner = _run_fold_auto!(
         cfg, fold, scheme, product, repeat_index, repeat_seed, val_idx, y_obs, y_sat_val,
         y_obs_train, y_sat_train, train_lonlat, selection_groups, joint_selection_contexts,
         joint_inputs, nested_joint, fold_selected, fold_predictions, predictions,
         auto_selection_rows, run_status_rows,
     )
+    cfg.satellite_wet_blend && _run_fold_blend!(
+        cfg, fold, scheme, product, repeat_index, repeat_seed, val_idx, y_obs, y_sat_val,
+        y_obs_train, y_sat_train, train_lonlat, selection_groups, auto_inner,
+        fold_selected, fold_predictions, predictions, blend_selection_rows, run_status_rows,
+    )
     fold_mask = _common_method_mask(Matrix{Float64}(y_obs[val_idx, :]), fold_predictions)
     if any(fold_mask)
-        for method in BENCHMARK_METHODS
+        for method in benchmark_methods(cfg)
             append_stratified_metrics!(
                 all_metric_rows, scheme, product, method, data.times,
                 Matrix{Float64}(y_obs[val_idx, :]), fold_predictions[method], fold_mask,
@@ -707,6 +861,7 @@ function run_interpolation_benchmark(cfg::InterpolationBenchmarkConfig)
     all_bootstrap_rows = NamedTuple[]
     run_status_rows = NamedTuple[]
     auto_selection_rows = NamedTuple[]
+    blend_selection_rows = NamedTuple[]
     mask_scope_rows = NamedTuple[]
     hurdle_rows = NamedTuple[]
     # Cells where the fold was too small for an inner selection split and fell back to
@@ -740,7 +895,9 @@ function run_interpolation_benchmark(cfg::InterpolationBenchmarkConfig)
                 data = product_data[product]
                 y_obs = data.Y_obs
                 y_sat = data.Y_sat
-                predictions = Dict(method => fill(NaN, size(y_obs)) for method in BENCHMARK_METHODS)
+                predictions = Dict(
+                    method => fill(NaN, size(y_obs)) for method in benchmark_methods(cfg)
+                )
                 predictions["raw"] .= y_sat
                 nearest_train_distance = fill(NaN, length(ids))
 
@@ -752,7 +909,7 @@ function run_interpolation_benchmark(cfg::InterpolationBenchmarkConfig)
                         predictions, nearest_train_distance,
                         dem_store, joint_store, joint_scaling_tables, joint_qc_tables,
                         all_metric_rows, all_scan_rows, run_status_rows, auto_selection_rows,
-                        hurdle_rows, selection_fallback_cells,
+                        blend_selection_rows, hurdle_rows, selection_fallback_cells,
                     )
                 end
 
@@ -776,7 +933,7 @@ function run_interpolation_benchmark(cfg::InterpolationBenchmarkConfig)
                 end
                 product_dir = joinpath(scheme_dir, lowercase(product))
                 mkpath(product_dir)
-                for method in BENCHMARK_METHODS
+                for method in benchmark_methods(cfg)
                     # The per-station OOF tables are large; only the first repeat writes them.
                     repeat_index == 1 && write_wide(
                         joinpath(product_dir, "oof_$(method).csv"), data.times, ids, predictions[method],
@@ -808,6 +965,7 @@ function run_interpolation_benchmark(cfg::InterpolationBenchmarkConfig)
         cfg, products, seeds, nested_joint, joint_inputs,
         dem_store, joint_store, joint_scaling_tables, joint_qc_tables,
         all_metric_rows, all_scan_rows, all_bootstrap_rows, run_status_rows,
-        auto_selection_rows, hurdle_rows, selection_fallback_cells, mask_scope_rows,
+        auto_selection_rows, blend_selection_rows, hurdle_rows, selection_fallback_cells,
+    mask_scope_rows,
     )
 end

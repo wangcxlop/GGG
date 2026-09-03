@@ -37,6 +37,42 @@ _output_method(mode::AbstractString, method::AbstractString) =
     method in ("mixed_gwr", "mgwr") ? String(method) :
         (mode == "direct" ? String(method) : "residual_$(method)")
 
+# `satellite_wet_blend`: on the cells the satellite calls wet, blend the residual family's
+# prediction toward a gauge-only interpolator.
+#
+# Not another estimator - a combiner over two that are already fitted. It exists because
+# `output/benchmark_diagnostics/*/anchor_discount_bounds.csv` found it the only counterfactual that
+# beats `adw` at all, lifting RMSE and POD together where a global anchor discount traded one for
+# the other, and beating even the `oracle_dry_wet` variants that are allowed to see the true gauge
+# state. `local_anchor_bound.csv` then showed why a freed *coefficient* cannot substitute: it
+# discounts the satellite on 80% of genuine wet/wet cells too, because the response contains
+# `-y_sat` and a location-varying slope cannot tell a false alarm from real rain. Falling back to a
+# gauge-only estimate is a different operation, not a weaker version of the same one.
+#
+# `adw` is the fallback because it was the best of the two the replay swept (`gwr` was the other,
+# and lost on every cell). The sources are the three anchored methods; `gwr` and the traditional
+# baselines carry no anchor, so there is nothing to blend away.
+const BLEND_SOURCE_METHODS = ["residual_gwr", "mixed_gwr", "mgwr"]
+const BLEND_FALLBACK_METHOD = "adw"
+# The grid `anchor_discount_bounds.csv` swept, so the tuned method and the replay that motivated it
+# are comparable. The replay's winners sat at 0.7-0.8.
+const BLEND_LAMBDAS = collect(0.0:0.1:1.0)
+
+"""Method name a blended counterpart of `method` reports under."""
+_blend_method(method::AbstractString) = "blend_$(method)"
+
+"""
+The methods a run reports, which is `BENCHMARK_METHODS` plus the blended counterparts when
+`satellite_wet_blend` is on.
+
+A function of the config rather than a longer const, so a run with the option off writes exactly
+the files and metric rows it wrote before the option existed. Adding the blends unconditionally
+would have put all-NaN `oof_blend_*.csv` and NaN metric rows into every baseline.
+"""
+benchmark_methods(cfg) = cfg.satellite_wet_blend ?
+    vcat(BENCHMARK_METHODS, [_blend_method(method) for method in BLEND_SOURCE_METHODS]) :
+    BENCHMARK_METHODS
+
 const AUTO_METHOD = "auto"
 # The runs `auto` may choose between: the GWR family only.
 #
@@ -68,6 +104,12 @@ Base.@kwdef struct InterpolationBenchmarkConfig
     # once on the full station set (`joint_covariates.spec_path`). Exactly one of the two must
     # be set when `joint_covariates` is enabled.
     joint_selection::Union{Nothing,JointSelectionConfig} = nothing
+    # Report blended counterparts of the anchored methods: on satellite-wet cells, blend toward
+    # `BLEND_FALLBACK_METHOD`. The blending weight is chosen inside the training fold, on the same
+    # inner selection split `auto` uses - reading it off the held-out cells is the selection-on-test
+    # that `auto` exists to avoid, and is the difference between this and the replay that motivated
+    # it. Off by default; output directory suffix `_satwetblend`.
+    satellite_wet_blend::Bool = false
     # Acknowledges that this run's numbers are not admissible as a result.
     #
     # `joint_covariates.spec_path` names a variable set and local/global role map screened over
@@ -265,6 +307,21 @@ function _validate_benchmark_config(cfg::InterpolationBenchmarkConfig, n_station
         all(>(1), cfg.dem.bandwidth_candidates) ||
             throw(ArgumentError("DEM bandwidth candidates must exceed one neighbor"))
     end
+    # Refused on the legacy DEM path for the same reason `auto` is skipped there:
+    # `inner_selection_prediction` deliberately carries no `dem_context`, so there is no way to
+    # choose a blending weight inside the fold. Everywhere else the three anchored methods exist
+    # whether or not joint covariates are on, so the blend does too.
+    cfg.satellite_wet_blend && cfg.dem !== nothing && throw(ArgumentError(
+        "satellite_wet_blend needs an inner selection split to choose its weight on, which the " *
+        "legacy DEM path does not provide",
+    ))
+    # 0.0 is load-bearing twice over: it is the "do not blend" option, so a fold that cannot be
+    # helped is not forced to blend anyway, and it is the reference `unblended_RMSE` that
+    # `blend_selection.csv` reports the chosen weight against.
+    0.0 in BLEND_LAMBDAS ||
+        throw(ArgumentError("BLEND_LAMBDAS must contain 0.0, the unblended identity"))
+    all(lambda -> 0.0 <= lambda <= 1.0, BLEND_LAMBDAS) ||
+        throw(ArgumentError("BLEND_LAMBDAS must lie in [0, 1]"))
     if cfg.joint_covariates !== nothing
         joint = cfg.joint_covariates
         xor(joint.spec_path === nothing, cfg.joint_selection === nothing) || throw(ArgumentError(

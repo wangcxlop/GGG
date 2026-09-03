@@ -1165,6 +1165,117 @@ end
     @test select_auto_method(NamedTuple[], y_obs, y_sat) === nothing
 end
 
+@testset "satellite_wet_blend acts only where the satellite reports rain" begin
+    y_sat = [0.0 0.5; 2.0 0.0]
+    prediction = [1.0 2.0; 3.0 4.0]
+    fallback = [10.0 20.0; 30.0 40.0]
+
+    # lambda = 0 is the identity everywhere, which is what makes the sweep's first row a check
+    # rather than a candidate.
+    @test satellite_wet_blend_prediction(y_sat, prediction, fallback, 0.0, 0.1) == prediction
+    # lambda = 1 replaces the prediction on satellite-wet cells and leaves the dry ones alone.
+    @test satellite_wet_blend_prediction(y_sat, prediction, fallback, 1.0, 0.1) ==
+        [1.0 20.0; 30.0 4.0]
+    # The test is `>=`, matching `satellite_quadrant_table`: a value exactly at the threshold is
+    # wet.
+    @test satellite_wet_blend_prediction(
+        fill(0.1, 1, 1), fill(1.0, 1, 1), fill(5.0, 1, 1), 1.0, 0.1,
+    ) == fill(5.0, 1, 1)
+    @test satellite_wet_blend_prediction(
+        fill(0.1, 1, 1), fill(1.0, 1, 1), fill(5.0, 1, 1), 1.0, 0.2,
+    ) == fill(1.0, 1, 1)
+    # Halfway is halfway, on the wet cells only.
+    @test satellite_wet_blend_prediction(y_sat, prediction, fallback, 0.5, 0.1) ==
+        [1.0 11.0; 16.5 4.0]
+
+    # A NaN satellite or prediction propagates; a NaN fallback does not, so a fallback that failed
+    # on some cells cannot shrink the blended method's coverage below its source's.
+    holed_sat = [NaN 0.5; 2.0 0.0]
+    @test isnan(satellite_wet_blend_prediction(
+        holed_sat, prediction, fallback, 1.0, 0.1)[1, 1])
+    holed_pred = [1.0 NaN; 3.0 4.0]
+    @test isnan(satellite_wet_blend_prediction(
+        y_sat, holed_pred, fallback, 1.0, 0.1)[1, 2])
+    holed_fallback = [10.0 NaN; 30.0 40.0]
+    blended = satellite_wet_blend_prediction(y_sat, prediction, holed_fallback, 1.0, 0.1)
+    @test blended[1, 2] == prediction[1, 2]
+    @test !any(isnan, blended)
+
+    @test_throws DimensionMismatch satellite_wet_blend_prediction(
+        y_sat, prediction, fill(0.0, 3, 3), 0.5, 0.1,
+    )
+end
+
+@testset "select_blend_lambda chooses on the inner split, on one shared mask" begin
+    # Satellite wet everywhere, so every cell is blendable. The source is badly wrong and the
+    # fallback is exact, so the weight must go all the way to the fallback.
+    y_obs = [1.0 2.0; 3.0 4.0]
+    y_sat = fill(1.0, 2, 2)
+    source = y_obs .+ 5.0
+    fallback = copy(y_obs)
+    choice = select_blend_lambda(y_obs, y_sat, source, fallback, BLEND_LAMBDAS, 0.1)
+    @test choice.lambda == 1.0
+    @test choice.inner_RMSE ≈ 0.0 atol = 1e-12
+    @test choice.unblended_RMSE ≈ 5.0
+    @test choice.wet_cells == 4
+
+    # Reverse the roles and the weight must stay at 0: a blend that cannot help must not be
+    # applied just because the grid offers it.
+    @test select_blend_lambda(
+        y_obs, y_sat, copy(y_obs), y_obs .+ 5.0, BLEND_LAMBDAS, 0.1,
+    ).lambda == 0.0
+
+    # Ties go to the smaller weight, so an indifferent fold departs less from the fitted model
+    # and the answer does not depend on the order of the grid.
+    @test select_blend_lambda(
+        y_obs, y_sat, copy(y_obs), copy(y_obs), BLEND_LAMBDAS, 0.1,
+    ).lambda == 0.0
+
+    # A satellite-dry field is unblendable, so no weight can change anything and 0 wins.
+    dry = select_blend_lambda(y_obs, fill(0.0, 2, 2), source, fallback, BLEND_LAMBDAS, 0.1)
+    @test dry.lambda == 0.0
+    @test dry.wet_cells == 0
+
+    # The weight is scored where the source and the fallback are both finite, so a fallback that
+    # gave up on the hard cells is not rewarded for it — the same discipline `select_auto_method`
+    # applies to its contenders.
+    patchy_fallback = copy(y_obs)
+    patchy_fallback[:, 2] .= NaN
+    restricted = select_blend_lambda(
+        y_obs, y_sat, source, patchy_fallback, BLEND_LAMBDAS, 0.1,
+    )
+    @test restricted.n == 2
+    @test restricted.coverage ≈ 0.5
+    @test restricted.lambda == 1.0
+
+    # Nothing scorable: the caller must be told, not handed a default weight.
+    @test select_blend_lambda(
+        y_obs, y_sat, fill(NaN, 2, 2), fallback, BLEND_LAMBDAS, 0.1,
+    ) === nothing
+end
+
+@testset "blended methods are opt-in and never define the shared mask" begin
+    # Off by default, so a run written before the option existed reports exactly what it did.
+    @test benchmark_methods((; satellite_wet_blend=false)) == BENCHMARK_METHODS
+    enabled = benchmark_methods((; satellite_wet_blend=true))
+    @test enabled[1:length(BENCHMARK_METHODS)] == BENCHMARK_METHODS
+    @test enabled[(length(BENCHMARK_METHODS) + 1):end] ==
+        ["blend_residual_gwr", "blend_mixed_gwr", "blend_mgwr"]
+
+    # Scored on the shared mask, never allowed to define it: letting a new method into
+    # `MASK_METHODS` would silently re-score all the others and break comparability with the
+    # canonical baseline.
+    for method in enabled[(length(BENCHMARK_METHODS) + 1):end]
+        @test !(method in MASK_METHODS)
+    end
+    # The sources carry an anchor to blend away; the fallback does not, and neither do the
+    # traditional baselines.
+    @test all(method -> method in BENCHMARK_METHODS, BLEND_SOURCE_METHODS)
+    @test BLEND_FALLBACK_METHOD in TRADITIONAL_METHODS
+    @test !(BLEND_FALLBACK_METHOD in BLEND_SOURCE_METHODS)
+    @test first(BLEND_LAMBDAS) == 0.0        # the identity must be in the grid
+end
+
 @testset "Interpolation benchmark fixture" begin
     mktempdir() do temp_dir
         ids = string.(2001:2016)
@@ -1524,6 +1635,88 @@ end
         @test any(.!isequal.(joined.bw, joined.bw_1)) ||
             any(.!isequal.(joined.power, joined.power_1)) ||
             any(.!isequal.(joined.smooth, joined.smooth_1))
+
+        # The blended counterparts, on the same fixture. This is the wiring check the unit tests
+        # above cannot make: that the weight is chosen per fold on the inner split, that the
+        # blended methods are reported without disturbing anything else, and that turning the
+        # option on leaves every pre-existing method's numbers exactly as they were.
+        outdir_blend = joinpath(temp_dir, "benchmark_blend")
+        cfg_blend = InterpolationBenchmarkConfig(
+            mger=MGERConfig(
+                station_meta_path=station_path, obs_hourly_wide_path=obs_path,
+                sat_paths=sat_paths, outdir=outdir_blend, kernels=[GAUSSIAN],
+                bw_adaptive=[8.0, 16.0], bw_fixed_km=[20.0, 100.0],
+                expected_common_time_count=length(times),
+            ),
+            k=3, seed=11, cv_schemes=[:balanced_spatial],
+            idw_powers=[2.0], neighbor_candidates=Union{Nothing,Int}[8],
+            tps_smooth_candidates=[0.01], min_tuning_coverage=0.8, bootstrap_reps=0,
+            tuning_geometry=:inner_spatial, satellite_wet_blend=true,
+        )
+        blended = run_interpolation_benchmark(cfg_blend)
+        blend_names = ["blend_residual_gwr", "blend_mixed_gwr", "blend_mgwr"]
+
+        # The blended methods are reported...
+        @test Set(blended.metrics.method) == Set(vcat(BENCHMARK_METHODS, blend_names))
+        for name in blend_names
+            @test isfile(joinpath(outdir_blend, "balanced_spatial", "fy4b", "oof_$(name).csv"))
+        end
+        # ...and no new *fits* were added: the scan is over `BENCHMARK_RUNS` exactly as before, so
+        # the blend costs one extra inner prediction, not another tuning sweep.
+        @test Set((row.mode, row.method) for row in eachrow(blended.scans)) ==
+            Set((row.mode, row.method) for row in eachrow(inner.scans))
+
+        # Turning the option on must not move a single pre-existing number. The blended methods
+        # are scored on the shared mask but do not define it, so the denominator every other
+        # method is scored on is untouched.
+        # Matched by a string key rather than `innerjoin`: the pooled rows carry `fold=missing`
+        # and the non-event rows carry `threshold=NaN`, neither of which DataFrames accepts as a
+        # join key, and those are exactly the rows this is checking did not move.
+        rowkey(row) = join((row.scheme, row.product, row.fold, row.repeat, row.method,
+            row.group, row.level, row.threshold), "|")
+        before = filter(:method => in(Set(BENCHMARK_METHODS)), inner.metrics)
+        after = filter(:method => in(Set(BENCHMARK_METHODS)), blended.metrics)
+        @test nrow(before) == nrow(after)
+        lookup = Dict(rowkey(row) => (row.n, row.RMSE) for row in eachrow(after))
+        @test length(lookup) == nrow(after)          # the key is unique, so the check is total
+        @test all(eachrow(before)) do row
+            haskey(lookup, rowkey(row)) &&
+                isequal(lookup[rowkey(row)], (row.n, row.RMSE))
+        end
+
+        # The weight was chosen per fold, and recorded.
+        selection = CSV.read(joinpath(outdir_blend, "blend_selection.csv"), DataFrame)
+        @test Set(selection.method) ⊆ Set(blend_names)
+        @test all(lambda -> lambda in BLEND_LAMBDAS, selection.lambda)
+        @test all(selection.fallback .== BLEND_FALLBACK_METHOD)
+        @test all(selection.threshold .== cfg_blend.mger.rain_threshold)
+        # Chosen on the inner split, so it can only ever be at least as good as not blending
+        # *there* — never a guarantee about the held-out cells, which is the whole point.
+        @test all(selection.inner_RMSE .<= selection.unblended_RMSE .+ 1e-12)
+
+        # A blended method predicts wherever its source did: the blend only rewrites values on
+        # satellite-wet cells and leaves a NaN fallback alone.
+        for (name, source) in zip(blend_names, BLEND_SOURCE_METHODS)
+            source_rows = filter(row -> row.method == source, blended.status)
+            blend_rows = filter(row -> row.method == name, blended.status)
+            @test nrow(blend_rows) == nrow(source_rows)
+            @test all(blend_rows.prediction_coverage .>= source_rows.prediction_coverage .- 1e-12)
+        end
+
+        # The run says what it did, so a reader of the scope table is not left inferring it from
+        # the directory name.
+        blend_scope = CSV.read(joinpath(outdir_blend, "benchmark_scope.csv"), DataFrame)
+        @test "satellite_wet_blend" in blend_scope.key
+        @test occursin("inner selection split",
+            only(blend_scope.value[blend_scope.key .== "satellite_wet_blend_selection"]))
+
+        # The legacy DEM path has no inner split to choose a weight on, and must refuse rather
+        # than silently reporting an unblended method under a blended name.
+        @test_throws ArgumentError InterpolationBenchmarkConfig(
+            mger=cfg_blend.mger, satellite_wet_blend=true,
+            dem=DEMTerrainExperiment.DEMExperimentConfig(outdir=outdir_blend),
+            terrain_path=station_path,
+        ) |> config -> _validate_benchmark_config(config, n_station)
     end
 end
 

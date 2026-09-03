@@ -35,6 +35,12 @@ const SCHEME = "balanced_spatial"
 # directories that still contain it can be re-assessed; methods absent from disk are skipped.
 const ASSESSED_METHODS = [
     "gwr", "residual_gwr", "mixed_gwr", "mgwr", "hurdle_gwr",
+    # The blended counterparts, present only in a `--satellite-wet-blend` run. Listed here rather
+    # than assessed inside the benchmark because `paired_comparisons.csv` and
+    # `claim_assessment.csv` are produced for `DEFAULT_CLAIM_METHOD` alone, and widening those
+    # would change files every earlier run also writes. Methods absent from disk are skipped, so
+    # this costs nothing on a run that did not produce them.
+    "blend_residual_gwr", "blend_mixed_gwr", "blend_mgwr",
 ]
 
 """The `MGERConfig` the full benchmark run used, so the common station/time grid matches."""

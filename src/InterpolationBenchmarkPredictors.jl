@@ -269,3 +269,86 @@ function inner_selection_prediction(
     end)
     return is_joint ? out_of_fold[:, columns] : out_of_fold
 end
+
+"""
+Blend a residual-family prediction toward a gauge-only one on the cells the satellite calls wet.
+
+`lambda = 0` returns `prediction` untouched, `lambda = 1` replaces it with `fallback` on those
+cells and leaves the satellite-dry cells alone either way. The test is on the satellite, which is
+knowable at prediction time - this is a model, not an oracle.
+
+The twin of this function lives in `scripts/verify_anchor_discount_bounds.jl`, which applies it to
+a finished run's stored `oof_*.csv` under a `lambda` swept over the held-out cells. That is a
+counterfactual and this is a method: the difference is entirely in where `lambda` comes from, and
+the two agreeing on a given `lambda` is what makes the replay a fair preview of this. The
+duplication is deliberate - the replay must keep reading stored matrices with no benchmark config
+in scope.
+
+A NaN in `prediction` or the satellite propagates. A NaN in `fallback` does not: the cell simply
+keeps its unblended prediction, so a fallback that failed on some cells cannot shrink the blended
+method's coverage below its source's. That matters because coverage feeds the run's status rows.
+"""
+function satellite_wet_blend_prediction(
+    y_sat::Matrix{Float64}, prediction::Matrix{Float64}, fallback::Matrix{Float64},
+    lambda::Float64, threshold::Float64,
+)
+    size(prediction) == size(y_sat) == size(fallback) || throw(DimensionMismatch(
+        "satellite, prediction and fallback must have the same shape",
+    ))
+    out = similar(prediction)
+    @inbounds for index in eachindex(prediction)
+        satellite = y_sat[index]
+        predicted = prediction[index]
+        other = fallback[index]
+        if isnan(satellite) || isnan(predicted)
+            out[index] = NaN
+        elseif satellite >= threshold && !isnan(other)
+            out[index] = (1 - lambda) * predicted + lambda * other
+        else
+            out[index] = predicted
+        end
+    end
+    return out
+end
+
+"""
+Choose the blending weight on the inner selection split.
+
+Scores every candidate in `lambdas` on the cells where the source and the fallback are both finite,
+so the choice is not partly a question of which one dropped the harder cells - the same discipline
+`select_auto_method` applies to its contenders.
+
+Ties go to the smaller `lambda`: at equal inner RMSE the answer that departs less from the fitted
+model is the one to prefer, and it keeps the choice from depending on the order of the grid.
+
+Returns `nothing` when no cell is scorable, which the caller reports as a skipped fold rather than
+defaulting to a weight.
+"""
+function select_blend_lambda(
+    y_obs::Matrix{Float64}, y_sat::Matrix{Float64}, prediction::Matrix{Float64},
+    fallback::Matrix{Float64}, lambdas::Vector{Float64}, threshold::Float64;
+    time_weights::Union{Nothing,Vector{Float64}}=nothing,
+)
+    shared = .!isnan.(y_obs) .& .!isnan.(y_sat) .&
+        .!isnan.(prediction) .& .!isnan.(fallback)
+    any(shared) || return nothing
+    restricted_prediction = ifelse.(shared, prediction, NaN)
+    restricted_fallback = ifelse.(shared, fallback, NaN)
+    scored = NamedTuple[]
+    for lambda in lambdas
+        blended = satellite_wet_blend_prediction(
+            y_sat, restricted_prediction, restricted_fallback, lambda, threshold,
+        )
+        push!(scored, merge((; lambda),
+            _candidate_metrics(y_obs, y_sat, blended; time_weights)))
+    end
+    order = sortperm(scored; by=row -> (row.RMSE, row.MAE, row.lambda))
+    best = scored[order[1]]
+    unblended = scored[findfirst(row -> row.lambda == 0.0, scored)]
+    return (;
+        lambda=best.lambda, inner_RMSE=best.RMSE, inner_MAE=best.MAE,
+        unblended_RMSE=unblended.RMSE, n=best.n, coverage=best.coverage,
+        wet_cells=count(index -> shared[index] && y_sat[index] >= threshold,
+            eachindex(shared)),
+    )
+end

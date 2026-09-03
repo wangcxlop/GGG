@@ -26,6 +26,7 @@ function benchmark_config(
     stratified_tuning_weights::Bool=false, legacy_tuning_geometry::Bool=false,
     mgwr_grouping::Symbol=:intercept_only, residual_shrinkage::Bool=true,
     unsupported_local_target::Symbol=:missing, free_satellite_coefficient::Bool=false,
+    satellite_wet_blend::Bool=false,
 )
     mode in (:smoke, :full) || throw(ArgumentError("mode must be :smoke or :full"))
     nested_covariates && legacy_dem && throw(ArgumentError(
@@ -33,6 +34,10 @@ function benchmark_config(
     ))
     free_satellite_coefficient && legacy_dem && throw(ArgumentError(
         "--free-satellite-coefficient only applies to the joint-covariate path, not --legacy-dem",
+    ))
+    satellite_wet_blend && legacy_dem && throw(ArgumentError(
+        "--satellite-wet-blend blends the joint-covariate path's anchored methods, " *
+        "not --legacy-dem",
     ))
     smoke = mode == :smoke
     # Repeated runs, and nested-selection runs, get their own directory so they never overwrite
@@ -62,6 +67,9 @@ function benchmark_config(
             # Keyed on the opt-in: a freed-coefficient run lands somewhere new rather than
             # overwriting the forced-offset baseline it is measured against.
             (free_satellite_coefficient ? "_freesat" : "") *
+            # Keyed on the opt-in for the same reason: a run reporting blended methods lands
+            # somewhere new rather than beside the baseline it is measured against.
+            (satellite_wet_blend ? "_satwetblend" : "") *
             (repeats > 1 ? "_repeats$(repeats)" : ""),
     )
     mkpath(outdir)
@@ -226,6 +234,7 @@ function benchmark_config(
         dem=dem,
         joint_covariates=joint,
         joint_selection=joint_selection,
+        satellite_wet_blend=satellite_wet_blend,
         # The joint path without nested selection reads a full-data spec, which the config
         # validator refuses unless the run admits it is exploratory. --no-nested-covariates is
         # exactly that admission, so it is the only way this turns on.
@@ -343,9 +352,14 @@ function main(args=ARGS)
     # puts the satellite into the local design instead, so the effective coefficient is fitted
     # per location. Opt-in, so every earlier run reproduces unchanged.
     free_satellite_coefficient = "--free-satellite-coefficient" in args
+    # `verify_anchor_discount_bounds.jl` found this the only counterfactual that beats `adw`, and
+    # `verify_local_anchor_bound.jl` found a freed coefficient cannot substitute for it: it
+    # discounts the satellite on genuine wet cells too. Opt-in, so earlier runs reproduce.
+    satellite_wet_blend = "--satellite-wet-blend" in args
     cfg = benchmark_config(mode; with_random, legacy_dem, repeats, nested_covariates,
         local_grid, equal_grids, stratified_tuning_weights, legacy_tuning_geometry,
-        mgwr_grouping, residual_shrinkage, unsupported_local_target, free_satellite_coefficient)
+        mgwr_grouping, residual_shrinkage, unsupported_local_target,
+        free_satellite_coefficient, satellite_wet_blend)
     !legacy_dem && Threads.nthreads() == 1 && @warn(
         "Joint dynamic models are compute intensive; use julia -t auto for parallel hourly fits",
     )
@@ -363,6 +377,7 @@ function main(args=ARGS)
         "residual_shrinkage=$residual_shrinkage, " *
         "unsupported_local_target=$unsupported_local_target, " *
         "free_satellite_coefficient=$free_satellite_coefficient, " *
+        "satellite_wet_blend=$satellite_wet_blend, " *
         "output=$(cfg.mger.outdir)")
     result = run_interpolation_benchmark(cfg)
     println("Finished: $(nrow(result.metrics)) metric rows, $(nrow(result.scans)) scan rows")
