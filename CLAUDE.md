@@ -323,6 +323,61 @@ The blend avoids all of this because it never refits anything: it combines two a
 predictions, adds no design column, and adds no back-fit failures beyond the pre-existing floor
 recorded in F7 below. That robustness difference is independent of the RMSE result.
 
+#### The two gates are opposed along the blending weight, and no banding fixes it
+
+Measured 2026-09-04 with `scripts/verify_banded_blend_bounds.jl`, and this is the thing to know
+before proposing another blend variant.
+
+The family's error is regime-split. On `balanced_spatial`/FY4B the unblended `mgwr` is 73% worse
+than `adw` on the 93% of cells where the gauge is dry, and **4.2% better than `tps`** on the 0.25%
+where it is heavy — the satellite recovers part of the heavy-rain underestimation gauge-only
+interpolation smooths away (heavy bias −10.63 against `adw`'s −11.53). Unblended `mgwr` on GSMaP
+already clears the ≥5% heavy gate against all three baselines (5.78%) and fails only the overall
+gate; the blend passes overall and fails heavy. It is tempting to read that as two configurations
+that just need combining.
+
+They cannot be combined. Pooled RMSE and the heavy stratum move in **opposite directions,
+monotonically**, along the blending weight — `mgwr`, `balanced_spatial`, heavy quoted against
+`tps`, which is the baseline that binds:
+
+| λ | 0.0 | 0.3 | 0.5 | 0.7 | 0.8 | 1.0 |
+|---|---|---|---|---|---|---|
+| FY4B pooled RMSE | 0.96391 | 0.90781 | 0.88421 | 0.87275 | **0.87176** | 0.87926 |
+| FY4B heavy vs `tps` | **+4.23%** | +2.77% | +1.56% | +0.15% | −0.62% | −2.28% |
+| GSMaP pooled RMSE | 0.95902 | 0.88824 | 0.86101 | **0.85165** | 0.85391 | 0.87211 |
+| GSMaP heavy vs `tps` | **+5.78%** | +4.96% | +3.68% | +1.85% | +0.73% | −1.88% |
+
+Pooled is minimised at λ ≈ 0.7–0.8; heavy is maximised at λ = 0 and falls from there. GSMaP needs
+λ ≤ 0.3 to hold heavy ≥ 5%, and at λ = 0.3 pooled is 0.888 against `adw`'s 0.871. FY4B and GPM
+never reach 5% against `tps` at **any** λ, λ = 0 included.
+
+**Giving the weight a band per satellite-intensity class does not break the trade-off**, and the
+reason generalises past this particular fix. Bands `[0.1, 2.5) / [2.5, 8) / [8, ∞)` on `y_sat`,
+each band's λ minimised independently (exact — the bands partition the cells and blending never
+changes which cells are finite, so pooled SSE is additive; the script audits that against a joint
+enumeration rather than asserting it). The result is a ~0.1-point pooled gain and no heavy
+recovery at all: FY4B `mgwr` +0.35% pooled with heavy −0.30%, GPM +3.10% / +0.67%, GSMaP +2.39% /
++1.52%. A second axis, `nearest_train_km`, does the same. Every band picks λ ≈ 0.6–0.9.
+
+The mechanism is that **the satellite does not know the rain is heavy**, so conditioning on its
+value cannot find the cells worth protecting:
+
+| product | median `y_sat` on gauge-heavy cells | gauge-heavy cells the satellite calls dry | gauge-heavy share of the `y_sat ≥ 8` band |
+|---|---|---|---|
+| FY4B | 0.85 mm/h | 36.7% | 7.4% |
+| GPM | 2.35 mm/h | 16.8% | 19.4% |
+| GSMaP | 1.89 mm/h | 14.5% | 12.9% |
+
+The median gauge value on those cells is 11.5 mm/h. Over a third of FY4B's gauge-heavy cells sit
+below the wet threshold, where the blend never reaches them at all, and the satellite-heavy band
+is 81–93% *not* gauge-heavy, so that band's own error is still minimised by blending hard. Any
+rule keyed on `y_sat` inherits this; the useful conditioning variable would have to be one the
+satellite's magnitude does not already fail at.
+
+So the blend as shipped is at its ceiling, and "beats `adw` on GPM and GSMaP" and "supports the
+pre-registered claim" are not two steps along one path. The heavy gate needs a method that
+improves heavy rain *without* trading it against the dry cells — not a better weight.
+
 ### F7 — two back-fits, two stopping rules, one nominal tolerance
 
 `DEMTerrainExperiment._backfit_components` (`src/DEMTerrainExperiment.jl:597` and `:708`) stops on
@@ -479,8 +534,21 @@ unchanged (`gate = 1`, `a = 1`) before reporting anything; treat a failure there
 reading path, not a finding. Outputs land beside the other diagnostics as `dry_gate_replay.csv`,
 `satellite_quadrant.csv` and `anchor_discount_bounds.csv`.
 
-Both hold the run's selected bandwidth, kernel and shrinkage fixed, so neither can see how the
-tuner would re-select them. They bound what is worth building; they are not results.
+`scripts/verify_banded_blend_bounds.jl` is the fourth of these, and the only one that scores the
+pooled gate and the heavy gate together — which is what showed they are opposed (see F4). It
+sweeps a blending weight per band of `y_sat`, and per band of `nearest_train_km`, over the same
+stored matrices, and writes `banded_blend_bounds.csv` and `banded_blend_sweep.csv`. It runs in
+~4 minutes. Its checks are worth keeping if it is ever extended: a zero weight must reproduce
+every stored prediction bit for bit; a constant weight must equal an independently written
+`satellite_wet_blend`; the per-band minimisation must match a joint enumeration over a coarse
+grid; and its constant-weight rows must agree with `anchor_discount_bounds.csv`, which on the
+canonical baseline they do to 0.0 RMSE over 198 rows.
+
+All four hold the run's selected bandwidth, kernel and shrinkage fixed, so none can see how the
+tuner would re-select them, and all four pick their parameters on the held-out cells. They bound
+what is worth building; they are not results. `_satwetblend` gave up 0.04–0.40 points between one
+of these ceilings and honest per-fold tuning with a single parameter, so a bound that only just
+clears a gate has not cleared it.
 
 ## Coding Requirements
 
