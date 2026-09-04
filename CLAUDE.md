@@ -124,11 +124,13 @@ julia -t 4 --project=. scripts/run_interpolation_benchmark.jl full --nested-cova
 ```
 
 Every option that changes what is fitted also changes the output directory name, so a run can
-never overwrite the baseline it is measured against. Two recent ones:
+never overwrite the baseline it is measured against. Three recent ones:
+`--satellite-wet-blend` (`_satwetblend`) blends the anchored GWR-family predictions toward `adw`
+where the satellite reports rain — the only variant that beats `adw`, see F4;
 `--free-satellite-coefficient` (`_freesat`) fits the satellite's coefficient locally instead of
-forcing it to 1 — see F4 below for what it is for — and `--equal-grids` (`_equalgrids`) widens the
-GWR *and* the IDW/ADW/TPS search grids together, unlike `--local-grid`, which widened only the GWR
-family and so left the baselines pinned against their own ceilings.
+forcing it to 1, which F4 records as measured and negative; and `--equal-grids` (`_equalgrids`)
+widens the GWR *and* the IDW/ADW/TPS search grids together, unlike `--local-grid`, which widened
+only the GWR family and so left the baselines pinned against their own ceilings.
 
 Four is not a magic number: it is where this machine's allocation contention starts to bite.
 Re-derive it on new hardware with `scripts/profile_hour_fit.jl`, which prints the per-hour cost
@@ -272,17 +274,54 @@ Three things follow, the first two unchanged in direction and the third **revers
   "0.910 against `adw`'s 0.944 with POD rising 0.813 → 0.831" result; it was measured against
   weaker `idw`/`adw` baselines, before those formed their weights per availability group.
 
-`--free-satellite-coefficient` acts on the anchor: it puts the satellite into the local design as
-`JointCovariateModels.SATELLITE_GROUP` so the effective coefficient becomes `1 + b_sat(u)` rather
-than a forced 1. Off by default, output directory suffix `_freesat`. Not yet run on the benchmark,
-and no longer blocked — `data/processed/covariates/` was rebuilt on 2026-09-02.
+**Both levers have now been run, and the blend is the one that works** (2026-09-03).
 
-Read it as an open question rather than a queued win. It generalises the *global discount* that
-just came out negative, so it is a test of whether letting the coefficient vary in space rescues
-what a constant could not. The counterfactual that actually wins does something the flag cannot
-express: fall back to a gauge-only interpolator on satellite-wet cells, rather than rescale the
-satellite. If `_freesat` disappoints, that gap is the reason, and a `satellite_wet_blend` model
-would be the thing to build.
+`--satellite-wet-blend` (suffix `_satwetblend`, commit `8f36c43`) turns the winning counterfactual
+into a tuned method: it blends each anchored GWR-family prediction toward `adw` where the
+satellite reports rain, with the blending weight chosen on the fold's inner selection split rather
+than assumed. Scored on `balanced_spatial`, it is the first GWR-family method to beat `adw`:
+
+| product | `adw` RMSE | `blend_mgwr` RMSE | vs `adw` | replay ceiling | tuning cost |
+|---|---|---|---|---|---|
+| FY4B | 0.874121 | 0.875248 | −0.13% | +0.27% | 0.40 pts |
+| GPM | 0.870897 | 0.845295 | **+2.94%** | +2.98% | 0.04 pts |
+| GSMaP | 0.870897 | 0.853139 | **+2.04%** | +2.21% | 0.17 pts |
+
+GPM and GSMaP are significant under the paired daily bootstrap against **all three** traditional
+baselines (2000 reps, 618 days, `ci_low > 0` and `pvalue_holm < 0.05`); FY4B is not (p = 0.752
+raw against `adw`, 1.0 after Holm), and never could be — a +0.27% replay ceiling does not survive honest tuning. The
+"tuning cost" column is the gap between the ceiling the replay promised and what selecting the
+weight out of sample actually delivered: 0.04 and 0.17 points on GPM and GSMaP, 0.40 on FY4B.
+
+**The pre-registered claim still fails, and on one gate only.** `product_supported` is `false` for
+all three products because `assess_gwr_claim` (`src/InterpolationBenchmarkMetrics.jl:296`) demands
+a **≥5%** RMSE improvement on the *heavy* stratum against every baseline. The blend delivers
++0.43% / +0.81% / +2.22% there — positive, and significant against `idw`/`adw` at p = 0.0, but an
+order of magnitude short of that bar, so `heavy_win_count = 0` everywhere. Every other gate passes
+on GPM and GSMaP: significance 3/3, moderate non-inferiority (it *gains* 2.4% / 1.7% rather than
+degrading), 3 of 4 years, CSI/FAR not degraded, own coverage 0.9805. So "the blend beats every
+traditional baseline on GPM and GSMaP" is defensible; "the GWR claim is supported" is not.
+
+Reproduce with `scripts/run_claim_reassessment.jl <run dir>`, which is also the only place the
+blended methods are assessed at all — `claim_assessment.csv` is written for `DEFAULT_CLAIM_METHOD`
+alone. Heed its own warning: reporting the best of the eight assessed methods is a post-hoc
+maximum over correlated tests, and that bites here. On GSMaP only `blend_mgwr` clears
+significance; `blend_residual_gwr` (+0.08%) and `blend_mixed_gwr` (+0.10%) do not.
+
+`--free-satellite-coefficient` acts on the anchor instead: it puts the satellite into the local
+design as `JointCovariateModels.SATELLITE_GROUP`, so the effective coefficient becomes
+`1 + b_sat(u)` rather than a forced 1. Off by default, suffix `_freesat`. It is **answered and
+negative**, and it broke on the way. Where it completed (FY4B) it improved the family a great deal
+and still lost: −3.25% against `adw`. On GPM it **crashed** — every kernel/bandwidth-family
+combination failed to converge within `mgwr_max_tuning_iterations = 5`, `converged || continue`
+dropped all of them, and the run died with `no common valid OOF samples across all methods` on 4
+of 5 folds. That is F8 firing for real, on precisely the harder configuration that section names,
+since the flag adds one covariate group. Its run directory and log therefore cover FY4B only, and
+its 91 non-convergence warnings are a truncated count, not a census.
+
+The blend avoids all of this because it never refits anything: it combines two already-fitted
+predictions, adds no design column, and adds no back-fit failures beyond the pre-existing floor
+recorded in F7 below. That robustness difference is independent of the RMSE result.
 
 ### F7 — two back-fits, two stopping rules, one nominal tolerance
 
@@ -292,6 +331,22 @@ the relative change in **RSS**. `JointCovariateModels._multiscale_predict_damped
 default to `tolerance = 1e-5`, so the same configured number means two different things depending
 on which path a model takes. They also disagree on failure: the joint one returns all-NaN with
 `converged=false`, discarding the hour; the DEM one returns its last iterate.
+
+**The joint one fires on the canonical baseline**, which was not previously written down here
+(measured 2026-09-03). It discards ~228 of the 13471 hours (~1.7%) for FY4B, logging
+`joint dynamic model did not converge for some hours` from
+`src/InterpolationBenchmarkPredictors.jl:140` — 187 warnings in the baseline run, 168 of them at
+exactly `failed_hours = 228`, spread over `residual_gwr`, `mixed_gwr` and `mgwr` alike. GPM (6)
+and GSMaP (1) are almost untouched. Those hours are already excluded from the shared evaluation
+mask, which is why FY4B's mask holds 3,020,184 cells against GPM/GSMaP's 3,072,559, so no
+published number is wrong because of it — but a cross-*product* comparison is not on the same
+cells, and the discard is silent apart from the warning.
+
+Census it with `grep -c "did not converge"` on a run's stderr log plus
+`grep -o "failed_hours = [0-9]*" | sort | uniq -c`. `_satwetblend` sits at that same floor (136
+warnings, all FY4B, 228–231); `_freesat` pushed it to 236–419 on a third of its warnings. Adding
+the satellite to the local design does make the back-fit harder, but the 228-hour core is not its
+doing.
 
 ### F8 — non-convergence removes a candidate instead of penalising it
 
@@ -310,7 +365,14 @@ descent got marginally slower with the larger dataset without approaching the ca
 The margin is thinner than "none at the cap" suggests, though. The cap is 5 and the deepest
 observed descent is 4, so a single extra sweep separates the current numbers from the regime where
 combinations start being dropped silently. The finding is about fragility under a harder
-configuration — more covariate groups, a wider bandwidth grid, `--equal-grids` — not a live error.
+configuration — more covariate groups, a wider bandwidth grid, `--equal-grids`.
+
+**And it has since fired** (2026-09-03). `--free-satellite-coefficient` adds one covariate group,
+the first item on that list, and on GPM it exhausted the cap for *every* kernel/bandwidth-family
+combination: the tuner dropped them all and the run died with `no common valid OOF samples across
+all methods` on 4 of 5 folds (see F4). The fragility is demonstrated, not hypothetical, and one
+extra covariate group was enough. Do not confuse it with F7's per-hour discard — a different
+mechanism at a different level, which fires on the canonical baseline where this one does not.
 
 Reproduce with: selected `method == "mgwr"` rows of `parameter_scan.csv`, counted by `iteration`.
 
@@ -389,15 +451,17 @@ mark it as such.
 
 ### Queued experiments
 
-All four need no new code, cost ~5 h each, and land in their own suffixed directory, so none can
-overwrite the baseline. Run them only once the canonical baseline above stands.
+Three remain. Each needs no new code, costs ~5 h, and lands in its own suffixed directory, so none
+can overwrite the baseline. Run them only once the canonical baseline above stands.
 
 - `--mgwr-grouping shared` settles two open questions at once: F5's decomposition (is
   `:intercept_only` mgwr a distinct model, or a nested extension of `mixed_gwr`?) and F6's
   corollary (how much of mgwr's advantage over `mixed_gwr` is its ability to demote an over-eager
   `local` role assignment to `bw = Inf`, rather than multiscale resolution?).
-- `--free-satellite-coefficient` (`_freesat`) — F4's lever, the one measurement that suggested
-  RMSE and POD can move together.
+- ~~`--free-satellite-coefficient` (`_freesat`)~~ — **done, negative, abandoned** on 2026-09-03:
+  −3.25% against `adw` where it completed, and a hard F8 crash on GPM. `--satellite-wet-blend`
+  (`_satwetblend`) is the lever that worked, and is now a tuned method rather than an experiment.
+  See F4 for both.
 - `--equal-grids` (`_equalgrids`) — whether the GWR family's margin survives giving IDW/ADW/TPS
   the same search budget.
 - The paired F1 gate described under "Outstanding verification" above.
