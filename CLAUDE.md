@@ -445,7 +445,9 @@ Reproduce with: selected `method == "mgwr"` rows of `parameter_scan.csv`, counte
 - The ridge is an absolute constant applied to designs whose columns differ in scale by orders of
   magnitude, so it does not regularise them comparably.
 - GPM and GSMaP emit bit-identical baseline rows, which is worth confirming is intended.
-- The bandwidth grid still saturates at its endpoints in some fold-cells.
+- The bandwidth grid still saturates at its endpoints in some fold-cells, and the partial
+  `--equal-grids` run below says which methods this actually binds: widening the search left
+  `idw` and `tps` **byte-identical**, so their selections were interior, while `adw` moved.
 
 ### Outstanding verification: F1's benchmark-level gate
 
@@ -506,10 +508,49 @@ the time grid from current data (13471 hours) and would intersect it with stored
 covering 11426, so it would print a delta between two different cell populations and nothing would
 mark it as such.
 
+### Partial: `--equal-grids` widened ADW's search and made ADW worse
+
+Run `full --nested-covariates --equal-grids --satellite-wet-blend` on 2026-09-04, stopped
+deliberately after `balanced_spatial/FY4B`. The directory
+`output/interpolation_benchmark_full_joint_covariates_nested_equalgrids_mgwrintercept_only_satwetblend/`
+holds that one cell and **no aggregates or `benchmark_scope.csv`**, so it is not citable; the
+figures below come from its stored `oof_*.csv` scored over its own
+`common_evaluation_mask.csv`. That reading path was validated first by reproducing the completed
+`_satwetblend` run's `metrics_pooled.csv` exactly — all five methods, all five digits.
+
+| method | normal grid | equal grids | change |
+|---|---|---|---|
+| `adw` | 0.87412 | 0.87766 | **+0.41% worse** |
+| `idw` | 0.87688 | 0.87692 | unchanged (`oof_idw.csv` byte-identical) |
+| `tps` | 0.93436 | 0.93439 | unchanged (`oof_tps.csv` byte-identical) |
+| `mgwr` | 0.96391 | 0.97093 | +0.73% worse |
+| `residual_gwr` | 1.00697 | 1.00166 | 0.53% better |
+| `blend_mgwr` | 0.87525 | 0.87918 | +0.45% worse |
+| `blend_residual_gwr` | 0.88913 | 0.88565 | 0.39% better |
+
+The experiment was queued in case the GWR family's margin came from searching a wider grid than
+the baselines were allowed. On this cell the opposite happened: **a wider search made the binding
+baseline worse.** `adw` selected a parameter that scores better on the inner split and worse on
+held-out cells — more search budget bought selection variance, not accuracy. `idw` and `tps` did
+not move at all, their selections being interior to the old grid, which is the useful negative:
+only `adw` was ever pinned against its endpoint, so "the baselines were handicapped by a narrow
+grid" was true of exactly one of the three and cost it nothing.
+
+The mask lost 237 cells of 3,020,184 (0.008%), which cannot account for the movement: dropping
+cells can only lower pooled SSE, and the RMSE rose.
+
+Two cautions on how far this reaches. It is **one cell, and the null product** — FY4B is where the
+blend was flat either way, and the margin being tested (+2.94% GPM, +2.04% GSMaP) lives in cells
+this run never reached. And the effect is not uniform across the family: the `mgwr` pair got worse
+while the `residual_gwr` pair got better, so this is selection noise moving several ways at once,
+not a single mechanism. Within the run the relative standing was unchanged — `blend_mgwr` sat
+0.17% behind `adw`, against 0.13% on the normal grid.
+
 ### Queued experiments
 
-Three remain. Each needs no new code, costs ~5 h, and lands in its own suffixed directory, so none
-can overwrite the baseline. Run them only once the canonical baseline above stands.
+Three remain. Each needs no new code and lands in its own suffixed directory, so none can
+overwrite the baseline. Budget ~5 h each on the measured hardware, except `--equal-grids` at
+~26 h. Run them only once the canonical baseline above stands.
 
 - `--mgwr-grouping shared` settles two open questions at once: F5's decomposition (is
   `:intercept_only` mgwr a distinct model, or a nested extension of `mixed_gwr`?) and F6's
@@ -519,8 +560,11 @@ can overwrite the baseline. Run them only once the canonical baseline above stan
   −3.25% against `adw` where it completed, and a hard F8 crash on GPM. `--satellite-wet-blend`
   (`_satwetblend`) is the lever that worked, and is now a tuned method rather than an experiment.
   See F4 for both.
-- `--equal-grids` (`_equalgrids`) — whether the GWR family's margin survives giving IDW/ADW/TPS
-  the same search budget.
+- `--equal-grids` (`_equalgrids`) — whether the margin survives giving IDW/ADW/TPS the same
+  search budget. **Started 2026-09-04 and stopped after one of six cells**; the one cell is
+  recorded just above and points the opposite way to the worry that motivated it. Needs re-running
+  to GPM and GSMaP to be decisive, at ~26 h rather than ~5: the wider grid costs about 37% more per
+  cell (FY4B 4 h 07 against 3 h 00).
 - The paired F1 gate described under "Outstanding verification" above.
 
 ### Re-running the review's diagnostics
