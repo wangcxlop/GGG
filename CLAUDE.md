@@ -398,10 +398,12 @@ published number is wrong because of it — but a cross-*product* comparison is 
 cells, and the discard is silent apart from the warning.
 
 Census it with `grep -c "did not converge"` on a run's stderr log plus
-`grep -o "failed_hours = [0-9]*" | sort | uniq -c`. `_satwetblend` sits at that same floor (136
-warnings, all FY4B, 228–231); `_freesat` pushed it to 236–419 on a third of its warnings. Adding
-the satellite to the local design does make the back-fit harder, but the 228-hour core is not its
-doing.
+`grep -o "failed_hours = [0-9]*" | sort | uniq -c`. The completed `_satwetblend` run reproduces
+the baseline census **exactly** — 187 warnings, 180 FY4B / 6 GPM / 1 GSMaP, identical triple by
+triple on (product, method, failed_hours) — which is the sharpest available evidence that blending
+adds no fitting failures, since it refits nothing. `_freesat`, by contrast, pushed the count to
+236–419 on a third of its warnings. Adding the satellite to the local design does make the
+back-fit harder; the 228-hour core is not its doing.
 
 ### F8 — non-convergence removes a candidate instead of penalising it
 
