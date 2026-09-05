@@ -345,6 +345,32 @@ function _write_benchmark_outputs(
             ],
         ))
     end
+    if cfg.residual_traditional
+        append!(scope, DataFrame(
+            key=["residual_traditional"],
+            value=[
+                "$(join([_output_method(m, n) for (m, n) in RESIDUAL_TRADITIONAL_RUNS], ", ")) " *
+                "also fitted, so residual framing is a factor that varies independently of the " *
+                "estimator instead of a property of the GWR family (F4). They are scored on the " *
+                "shared mask but do not define it, and are not claim baselines",
+            ],
+        ))
+    end
+    # Which side of F1 the run took. Only the directory suffix recorded this before, so a run
+    # directory that had been renamed or copied carried no evidence of it at all.
+    if cfg.joint_covariates !== nothing
+        append!(scope, DataFrame(
+            key=["unsupported_local_target"],
+            value=[
+                cfg.joint_covariates.unsupported_local_target === :zero ?
+                    "zero: a local target with too few supported neighbours keeps an all-zero hat " *
+                    "row, which is indistinguishable from no local correction (pre-F1 behaviour, " *
+                    "--legacy-unsupported-zero)" :
+                    "missing: a local target with too few supported neighbours gets a NaN hat row, " *
+                    "so the coverage gates and the shared evaluation mask can see it (F1)",
+            ],
+        ))
+    end
     append!(scope, _git_provenance())
     CSV.write(joinpath(cfg.mger.outdir, "benchmark_scope.csv"), scope)
     return (; metrics, scans, bootstrap, status, claim, repeat_summary, fold_summary,
@@ -613,7 +639,7 @@ end
 
 """
 Everything one cross-validation fold does: split the stations, build the fold's DEM/joint/hurdle
-contexts, tune and predict each `BENCHMARK_RUNS` method, run `auto`, and append the fold's metric,
+contexts, tune and predict each `benchmark_runs(cfg)` method, run `auto`, and append the fold's metric,
 scan and status rows.
 
 Extracted verbatim from `run_interpolation_benchmark`, whose body was a single 580-line function
@@ -751,7 +777,7 @@ function _run_benchmark_fold!(
     # Winning hyperparameters per method, kept so `auto` can re-predict them across the
     # inner split and choose between the methods without seeing a held-out station.
     fold_selected = Dict{String,Any}()
-    for (mode, method) in BENCHMARK_RUNS
+    for (mode, method) in benchmark_runs(cfg)
         output_method = _output_method(mode, method)
         try
             selected = select_interpolation_parameter!(

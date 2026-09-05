@@ -124,13 +124,15 @@ julia -t 4 --project=. scripts/run_interpolation_benchmark.jl full --nested-cova
 ```
 
 Every option that changes what is fitted also changes the output directory name, so a run can
-never overwrite the baseline it is measured against. Three recent ones:
+never overwrite the baseline it is measured against. Four recent ones:
 `--satellite-wet-blend` (`_satwetblend`) blends the anchored GWR-family predictions toward `adw`
 where the satellite reports rain — the only variant that beats `adw`, see F4;
 `--free-satellite-coefficient` (`_freesat`) fits the satellite's coefficient locally instead of
 forcing it to 1, which F4 records as measured and negative; and `--equal-grids` (`_equalgrids`)
 widens the GWR *and* the IDW/ADW/TPS search grids together, unlike `--local-grid`, which widened
-only the GWR family and so left the baselines pinned against their own ceilings.
+only the GWR family and so left the baselines pinned against their own ceilings. And
+`--residual-traditional` (`_restrad`) also fits `idw`/`adw`/`tps` on the satellite residual, which
+is what makes residual framing a factor that can be varied independently of the estimator — see F4.
 
 Four is not a magic number: it is where this machine's allocation contention starts to bite.
 Re-derive it on new hardware with `scripts/profile_hour_fit.jl`, which prints the per-hour cost

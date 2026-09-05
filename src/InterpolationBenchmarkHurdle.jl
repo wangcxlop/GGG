@@ -9,8 +9,9 @@
 # Nothing below changed when it moved; only its address did.
 #
 # Be aware that none of this has automated coverage - the test suite cannot reach it, because
-# `select_interpolation_parameter!` rejects any (mode, method) pair outside `BENCHMARK_RUNS`. To
-# exercise it, push `("direct", "hurdle_gwr")` onto `BENCHMARK_RUNS` and call
+# `select_interpolation_parameter!` rejects any (mode, method) pair outside
+# `SUPPORTED_BENCHMARK_RUNS`. To exercise it, push `("direct", "hurdle_gwr")` onto both that and
+# `BENCHMARK_RUNS`, and call
 # `build_hurdle_context` -> `select_interpolation_parameter!` -> `predict_selected`. That is how
 # this move was checked: the scan rows, the selected candidate, the prediction and the diagnostic
 # row all came out identical to the pre-move code.

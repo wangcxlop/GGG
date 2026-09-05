@@ -459,7 +459,7 @@ function select_interpolation_parameter!(
     selection_groups=nothing, joint_selection_contexts=nothing, repeat_seed::Int=cfg.seed,
     repeat_index::Int=1,
 )
-    (mode, method) in BENCHMARK_RUNS ||
+    (mode, method) in SUPPORTED_BENCHMARK_RUNS ||
         throw(ArgumentError("unsupported benchmark method/mode pair: $method/$mode"))
     if dem_context !== nothing && mode == "residual" && method in ("gwr", "mixed_gwr", "mgwr")
         return select_dem_parameter!(

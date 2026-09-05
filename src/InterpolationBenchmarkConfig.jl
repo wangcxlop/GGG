@@ -31,6 +31,25 @@ const BENCHMARK_RUNS = [
     ("direct", "idw"), ("direct", "adw"), ("direct", "tps"), ("direct", "gwr"),
     ("residual", "gwr"), ("residual", "mixed_gwr"), ("residual", "mgwr"),
 ]
+# F4 in CLAUDE.md: `BENCHMARK_RUNS` offers `residual_gwr`, but `TRADITIONAL_METHODS` has no residual
+# counterpart, so every method that corrects satellite residuals is also a GWR and every non-GWR
+# method interpolates the gauge field directly. "`residual_gwr` beats `tps`" therefore varies the
+# framing and the estimator at the same time, and the design cannot separate them. These three runs
+# are the missing cell of that factorial - the same `y_obs - y_sat` target and
+# `max(y_sat + interpolated, 0)` add-back the GWR family gets, carried by the traditional estimators,
+# which the mode-generic target selection already provides for free.
+#
+# Off by default behind `--residual-traditional` (suffix `_restrad`), so the canonical baseline keeps
+# exactly the files and metric rows it already has. Deliberately *not* added to
+# `TRADITIONAL_METHODS` - they are not baselines the pre-registered claim is assessed against - nor to
+# `MASK_METHODS`, for the reason given there.
+const RESIDUAL_TRADITIONAL_RUNS = [
+    ("residual", "idw"), ("residual", "adw"), ("residual", "tps"),
+]
+# Every pair the tuner and the predictor will *accept*, as opposed to the pairs a given run fits.
+# Their guards exist to catch an unknown method/mode pair; deciding the active set is
+# `benchmark_runs(cfg)`'s job, and `predict_selected` has no config to ask.
+const SUPPORTED_BENCHMARK_RUNS = vcat(BENCHMARK_RUNS, RESIDUAL_TRADITIONAL_RUNS)
 
 """Method name a `(mode, method)` run reports under."""
 _output_method(mode::AbstractString, method::AbstractString) =
@@ -62,16 +81,33 @@ const BLEND_LAMBDAS = collect(0.0:0.1:1.0)
 _blend_method(method::AbstractString) = "blend_$(method)"
 
 """
-The methods a run reports, which is `BENCHMARK_METHODS` plus the blended counterparts when
-`satellite_wet_blend` is on.
+The methods a run reports: `BENCHMARK_METHODS`, plus the residual traditional methods when
+`residual_traditional` is on, plus the blended counterparts when `satellite_wet_blend` is on.
 
 A function of the config rather than a longer const, so a run with the option off writes exactly
 the files and metric rows it wrote before the option existed. Adding the blends unconditionally
 would have put all-NaN `oof_blend_*.csv` and NaN metric rows into every baseline.
 """
-benchmark_methods(cfg) = cfg.satellite_wet_blend ?
-    vcat(BENCHMARK_METHODS, [_blend_method(method) for method in BLEND_SOURCE_METHODS]) :
-    BENCHMARK_METHODS
+function benchmark_methods(cfg)
+    methods = copy(BENCHMARK_METHODS)
+    cfg.residual_traditional && append!(
+        methods, [_output_method(mode, method) for (mode, method) in RESIDUAL_TRADITIONAL_RUNS],
+    )
+    cfg.satellite_wet_blend &&
+        append!(methods, [_blend_method(method) for method in BLEND_SOURCE_METHODS])
+    return methods
+end
+
+"""
+The `(mode, method)` pairs a run fits, which is `BENCHMARK_RUNS` plus the residual traditional runs
+when `residual_traditional` is on.
+
+Must stay in step with `benchmark_methods`: the fold loop writes `predictions[output_method]`, and
+that dictionary is preallocated from the method list, so a pair fitted without its name listed throws
+a `KeyError` rather than being silently dropped.
+"""
+benchmark_runs(cfg) = cfg.residual_traditional ?
+    vcat(BENCHMARK_RUNS, RESIDUAL_TRADITIONAL_RUNS) : BENCHMARK_RUNS
 
 const AUTO_METHOD = "auto"
 # The runs `auto` may choose between: the GWR family only.
@@ -110,6 +146,11 @@ Base.@kwdef struct InterpolationBenchmarkConfig
     # that `auto` exists to avoid, and is the difference between this and the replay that motivated
     # it. Off by default; output directory suffix `_satwetblend`.
     satellite_wet_blend::Bool = false
+    # Also fit `idw`, `adw` and `tps` in residual mode, so residual framing can be varied
+    # independently of the estimator instead of being a property of the GWR family (F4). Adds no new
+    # modelling - the residual target and the add-back are already mode-generic. Off by default;
+    # output directory suffix `_restrad`.
+    residual_traditional::Bool = false
     # Acknowledges that this run's numbers are not admissible as a result.
     #
     # `joint_covariates.spec_path` names a variable set and local/global role map screened over

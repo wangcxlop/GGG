@@ -26,7 +26,7 @@ function benchmark_config(
     stratified_tuning_weights::Bool=false, legacy_tuning_geometry::Bool=false,
     mgwr_grouping::Symbol=:intercept_only, residual_shrinkage::Bool=true,
     unsupported_local_target::Symbol=:missing, free_satellite_coefficient::Bool=false,
-    satellite_wet_blend::Bool=false,
+    satellite_wet_blend::Bool=false, residual_traditional::Bool=false,
 )
     mode in (:smoke, :full) || throw(ArgumentError("mode must be :smoke or :full"))
     nested_covariates && legacy_dem && throw(ArgumentError(
@@ -70,6 +70,10 @@ function benchmark_config(
             # Keyed on the opt-in for the same reason: a run reporting blended methods lands
             # somewhere new rather than beside the baseline it is measured against.
             (satellite_wet_blend ? "_satwetblend" : "") *
+            # Keyed on the opt-in for the same reason again: the residual traditional methods add
+            # rows and files rather than changing the incumbents, but a directory that mixes the
+            # two populations is no longer the baseline anything was measured against.
+            (residual_traditional ? "_restrad" : "") *
             (repeats > 1 ? "_repeats$(repeats)" : ""),
     )
     mkpath(outdir)
@@ -235,6 +239,7 @@ function benchmark_config(
         joint_covariates=joint,
         joint_selection=joint_selection,
         satellite_wet_blend=satellite_wet_blend,
+        residual_traditional=residual_traditional,
         # The joint path without nested selection reads a full-data spec, which the config
         # validator refuses unless the run admits it is exploratory. --no-nested-covariates is
         # exactly that admission, so it is the only way this turns on.
@@ -356,10 +361,14 @@ function main(args=ARGS)
     # `verify_local_anchor_bound.jl` found a freed coefficient cannot substitute for it: it
     # discounts the satellite on genuine wet cells too. Opt-in, so earlier runs reproduce.
     satellite_wet_blend = "--satellite-wet-blend" in args
+    # F4: `residual_gwr` has no traditional counterpart, so residual framing and the GWR estimator
+    # are varied together and cannot be separated. --residual-traditional fits `idw`/`adw`/`tps` on
+    # the satellite residual as well, completing the factorial. Opt-in, so earlier runs reproduce.
+    residual_traditional = "--residual-traditional" in args
     cfg = benchmark_config(mode; with_random, legacy_dem, repeats, nested_covariates,
         local_grid, equal_grids, stratified_tuning_weights, legacy_tuning_geometry,
         mgwr_grouping, residual_shrinkage, unsupported_local_target,
-        free_satellite_coefficient, satellite_wet_blend)
+        free_satellite_coefficient, satellite_wet_blend, residual_traditional)
     !legacy_dem && Threads.nthreads() == 1 && @warn(
         "Joint dynamic models are compute intensive; use julia -t auto for parallel hourly fits",
     )
@@ -378,6 +387,7 @@ function main(args=ARGS)
         "unsupported_local_target=$unsupported_local_target, " *
         "free_satellite_coefficient=$free_satellite_coefficient, " *
         "satellite_wet_blend=$satellite_wet_blend, " *
+        "residual_traditional=$residual_traditional, " *
         "output=$(cfg.mger.outdir)")
     result = run_interpolation_benchmark(cfg)
     println("Finished: $(nrow(result.metrics)) metric rows, $(nrow(result.scans)) scan rows")

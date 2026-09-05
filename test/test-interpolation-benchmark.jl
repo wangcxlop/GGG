@@ -113,8 +113,22 @@ end
         constant_values, fill(100.0, size(constant_values)), fill(200.0, 1, 3),
     )
     @test direct_a == direct_b
+    # `("residual", "idw")` used to be rejected here. It is a supported pair now (F4): residual
+    # framing has to be reachable by a traditional estimator for it to be a factor that varies
+    # independently of the GWR family. The add-back is the shared mode-generic one, not a new path.
+    residual_sat_train = fill(1.5, size(constant_values))
+    residual_sat_target = fill(2.5, 1, 3)
+    @test predict_selected(
+            selected_idw, "idw", "residual", lonlat, target_lonlat,
+            constant_values, residual_sat_train, residual_sat_target,
+        ) ≈ max.(
+            residual_sat_target .+
+                idw_predict(lonlat, constant_values .- residual_sat_train, target_lonlat; power=2.0),
+            0.0,
+        )
+    # A pair outside `SUPPORTED_BENCHMARK_RUNS` still throws.
     @test_throws ArgumentError predict_selected(
-        selected_idw, "idw", "residual", lonlat, target_lonlat,
+        selected_idw, "idw", "sideways", lonlat, target_lonlat,
         constant_values, zeros(size(constant_values)), zeros(1, 3),
     )
 end
@@ -158,9 +172,9 @@ end
         tps_smooth_candidates=[0.01, 0.1],
     )
 
-    # Taken from `BENCHMARK_RUNS` rather than assumed: these three run in `direct` mode only,
-    # and this picks up any further pairing without the testset silently going stale.
-    for (mode, method) in BENCHMARK_RUNS
+    # Taken from `SUPPORTED_BENCHMARK_RUNS` rather than assumed, so both modes are exercised
+    # against the same holes and any further pairing is picked up without the testset going stale.
+    for (mode, method) in SUPPORTED_BENCHMARK_RUNS
         method in ("idw", "adw", "tps") || continue
         values = mode == "direct" ? y_obs : y_obs .- y_sat
         reported = [time for time in 1:n_time if any(isfinite, @view(values[:, time]))]
@@ -1256,8 +1270,9 @@ end
 
 @testset "blended methods are opt-in and never define the shared mask" begin
     # Off by default, so a run written before the option existed reports exactly what it did.
-    @test benchmark_methods((; satellite_wet_blend=false)) == BENCHMARK_METHODS
-    enabled = benchmark_methods((; satellite_wet_blend=true))
+    @test benchmark_methods((; satellite_wet_blend=false, residual_traditional=false)) ==
+        BENCHMARK_METHODS
+    enabled = benchmark_methods((; satellite_wet_blend=true, residual_traditional=false))
     @test enabled[1:length(BENCHMARK_METHODS)] == BENCHMARK_METHODS
     @test enabled[(length(BENCHMARK_METHODS) + 1):end] ==
         ["blend_residual_gwr", "blend_mixed_gwr", "blend_mgwr"]
@@ -1274,6 +1289,82 @@ end
     @test BLEND_FALLBACK_METHOD in TRADITIONAL_METHODS
     @test !(BLEND_FALLBACK_METHOD in BLEND_SOURCE_METHODS)
     @test first(BLEND_LAMBDAS) == 0.0        # the identity must be in the grid
+end
+
+@testset "residual traditional methods complete the framing factorial" begin
+    # F4: `residual_gwr` had no traditional counterpart, so residual framing and the GWR estimator
+    # were varied together. These three are the missing cell.
+    off = (; satellite_wet_blend=false, residual_traditional=false)
+    on = (; satellite_wet_blend=false, residual_traditional=true)
+
+    # Off by default, so the canonical baseline reports exactly what it reported before.
+    @test benchmark_runs(off) == BENCHMARK_RUNS
+    @test benchmark_methods(off) == BENCHMARK_METHODS
+
+    @test benchmark_runs(on) == vcat(BENCHMARK_RUNS, RESIDUAL_TRADITIONAL_RUNS)
+    added = benchmark_methods(on)[(length(BENCHMARK_METHODS) + 1):end]
+    @test added == ["residual_idw", "residual_adw", "residual_tps"]
+    # The names come from the shared mapping, not from a second naming rule.
+    @test added == [_output_method(mode, method) for (mode, method) in RESIDUAL_TRADITIONAL_RUNS]
+
+    # The fitted pairs and the reported names must stay in step: the fold loop writes
+    # `predictions[output_method]` into a dictionary preallocated from the method list, so a pair
+    # fitted without its name listed is a `KeyError`, not a silent drop.
+    both = (; satellite_wet_blend=true, residual_traditional=true)
+    @test all(
+        _output_method(mode, method) in benchmark_methods(both)
+        for (mode, method) in benchmark_runs(both)
+    )
+
+    # Scored on the shared mask, never allowed to define it, and never a claim baseline: either
+    # would move numbers the canonical baseline and the pre-registered gates already published.
+    for method in added
+        @test !(method in MASK_METHODS)
+        @test !(method in TRADITIONAL_METHODS)
+    end
+    @test TRADITIONAL_METHODS == ["idw", "adw", "tps"]
+    @test MASK_METHODS ==
+        ["raw", "idw", "adw", "tps", "gwr", "residual_gwr", "mixed_gwr", "mgwr"]
+
+    # Every traditional estimator gets both framings, which is what makes the factorial complete
+    # rather than "at least one residual variant".
+    for method in TRADITIONAL_METHODS
+        @test ("direct", method) in BENCHMARK_RUNS
+        @test ("residual", method) in RESIDUAL_TRADITIONAL_RUNS
+    end
+    # And the tuner/predictor guards accept them, which is what the superset const is for.
+    @test all(pair -> pair in SUPPORTED_BENCHMARK_RUNS, RESIDUAL_TRADITIONAL_RUNS)
+    @test all(pair -> pair in SUPPORTED_BENCHMARK_RUNS, BENCHMARK_RUNS)
+
+    # The prediction really is the traditional estimator on the satellite residual, with the
+    # shared add-back and clip - not a GWR path reached under a new name.
+    rng = MersenneTwister(90210)
+    train_lonlat = hcat(110.0 .+ rand(rng, 20), 30.0 .+ rand(rng, 20))
+    target_lonlat = hcat(110.0 .+ rand(rng, 6), 30.0 .+ rand(rng, 6))
+    y_sat_train = 2.0 .+ randn(rng, 20, 8)
+    y_obs_train = max.(y_sat_train .+ 0.5 .* randn(rng, 20, 8), 0.0)
+    y_sat_target = 2.0 .+ randn(rng, 6, 8)
+    for (method, selected, direct_fit) in (
+        ("idw", (; power=2.0, neighbors=0),
+            values -> idw_predict(train_lonlat, values, target_lonlat; power=2.0)),
+        ("adw", (; power=2.0, neighbors=0),
+            values -> adw_predict(train_lonlat, values, target_lonlat; power=2.0)),
+        ("tps", (; smooth=0.1),
+            values -> tps_predict(train_lonlat, values, target_lonlat; smooth=0.1)),
+    )
+        residual = predict_selected(
+            selected, method, "residual", train_lonlat, target_lonlat,
+            y_obs_train, y_sat_train, y_sat_target,
+        )
+        @test residual ≈ max.(y_sat_target .+ direct_fit(y_obs_train .- y_sat_train), 0.0)
+        @test all(>=(0.0), residual)
+        # Not the same thing as the direct fit, or the factorial would have only one level.
+        direct = predict_selected(
+            selected, method, "direct", train_lonlat, target_lonlat,
+            y_obs_train, y_sat_train, y_sat_target,
+        )
+        @test !(residual ≈ direct)
+    end
 end
 
 @testset "Interpolation benchmark fixture" begin
@@ -1707,6 +1798,69 @@ end
         # the directory name.
         blend_scope = CSV.read(joinpath(outdir_blend, "benchmark_scope.csv"), DataFrame)
         @test "satellite_wet_blend" in blend_scope.key
+
+        # The residual traditional methods, on the same fixture, and the check that matters most
+        # for them: the smoke-run comparison this would otherwise be done with is unavailable
+        # (smoke mode still wants the pre-rebuild `*_202206_*` inputs), so the non-interference
+        # guard lives here instead. Unlike the blend these do add *fits*, which is exactly why
+        # they could disturb something and the blend could not.
+        outdir_restrad = joinpath(temp_dir, "benchmark_restrad")
+        cfg_restrad = InterpolationBenchmarkConfig(
+            mger=MGERConfig(
+                station_meta_path=station_path, obs_hourly_wide_path=obs_path,
+                sat_paths=sat_paths, outdir=outdir_restrad, kernels=[GAUSSIAN],
+                bw_adaptive=[8.0, 16.0], bw_fixed_km=[20.0, 100.0],
+                expected_common_time_count=length(times),
+            ),
+            k=3, seed=11, cv_schemes=[:balanced_spatial],
+            idw_powers=[2.0], neighbor_candidates=Union{Nothing,Int}[8],
+            tps_smooth_candidates=[0.01], min_tuning_coverage=0.8, bootstrap_reps=0,
+            tuning_geometry=:inner_spatial, residual_traditional=true,
+        )
+        restrad = run_interpolation_benchmark(cfg_restrad)
+        restrad_names = ["residual_idw", "residual_adw", "residual_tps"]
+
+        @test Set(restrad.metrics.method) == Set(vcat(BENCHMARK_METHODS, restrad_names))
+        for name in restrad_names
+            @test isfile(joinpath(outdir_restrad, "balanced_spatial", "fy4b", "oof_$(name).csv"))
+        end
+        # Three more fits, and exactly three: the traditional estimators gain a residual level and
+        # nothing else changes about what is scanned.
+        @test Set((row.mode, row.method) for row in eachrow(restrad.scans)) ==
+            Set((row.mode, row.method) for row in eachrow(inner.scans)) ∪
+                Set(RESIDUAL_TRADITIONAL_RUNS)
+
+        # And no pre-existing number moved. `n` is checked alongside `RMSE` because it is the
+        # shared evaluation mask's size: if the new methods had leaked into `MASK_METHODS` they
+        # would have shrunk the denominator every incumbent is scored on, which is the one way a
+        # purely additive method list can silently rewrite published results.
+        restrad_before = filter(:method => in(Set(BENCHMARK_METHODS)), inner.metrics)
+        restrad_after = filter(:method => in(Set(BENCHMARK_METHODS)), restrad.metrics)
+        @test nrow(restrad_before) == nrow(restrad_after)
+        restrad_lookup =
+            Dict(rowkey(row) => (row.n, row.RMSE) for row in eachrow(restrad_after))
+        @test length(restrad_lookup) == nrow(restrad_after)
+        @test all(eachrow(restrad_before)) do row
+            haskey(restrad_lookup, rowkey(row)) &&
+                isequal(restrad_lookup[rowkey(row)], (row.n, row.RMSE))
+        end
+
+        # The factorial has two levels that actually differ, per estimator. Without this the
+        # whole point of F4 - separating the framing from the estimator - could be satisfied by
+        # three methods that happen to reproduce their direct counterparts.
+        restrad_pooled = filter(row -> ismissing(row.fold) && row.group == "overall",
+            restrad.metrics)
+        for product in unique(restrad_pooled.product),
+            (direct, residual) in zip(TRADITIONAL_METHODS, restrad_names)
+
+            cell(method) = only(restrad_pooled.RMSE[
+                (restrad_pooled.product .== product) .& (restrad_pooled.method .== method)])
+            @test isfinite(cell(residual))
+            @test cell(direct) != cell(residual)
+        end
+
+        restrad_scope = CSV.read(joinpath(outdir_restrad, "benchmark_scope.csv"), DataFrame)
+        @test "residual_traditional" in restrad_scope.key
         @test occursin("inner selection split",
             only(blend_scope.value[blend_scope.key .== "satellite_wet_blend_selection"]))
 

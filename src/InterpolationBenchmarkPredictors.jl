@@ -125,7 +125,7 @@ function predict_selected(
     y_obs_train::Matrix{Float64}, y_sat_train::Matrix{Float64}, y_sat_target::Matrix{Float64};
     dem_context=nothing, joint_context=nothing, hurdle_context=nothing,
 )
-    (mode, method) in BENCHMARK_RUNS ||
+    (mode, method) in SUPPORTED_BENCHMARK_RUNS ||
         throw(ArgumentError("unsupported benchmark method/mode pair: $method/$mode"))
     values = mode == "direct" ? y_obs_train : y_obs_train .- y_sat_train
     is_dem_model = dem_context !== nothing && hasproperty(selected, :dem_model) && selected.dem_model
