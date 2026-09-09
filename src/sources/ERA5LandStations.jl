@@ -1,6 +1,7 @@
 module ERA5LandStations
 
 using CSV, DataFrames, Dates, JSON
+using Main.TableIO: column as _column
 
 export ERA5_LAND_DATASET, ERA5_LAND_VARIABLES,
     read_era5_stations, build_era5_land_request,
@@ -50,13 +51,6 @@ try:
 finally:
     os.chdir(previous_dir)
 """
-
-function _column(df::DataFrame, requested::Symbol)
-    mapping = Dict(Symbol(lowercase(String(name))) => name for name in names(df))
-    column = get(mapping, Symbol(lowercase(String(requested))), nothing)
-    column === nothing && throw(ArgumentError("missing column: $requested"))
-    return column
-end
 
 function _safe_station_id(value)
     station_id = strip(string(value))

@@ -30,6 +30,11 @@ function standalone_module_dependencies(name::AbstractString)
     name == "JointVariableSelection" &&
         return ["SelectionScaffolding", "DEMTerrainExperiment", "ERA5VariableSelection",
                 "NDVIVariableSelection"]
+    # Everything that reads a station table or writes a CSV atomically. Listed as one clause
+    # because the dependency is the same for all of them and the list is the interesting part.
+    name in ("AppEEARSNDVI", "ERA5LandStations", "FY4BPreprocessing", "MGERDataPrep",
+             "MOD13A2NDVIProcessing", "StudyArea", "TerrainFeatures") &&
+        return ["TableIO"]
     return String[]
 end
 

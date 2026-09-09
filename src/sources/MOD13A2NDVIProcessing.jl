@@ -3,6 +3,7 @@ module MOD13A2NDVIProcessing
 using CSV
 using DataFrames
 using Dates
+using Main.TableIO: write_csv_atomic as _write_csv_atomic
 
 export parse_mod13a2_date, composite_observation_date, quality_class,
     land_water_class, clean_ndvi, process_mod13a2_table, prepare_mod13a2_ndvi
@@ -205,18 +206,6 @@ function process_mod13a2_table(
 
     audit = _audit_stations(result)
     return (; table=result, audit, period_dates)
-end
-
-function _write_csv_atomic(path::AbstractString, table)
-    mkpath(dirname(path))
-    temporary = string(path, ".tmp-", getpid())
-    try
-        CSV.write(temporary, table)
-        mv(temporary, path; force=true)
-    finally
-        isfile(temporary) && rm(temporary; force=true)
-    end
-    return path
 end
 
 function prepare_mod13a2_ndvi(

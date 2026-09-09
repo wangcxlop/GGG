@@ -1,6 +1,7 @@
 module MGERDataPrep
 
 using CSV, DataFrames, Dates, Statistics
+using Main.TableIO: write_csv_atomic
 
 export audit_mger_inputs, parse_time_utcish, prepare_satellite_wide
 export align_station_table, assert_wide, assert_station_columns
@@ -20,18 +21,6 @@ function parse_time_utcish(value)
         end
     end
     error("Cannot parse timestamp: $value")
-end
-
-function write_csv_atomic(path::AbstractString, table)
-    mkpath(dirname(path))
-    temporary_path = string(path, ".tmp-", getpid())
-    try
-        CSV.write(temporary_path, table)
-        mv(temporary_path, path; force=true)
-    finally
-        isfile(temporary_path) && rm(temporary_path; force=true)
-    end
-    return path
 end
 
 function monthly_files(input_dir::AbstractString, product::AbstractString; years=2022:2025, months=6:9)

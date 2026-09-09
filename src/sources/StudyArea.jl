@@ -1,6 +1,7 @@
 module StudyArea
 
 using CSV, DataFrames
+using Main.TableIO: write_csv_atomic as _write_csv_atomic
 
 export StudyBounds, STUDY_BOUNDS, filter_stations, prepare_study_area_inputs
 
@@ -20,18 +21,6 @@ struct StudyBounds
 end
 
 const STUDY_BOUNDS = StudyBounds(109.4, 111.6, 31.2, 33.4)
-
-function _write_csv_atomic(path::AbstractString, table)
-    mkpath(dirname(path))
-    temporary_path = string(path, ".tmp-", getpid())
-    try
-        CSV.write(temporary_path, table)
-        mv(temporary_path, path; force=true)
-    finally
-        isfile(temporary_path) && rm(temporary_path; force=true)
-    end
-    return path
-end
 
 function filter_stations(metadata::DataFrame; bounds::StudyBounds=STUDY_BOUNDS)
     required = [:station_id, :lon, :lat]

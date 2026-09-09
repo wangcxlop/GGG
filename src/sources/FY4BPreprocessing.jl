@@ -2,6 +2,7 @@
 module FY4BPreprocessing
 
 using NCDatasets, CSV, DataFrames, Dates
+using Main.TableIO: write_csv_atomic
 
 export aggregate_fy4b_hourly, build_hourly_qc, find_nc_files, parse_nc_filename
 
@@ -18,13 +19,6 @@ const FY4B_DATA_DIR = joinpath(ROOT, "data", "FY4B")
 const STATION_META_FILE = joinpath(ROOT, "data", "hubei_station_meta.csv")
 const OUTPUT_FILE = joinpath(ROOT, "data", "processed", "hubei_fy4b_hourly_2022_2025_JunSep_strict_navcorrected.csv")
 const QC_FILE = joinpath(ROOT, "output", "input_audit", "fy4b_hourly_qc_2022_2025_JunSep_strict_navcorrected.csv")
-
-function write_csv_atomic(path, df)
-    mkpath(dirname(path))
-    temp_path = string(path, ".tmp-", getpid())
-    CSV.write(temp_path, df)
-    mv(temp_path, path; force=true)
-end
 
 # Satellite parameters for FY4B (from NC files)
 const DEFAULT_SAT_LON = 133.0   # Fallback satellite longitude (degrees)
