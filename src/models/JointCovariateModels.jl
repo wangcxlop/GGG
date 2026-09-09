@@ -17,28 +17,13 @@ using Statistics
 using Main: DEMTerrainExperiment
 using Main.DEMTerrainExperiment: mixed_gwr_predict, multiscale_gwr_predict
 
+# The covariate design vocabulary, shared with `JointVariableSelection` so the two cannot drift.
+using Main.CovariateGroups: JOINT_GROUP_ORDER, GROUP_COLUMNS, GROUP_FAMILY
+
 export JointCovariateBenchmarkConfig, JointFoldContext
 export load_joint_covariate_spec, joint_spec_sha256, build_joint_fold_context
 export dynamic_covariate_predict, joint_effective_roles, joint_group_names
 
-const JOINT_GROUP_ORDER = [
-    "elevation", "slope", "aspect", "t2m_c", "d2m_c",
-    "u10", "v10", "sp_hpa", "ndvi",
-]
-const GROUP_COLUMNS = Dict(
-    "elevation" => [:elevation_m],
-    "slope" => [:slope_deg],
-    "aspect" => [:aspect_sin, :aspect_cos],
-    "t2m_c" => [:t2m_c],
-    "d2m_c" => [:d2m_c],
-    "u10" => [:u10],
-    "v10" => [:v10],
-    "sp_hpa" => [:sp_hpa],
-    "ndvi" => [:ndvi],
-)
-const GROUP_FAMILY = Dict(group =>
-    group in ("elevation", "slope", "aspect") ? "dem" :
-    group == "ndvi" ? "ndvi" : "era5" for group in JOINT_GROUP_ORDER)
 
 Base.@kwdef struct JointCovariateBenchmarkConfig
     # `nothing` when the benchmark is configured for nested per-fold selection instead of a

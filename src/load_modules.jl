@@ -26,10 +26,10 @@ small and acyclic: everything else in `src/` is a leaf.
 function standalone_module_dependencies(name::AbstractString)
     name == "ERA5VariableSelection" && return ["SelectionScaffolding"]
     name == "NDVIVariableSelection" && return ["SelectionScaffolding", "ERA5VariableSelection"]
-    name == "JointCovariateModels" && return ["DEMTerrainExperiment"]
+    name == "JointCovariateModels" && return ["DEMTerrainExperiment", "CovariateGroups"]
     name == "JointVariableSelection" &&
         return ["SelectionScaffolding", "DEMTerrainExperiment", "ERA5VariableSelection",
-                "NDVIVariableSelection"]
+                "NDVIVariableSelection", "CovariateGroups"]
     # Everything that reads a station table or writes a CSV atomically. Listed as one clause
     # because the dependency is the same for all of them and the list is the interesting part.
     name in ("AppEEARSNDVI", "ERA5LandStations", "FY4BPreprocessing", "MGERDataPrep",
