@@ -16,7 +16,6 @@ using Base.Threads
 
 export GWR
 export ST_GWR, ST_GWR_fast, ST_GWR_fast!, gwr_neighbors
-export gwr_q, gw_weight_vec, solver_reg, fitted
 export fitted, fitted!
 
 export cor

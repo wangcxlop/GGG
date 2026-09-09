@@ -6,7 +6,7 @@ export solve_reg, solve_reg2
 
 
 """
-    solver_reg2(X::Matrix{T}, y::Vector{T}, w::AbstractVector{T})
+    solve_reg2(X::Matrix{T}, Y::Matrix{T}, w::AbstractVector{T})
 
 β = C_i y = [(X' W_i X)⁻¹ X' W_i] y
 ̂y = S y = x_i C_i y
