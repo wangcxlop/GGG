@@ -9,7 +9,11 @@ export aggregate_fy4b_hourly, build_hourly_qc, find_nc_files, parse_nc_filename
 # FY4B Aggregation: 15min NetCDF -> Hourly CSV
 # =========================
 
-const ROOT = normpath(joinpath(@__DIR__, ".."))
+# Two levels up, because this file lives in `src/sources/`. The consts below are defaults the
+# `prepare_fy4b_*` scripts override; they are string consts, so a wrong root here would not fail
+# on load - it would surface much later, as a missing input inside whichever script read through
+# one of them.
+const ROOT = normpath(joinpath(@__DIR__, "..", ".."))
 const FY4B_DATA_DIR = joinpath(ROOT, "data", "FY4B")
 const STATION_META_FILE = joinpath(ROOT, "data", "hubei_station_meta.csv")
 const OUTPUT_FILE = joinpath(ROOT, "data", "processed", "hubei_fy4b_hourly_2022_2025_JunSep_strict_navcorrected.csv")
