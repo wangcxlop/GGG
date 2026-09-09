@@ -125,30 +125,6 @@ function _mixed_fit_complete(
     return merge(result, (; local_hat, global_hat))
 end
 
-function _mixed_predict_complete(
-    Xlocal_train::Matrix{Float64}, Xglobal_train::Matrix{Float64}, y::Vector{Float64},
-    train_lonlat::Matrix{Float64}, Xlocal_target::Matrix{Float64},
-    Xglobal_target::Matrix{Float64}, target_lonlat::Matrix{Float64}, bw::Float64,
-    kernel::Function; adaptive::Bool=true,
-    ridge::Float64=1e-8, tolerance::Float64=1e-5, max_iterations::Int=200,
-)
-    train_distances = _haversine_matrix(train_lonlat, train_lonlat)
-    fitted = _mixed_fit_complete(
-        Xlocal_train, Xglobal_train, y, train_distances, bw, kernel;
-        adaptive, ridge, tolerance, max_iterations,
-    )
-    global_beta = isempty(Xglobal_train) ? Float64[] :
-        (Xglobal_train' * Xglobal_train + ridge * I) \ (Xglobal_train' * (y - fitted.local_components[1]))
-    partial = y - (isempty(Xglobal_train) ? zeros(length(y)) : Xglobal_train * global_beta)
-    target_hat = _local_hat(
-        Xlocal_train, Xlocal_target,
-        _haversine_matrix(train_lonlat, target_lonlat), bw, kernel; adaptive, ridge,
-    )
-    prediction = target_hat * partial
-    isempty(Xglobal_target) || (prediction .+= Xglobal_target * global_beta)
-    return prediction, fitted.converged, fitted.iterations
-end
-
 function _linear_loocv_rmse(hat::Matrix{Float64}, y::Vector{Float64})
     fitted = hat * y
     denominator = 1 .- diag(hat)
@@ -298,37 +274,4 @@ function select_multiscale_bandwidths(
         previous_rss = rss
     end
     return bandwidths, DataFrame(rows), false
-end
-
-function _multiscale_predict_complete(
-    local_train::Vector{Matrix{Float64}}, Xglobal_train::Matrix{Float64}, y::Vector{Float64},
-    train_lonlat::Matrix{Float64}, local_target::Vector{Matrix{Float64}},
-    Xglobal_target::Matrix{Float64}, target_lonlat::Matrix{Float64}, bandwidths::Vector{Float64},
-    kernel::Function; adaptive::Bool=true,
-    ridge::Float64=1e-8, tolerance::Float64=1e-5, max_iterations::Int=200,
-)
-    train_distances = _haversine_matrix(train_lonlat, train_lonlat)
-    fitted = _multiscale_fit_complete(
-        local_train, Xglobal_train, y, train_distances, bandwidths, kernel;
-        adaptive, ridge, tolerance, max_iterations,
-    )
-    fitted.converged || return fill(NaN, size(target_lonlat, 1)), false, fitted.iterations
-    local_sum = reduce(+, fitted.local_components)
-    global_beta = isempty(Xglobal_train) ? Float64[] :
-        (Xglobal_train' * Xglobal_train + ridge * I) \ (Xglobal_train' * (y - local_sum))
-    global_train = isempty(Xglobal_train) ? zeros(length(y)) : Xglobal_train * global_beta
-    prediction = isempty(Xglobal_target) ? zeros(size(target_lonlat, 1)) : Xglobal_target * global_beta
-    target_distances = _haversine_matrix(train_lonlat, target_lonlat)
-    for group_index in eachindex(local_train)
-        partial = y - global_train
-        for other in eachindex(fitted.local_components)
-            other == group_index || (partial .-= fitted.local_components[other])
-        end
-        target_hat = _local_hat(
-            local_train[group_index], local_target[group_index], target_distances,
-            bandwidths[group_index], kernel; adaptive, ridge,
-        )
-        prediction .+= target_hat * partial
-    end
-    return prediction, true, fitted.iterations
 end

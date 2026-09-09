@@ -36,7 +36,6 @@ const STATION_TIME_OFFSET = Hour(8) # FY4B filenames are UTC; station timestamps
 
 # Computed constants
 const SAT_DISTANCE = SAT_HEIGHT - EARTH_RADIUS  # Distance from surface to satellite
-const SCALE_FACTOR = (GRID_SIZE - 1) / 2.0      # For scaling scan angles to grid indices
 
 """
     latlon_to_scan_angles(lat, lon, sat_lon=DEFAULT_SAT_LON)
