@@ -25,18 +25,18 @@ export metric_continuous, metric_event, common_valid_mask, complete_time_mask
 Base.Matrix(x::Vector) = reshape(x, length(x), 1)
 
 
-include("fitted.jl")
-include("metrics.jl")
-include("kernel.jl")
-include("gw_weight.jl")
-include("PrecipitationCorrection.jl")
-include("solve_chol.jl")
-include("solve_reg.jl")
-include("GWR.jl")
-include("GWR_calib.jl")
-include("deprecated.jl")
+include("core/fitted.jl")
+include("core/metrics.jl")
+include("core/kernel.jl")
+include("core/gw_weight.jl")
+include("core/PrecipitationCorrection.jl")
+include("core/solve_chol.jl")
+include("core/solve_reg.jl")
+include("core/GWR.jl")
+include("core/GWR_calib.jl")
+include("core/deprecated.jl")
 
-include("ST_GWR.jl")
+include("core/ST_GWR.jl")
 
 get_nthread() = Threads.nthreads(:interactive) + Threads.nthreads(:default)
 
