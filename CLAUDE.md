@@ -85,7 +85,7 @@ underlying RMSE/delta columns) as this same benign non-associativity, not a regr
 
 ### The layout of `src/`
 
-`src/` holds two files and six directories. The directory a file is in says which of the three
+`src/` holds two files and seven directories. The directory a file is in says which of the three
 loading disciplines applies to it — that used to be prose, and the filename could not carry it:
 seven core-tier files are lowercase and four PascalCase, while the top-level fragments look
 exactly like standalone modules.
@@ -100,7 +100,13 @@ src/
   models/          the estimators
   benchmark/       the interpolation benchmark, and the diagnostics that read its output
   mger/            the MGER pipeline and its data prep
+  util/            plumbing with no opinion about precipitation, shared across tiers
 ```
+
+`util/` is deliberately narrow: it holds `TableIO` (the atomic CSV write and the case-insensitive
+column lookup) because those callers span `sources/` and `mger/` and the helpers belong to neither.
+It is not a drawer for anything that happens to be shared - domain vocabulary goes with its domain,
+which is why `CovariateGroups` sits in `models/` rather than here.
 
 Do not create `src/data/` or `src/docs/`: `.gitignore` carries bare `data/` and `docs` patterns,
 which git matches at any depth, so files there would be silently untracked.
@@ -114,7 +120,7 @@ which git matches at any depth, so files there would be silently untracked.
    their own, so they must never be `include`d directly by anything else.
 
 2. **Standalone modules** — each defines its *own* `module X ... end` and is loaded through
-   `src/load_modules.jl`, never through the `MixedGWR` module. Seventeen of them:
+   `src/load_modules.jl`, never through the `MixedGWR` module. Nineteen of them:
    - `sources/`: `StudyArea.jl`, `FY4BPreprocessing.jl`, `ERA5LandStations.jl`,
      `ERA5LandProcessing.jl`, `ERA5LandCovariates.jl`, `MOD13A2NDVIProcessing.jl`,
      `AppEEARSNDVI.jl`, `TerrainFeatures.jl` — one data source or ingest stage each.
@@ -122,7 +128,10 @@ which git matches at any depth, so files there would be silently untracked.
      `annotate_selection!`, `append_selection!`, `selection_schemes`), `ERA5VariableSelection.jl`,
      `NDVIVariableSelection.jl`, `JointVariableSelection.jl`.
    - `models/`: `TraditionalInterpolation.jl`, `DEMTerrainExperiment.jl`,
-     `JointCovariateModels.jl` — everything that fits something.
+     `JointCovariateModels.jl` — everything that fits something — plus `CovariateGroups.jl`, the
+     group/column/family vocabulary the fitting and the selection sides share.
+   - `util/TableIO.jl`: `write_csv_atomic` and the case-insensitive `column` lookup, shared by
+     seven modules across `sources/` and `mger/`.
    - `benchmark/BenchmarkDiagnostics.jl`, which reads a finished run's artefacts. It shares that
      directory with the fragments below but not their discipline: it is a real module and takes no
      part in their include chain.
@@ -177,6 +186,13 @@ When adding a new file to `src/`, the directory is the decision: a reusable regr
 primitive goes in `core/` and needs an `include("core/...")` line in `src/MixedGWR.jl`; anything
 else is its own standalone module under `sources/`, `selection/`, `models/` or `benchmark/`
 following convention (2) above, and needs no registration at all — the loader finds it by name.
+
+Two modules are themselves split, both by `include`ing fragments into the module rather than by
+making sub-modules, so every name stays exactly where callers reach it today:
+`benchmark/diagnostics/` holds one file per diagnostic, keeping the `D<n>` labels the sections
+carried as banner comments, and `models/dem/` holds the terrain/GWR library with
+`run_dem_experiment`, the study orchestrator that writes ~15 fixed-name CSVs, alone in
+`experiment.jl`.
 
 ### Calling convention
 
