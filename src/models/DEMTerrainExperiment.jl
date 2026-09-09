@@ -259,8 +259,8 @@ on a reused buffer replaces `sort(filter(isfinite, distances))`; it returns the 
 linear time and without allocating. For a fixed bandwidth, `bw` is applied directly with no
 neighbor-count conversion. `distances` is not modified.
 """
-# Reimplements the library's GWR weighting (`gw_weight!` in src/gw_weight.jl, kernels in
-# src/kernel.jl) instead of calling it, and not identically: the adaptive bandwidth here is the
+# Reimplements the library's GWR weighting (`gw_weight!` in src/core/gw_weight.jl, kernels in
+# src/core/kernel.jl) instead of calling it, and not identically: the adaptive bandwidth here is the
 # distance to the k-th nearest neighbour via `partialsort!`, where `gw_weight!` uses the `dn = bw/n`
 # ratio. Both are defensible, but they are different weights for the same nominal bandwidth, so
 # the DEM path's `bw` is not directly comparable to the rest of the GWR family's. Unifying them

@@ -277,7 +277,7 @@ end
 
 
 # `metric_continuous`, `metric_event`, `common_valid_mask` and `complete_time_mask` now live in
-# `src/metrics.jl` inside the `MixedGWR` module, which this file already imports at the top. They
+# `src/core/metrics.jl` inside the `MixedGWR` module, which this file already imports at the top. They
 # are reused by the benchmark, the diagnostics and the tests, so they are library code rather than
 # part of this pipeline.
 

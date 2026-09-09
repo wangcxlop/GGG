@@ -72,7 +72,7 @@ The same class of drift showed up again, independent of BLAS, when the full-mode
 `paired_comparisons.csv`'s `ci_high` column moved in its last one or two digits for most rows,
 while `ci_low`, `delta_RMSE`, `relative_improvement`, and every other output file (105 of 106)
 stayed byte-identical. `_daily_bootstrap_delta`/`paired_bootstrap_rows`
-(`src/InterpolationBenchmarkBootstrap.jl`) are themselves single-threaded and fully seeded, so the
+(`src/benchmark/InterpolationBenchmarkBootstrap.jl`) are themselves single-threaded and fully seeded, so the
 difference traces to a sub-ULP perturbation in the `residual_gwr` prediction matrix upstream —
 the perf pass's threaded prediction path reordering some sum. It is only visible in
 `paired_comparisons.csv` because that file's RMSE is summed per-day (≤526 terms) before
@@ -83,17 +83,56 @@ underlying RMSE/delta columns) as this same benign non-associativity, not a regr
 
 ## Architecture
 
-### Two tiers of `src/`
+### The layout of `src/`
 
-1. **Core `MixedGWR` module** — algorithms included inside `module MixedGWR ... end` in `src/MixedGWR.jl` (the package entry point): `fitted.jl`, `metrics.jl`, `kernel.jl`, `gw_weight.jl`, `PrecipitationCorrection.jl`, `solve_chol.jl`, `solve_reg.jl`, `GWR.jl`, `GWR_calib.jl`, `ST_GWR.jl`, `deprecated.jl`. These are reached normally via `using MixedGWR` and export the regression/kernel primitives (`GWR`, `ST_GWR`, `ST_GWR_fast`, kernel constants `GAUSSIAN`/`EXPONENTIAL`/`BISQUARE`/`TRICUBE`/`BOXCAR`, etc).
+`src/` holds two files and six directories. The directory a file is in says which of the three
+loading disciplines applies to it — that used to be prose, and the filename could not carry it:
+seven core-tier files are lowercase and four PascalCase, while the top-level fragments look
+exactly like standalone modules.
 
-2. **Standalone data-pipeline modules** — each of these files defines its *own* `module X ... end` and is loaded through `src/load_modules.jl`, not through the `MixedGWR` module: `StudyArea.jl`, `ERA5LandStations.jl`, `ERA5LandProcessing.jl`, `ERA5LandCovariates.jl`, `ERA5VariableSelection.jl`, `MOD13A2NDVIProcessing.jl`, `NDVIVariableSelection.jl`, `AppEEARSNDVI.jl`, `FY4BPreprocessing.jl`, `TerrainFeatures.jl`, `TraditionalInterpolation.jl`, `DEMTerrainExperiment.jl`, `JointCovariateModels.jl`, `JointVariableSelection.jl`, `MGERDataPrep.jl`, `BenchmarkDiagnostics.jl`. Each handles one data source or processing stage (ERA5-Land, MOD13A2 NDVI, FY4B, terrain/DEM, variable selection, benchmark diagnostics, etc).
+```
+src/
+  MixedGWR.jl      package entry point (path fixed by Project.toml)
+  load_modules.jl  the loader every script and test goes through
+  core/            the MixedGWR module's own algorithm files
+  sources/         one module per data source
+  selection/       the variable-selection paths
+  models/          the estimators
+  benchmark/       the interpolation benchmark, and the diagnostics that read its output
+  mger/            the MGER pipeline and its data prep
+```
 
-3. **`SelectionScaffolding.jl`** — bookkeeping shared by the four variable-selection paths
-   (`annotate_selection!`, `append_selection!`, `selection_schemes`). A standalone module like
-   those in (2), loaded the same way.
+Do not create `src/data/` or `src/docs/`: `.gitignore` carries bare `data/` and `docs` patterns,
+which git matches at any depth, so files there would be silently untracked.
 
-4. `MGERPipeline.jl` and `InterpolationBenchmark.jl` are *not* modules — they are top-level scripts (`using MixedGWR` + struct/function definitions) meant to be `include`d directly by a script or test after `using MixedGWR` is already active. They tie the core GWR algorithms and the data-pipeline modules together into full run/evaluate pipelines (e.g. `MGERConfig`, `run_multikernel_spatial_kfold_pipeline`).
+1. **`src/core/` — inside the `MixedGWR` module.** `fitted.jl`, `metrics.jl`, `kernel.jl`,
+   `gw_weight.jl`, `PrecipitationCorrection.jl`, `solve_chol.jl`, `solve_reg.jl`, `GWR.jl`,
+   `GWR_calib.jl`, `ST_GWR.jl`, `deprecated.jl`, each `include`d by `src/MixedGWR.jl` inside
+   `module MixedGWR ... end`. Reached normally via `using MixedGWR`; they export the
+   regression/kernel primitives (`GWR`, `ST_GWR`, `ST_GWR_fast`, kernel constants
+   `GAUSSIAN`/`EXPONENTIAL`/`BISQUARE`/`TRICUBE`/`BOXCAR`, etc). These files define no module of
+   their own, so they must never be `include`d directly by anything else.
+
+2. **Standalone modules** — each defines its *own* `module X ... end` and is loaded through
+   `src/load_modules.jl`, never through the `MixedGWR` module. Seventeen of them:
+   - `sources/`: `StudyArea.jl`, `FY4BPreprocessing.jl`, `ERA5LandStations.jl`,
+     `ERA5LandProcessing.jl`, `ERA5LandCovariates.jl`, `MOD13A2NDVIProcessing.jl`,
+     `AppEEARSNDVI.jl`, `TerrainFeatures.jl` — one data source or ingest stage each.
+   - `selection/`: `SelectionScaffolding.jl` (bookkeeping shared by the searches —
+     `annotate_selection!`, `append_selection!`, `selection_schemes`), `ERA5VariableSelection.jl`,
+     `NDVIVariableSelection.jl`, `JointVariableSelection.jl`.
+   - `models/`: `TraditionalInterpolation.jl`, `DEMTerrainExperiment.jl`,
+     `JointCovariateModels.jl` — everything that fits something.
+   - `benchmark/BenchmarkDiagnostics.jl`, which reads a finished run's artefacts. It shares that
+     directory with the fragments below but not their discipline: it is a real module and takes no
+     part in their include chain.
+   - `mger/MGERDataPrep.jl`, beside the pipeline it serves.
+
+3. **`MGERPipeline.jl` and `InterpolationBenchmark.jl` are *not* modules** — they are top-level
+   fragments (`using MixedGWR` + struct/function definitions) evaluated straight into `Main` by
+   `load_pipeline`, after `using MixedGWR` is already active. They tie the core algorithms and the
+   standalone modules together into full run/evaluate pipelines (e.g. `MGERConfig`,
+   `run_multikernel_spatial_kfold_pipeline`).
 
 `InterpolationBenchmark.jl` is a thin loader: it pulls in the modules the benchmark needs and then
 includes ten concern-specific fragments, in this order — `Config`, `Folds`, `DEM`, `Joint`,
@@ -121,6 +160,12 @@ sibling dependencies first; `load_pipeline` does the same for the two top-level 
 are detected by a sentinel struct rather than a module name. `load_modules.jl` itself is safe to
 include more than once.
 
+Names, not paths: `locate_src_file` walks `src/` for `<name>.jl`, so a caller never says which tier
+a module lives in and moving a file between directories needs no edit anywhere. It refuses rather
+than guesses in two cases - a name that matches nothing, and a name that matches twice. The second
+is the one to know about: two files with the same basename in different directories (a leftover
+copy from a half-finished move) would otherwise be resolved by walk order.
+
 Do **not** add `pushfirst!(LOAD_PATH, joinpath(ROOT, "src"))`. It makes `src/` an implicit
 environment and causes `using MixedGWR` to load a second copy of the package, which is a hard
 error on Julia 1.11.
@@ -128,7 +173,10 @@ error on Julia 1.11.
 Inside a standalone module, reach a sibling with `using Main.X` (add `using Main: X` as well if
 the module name itself is used for qualified calls — `using Main.X: a, b` does not bind `X`).
 
-When adding a new file to `src/`, follow the existing pattern: if it's a reusable regression/kernel primitive it belongs inside the `MixedGWR` module (add an `include(...)` line in `src/MixedGWR.jl`); if it's a data-source-specific processing step it should be its own standalone module following convention (2) above.
+When adding a new file to `src/`, the directory is the decision: a reusable regression/kernel
+primitive goes in `core/` and needs an `include("core/...")` line in `src/MixedGWR.jl`; anything
+else is its own standalone module under `sources/`, `selection/`, `models/` or `benchmark/`
+following convention (2) above, and needs no registration at all — the loader finds it by name.
 
 ### Calling convention
 

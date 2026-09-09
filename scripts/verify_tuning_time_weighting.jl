@@ -48,7 +48,7 @@ end
 Pick the scan row the benchmark would select: lowest RMSE, MAE breaking ties.
 
 NOT an exact mirror of the real selector. `_select_candidate!`
-(src/InterpolationBenchmarkTuning.jl) sorts by `(RMSE, MAE, -coverage)` and only considers rows
+(src/benchmark/InterpolationBenchmarkTuning.jl) sorts by `(RMSE, MAE, -coverage)` and only considers rows
 with `status == "success"`; this sorts by `(RMSE, MAE)` alone. On an exact RMSE-and-MAE tie the
 two can choose different candidates, so this script can report a regret that the benchmark would
 not actually incur. Left alone here because changing it changes what this verification reports,

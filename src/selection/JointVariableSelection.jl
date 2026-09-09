@@ -7,7 +7,7 @@ using LinearAlgebra
 using Random
 using Statistics
 
-# Shared bookkeeping for every variable-selection path; see src/SelectionScaffolding.jl.
+# Shared bookkeeping for every variable-selection path; see src/selection/SelectionScaffolding.jl.
 using Main.SelectionScaffolding
 
 # All three are loaded through src/load_modules.jl before this file, so each is shared

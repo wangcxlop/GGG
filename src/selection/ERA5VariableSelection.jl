@@ -7,7 +7,7 @@ using LinearAlgebra
 using Random
 using Statistics
 
-# Shared bookkeeping for every variable-selection path; see src/SelectionScaffolding.jl.
+# Shared bookkeeping for every variable-selection path; see src/selection/SelectionScaffolding.jl.
 using Main.SelectionScaffolding
 
 export ERA5SelectionConfig, ERA5_VARIABLES, align_feature_time, load_era5_panel
