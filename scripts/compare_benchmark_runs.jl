@@ -59,7 +59,7 @@ function load_common_data(outdir::AbstractString; smoke::Bool=false)
         rain_threshold=0.1,
         analysis_start=smoke ? DateTime(2022, 6, 1, 9) : DateTime(2022, 1, 1, 9),
         analysis_end=smoke ? DateTime(2022, 7, 1, 8) : DateTime(2025, 1, 1, 8),
-        expected_common_time_count=smoke ? nothing : 11426,
+        expected_common_time_count=smoke ? nothing : 13471,
     )
     return load_global_common_product_data(cfg)
 end

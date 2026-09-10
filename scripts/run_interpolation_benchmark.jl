@@ -119,9 +119,10 @@ function benchmark_config(
         analysis_start=smoke ? DateTime(2022, 6, 1, 9) : DateTime(2022, 1, 1, 9),
         analysis_end=smoke ? DateTime(2022, 7, 1, 8) : DateTime(2025, 1, 1, 8),
         # FY4B's off-season NC files rarely form a strict-complete hour (near-zero in
-        # Nov/Dec and Jan-Mar), so the common-time count grows from 8067 (Jun-Sep only)
-        # to 11426, not to a full 3-year hourly count.
-        expected_common_time_count=smoke ? nothing : 11426,
+        # Nov/Dec and Jan-Mar), so the common-time count grows from 8069 (Jun-Sep only)
+        # to 13471, not to a full 3-year hourly count. Both were re-measured on the dataset
+        # rebuilt 2026-09-02; on the grid before it they were 8067 and 11426.
+        expected_common_time_count=smoke ? nothing : 13471,
     )
     schemes = smoke && !with_random ? [:balanced_spatial] : [:balanced_spatial, :random]
     dem = legacy_dem ? DEMTerrainExperiment.DEMExperimentConfig(

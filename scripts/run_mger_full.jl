@@ -13,9 +13,9 @@ const STUDY_DATA = joinpath(ROOT, "data", "processed", "study_area")
 function main(args=ARGS)
     nested_kernel = "--nested-kernel" in args
     # Two full windows exist in this project and they are not interchangeable. The default is the
-    # Jun-Sep window (8067 common hours) that `scripts/audit_mger_inputs.jl` and every
+    # Jun-Sep window (8069 common hours) that `scripts/audit_mger_inputs.jl` and every
     # variable-selection script already treat as "full". `--full-year` switches to the Jan
-    # 2022 - Dec 2024 window (11426 common hours) that `run_interpolation_benchmark.jl full`
+    # 2022 - Dec 2024 window (13471 common hours) that `run_interpolation_benchmark.jl full`
     # uses, so the two pipelines can be read on the same hours when that comparison is wanted.
     full_year = "--full-year" in args
     # Nested selection gets its own directory so it never overwrites the canonical paired
@@ -62,7 +62,7 @@ function main(args=ARGS)
         # intersection would quietly change every reported metric, so it is pinned. Both counts
         # were measured with `audit_mger_inputs`. A mismatch aborts during data load and points
         # at `global_common_time_qc.csv`.
-        expected_common_time_count=full_year ? 11426 : 8067,
+        expected_common_time_count=full_year ? 13471 : 8069,
     )
     pipeline = nested_kernel ? run_nested_kernel_spatial_kfold_pipeline :
         run_multikernel_spatial_kfold_pipeline
