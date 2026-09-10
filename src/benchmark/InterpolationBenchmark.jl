@@ -5,7 +5,7 @@ using MixedGWR
 # each into `Main`. Loading a module file twice compiles a second, type-incompatible copy of it -
 # `DEMTerrainExperiment.jl` used to be included here and again inside `JointVariableSelection`
 # and `JointCovariateModels`. See src/load_modules.jl.
-include(joinpath(@__DIR__, "load_modules.jl"))
+include(joinpath(@__DIR__, "..", "load_modules.jl"))
 load_pipeline("MGERPipeline")
 load_standalone_modules(
     "TraditionalInterpolation", "DEMTerrainExperiment", "JointCovariateModels",

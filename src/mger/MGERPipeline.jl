@@ -209,34 +209,6 @@ function load_station_meta(path::AbstractString;
 end
 
 
-# 目的是对两个已加载的数据集进行同步/重新索引，使它们在站点和时间维度上匹配
-
-function align_obs_sat(
-	obs_times::Vector{DateTime}, obs_ids::Vector{String}, Y_obs::Matrix{Float64},
-	sat_times::Vector{DateTime}, sat_ids::Vector{String}, Y_sat::Matrix{Float64}
-)
-	common_ids = intersect(obs_ids, sat_ids)
-	common_times = intersect(obs_times, sat_times)
-	sort!(common_times)
-
-	@assert !isempty(common_ids) "站号没有交集"
-	@assert !isempty(common_times) "时间没有交集"
-
-	obs_id_map = Dict(v => i for (i, v) in pairs(obs_ids))
-	sat_id_map = Dict(v => i for (i, v) in pairs(sat_ids))
-	obs_t_map = Dict(v => i for (i, v) in pairs(obs_times))
-	sat_t_map = Dict(v => i for (i, v) in pairs(sat_times))
-
-	i_obs = [obs_id_map[x] for x in common_ids]
-	i_sat = [sat_id_map[x] for x in common_ids]
-	t_obs = [obs_t_map[x] for x in common_times]
-	t_sat = [sat_t_map[x] for x in common_times]
-
-	Yo = Y_obs[i_obs, t_obs]
-	Ys = Y_sat[i_sat, t_sat]
-	return common_times, common_ids, Yo, Ys
-end
-
 """按 common_ids 顺序构建经纬度坐标矩阵，用于距离计算。"""
 function build_X_lonlat(st::DataFrame, common_ids::Vector{String};
 	station_id_col::Symbol=:station_id, lon_col::Symbol=:lon, lat_col::Symbol=:lat)
@@ -277,7 +249,7 @@ end
 
 
 # `metric_continuous`, `metric_event`, `common_valid_mask` and `complete_time_mask` now live in
-# `src/metrics.jl` inside the `MixedGWR` module, which this file already imports at the top. They
+# `src/core/metrics.jl` inside the `MixedGWR` module, which this file already imports at the top. They
 # are reused by the benchmark, the diagnostics and the tests, so they are library code rather than
 # part of this pipeline.
 
@@ -541,54 +513,6 @@ function bias_correct_stgwr(
 	)
 	Y_corr = Y_sat .+ Rhat
 	return Y_corr, Rhat, wMat
-end
-
-
-"""
-计算 AICc，带 trace 有效性检查。
-如果 trace 过大导致分母非正，则使用 GCV（广义交叉验证）作为替代。
-
-GCV 公式：GCV = n * RSS / (n - trace)^2
-"""
-
-# 计算迹（有效复杂度）、残差平方和，并根据条件选择 AICc 或 GCV 作为模型选择标准
-
-function calc_aicc_or_gcv(
-	X::Matrix{Float64}, Ytrue::Matrix{Float64}, Ypred::Matrix{Float64}, wMat::Matrix{Float64}
-)
-	size(Ytrue) == size(Ypred) ||
-		throw(DimensionMismatch("Ytrue and Ypred must have the same size"))
-
-	mask = .!isnan.(Ytrue) .& .!isnan.(Ypred)
-	n = count(mask)
-	if n <= 3
-		return Inf, :INSUFFICIENT
-	end
-
-	size(wMat, 2) == size(X, 1) ||
-		throw(DimensionMismatch("AICc/GCV requires a calibration weight matrix whose columns match X rows"))
-
-	# The hat-matrix trace depends only on X and weights, not on the response values.
-	y_trace = zeros(Float64, size(X, 1))
-	trace_one_time = GWR_calib(X, y_trace, wMat).trace
-	trace = trace_one_time * (n / size(X, 1))
-	resid = Ytrue[mask] .- Ypred[mask]
-	RSS = max(sum(abs2, resid), eps(Float64))
-
-	# Check if AICc is computable
-	den1 = n - trace
-	den2 = n - 2 - trace
-
-	if den1 <= 0 || den2 <= 0
-		# Fall back to GCV when AICc is unstable
-		# Use approximate effective degrees of freedom
-		effective_df = min(trace, n - 3)
-		gcv = n * RSS / (n - effective_df)^2
-		return isfinite(gcv) ? gcv : Inf, :GCV
-	end
-
-	aicc = (log(RSS / den1) + log(2pi) + (n + trace) / den2) * n
-	return isfinite(aicc) ? aicc : Inf, :AICc
 end
 
 

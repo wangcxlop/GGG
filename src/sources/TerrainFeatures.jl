@@ -2,6 +2,7 @@ module TerrainFeatures
 
 using CSV
 using DataFrames
+using Main.TableIO: write_csv_atomic
 
 export aspect_components, extract_station_terrain
 
@@ -144,18 +145,6 @@ function sample_raster_batch(
         end
         values
     end
-end
-
-function write_csv_atomic(path::AbstractString, table)
-    mkpath(dirname(path))
-    temporary = string(path, ".tmp-", getpid())
-    try
-        CSV.write(temporary, table)
-        mv(temporary, path; force=true)
-    finally
-        isfile(temporary) && rm(temporary; force=true)
-    end
-    return path
 end
 
 function extract_station_terrain(

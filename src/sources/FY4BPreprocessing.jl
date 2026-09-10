@@ -2,6 +2,7 @@
 module FY4BPreprocessing
 
 using NCDatasets, CSV, DataFrames, Dates
+using Main.TableIO: write_csv_atomic
 
 export aggregate_fy4b_hourly, build_hourly_qc, find_nc_files, parse_nc_filename
 
@@ -9,18 +10,15 @@ export aggregate_fy4b_hourly, build_hourly_qc, find_nc_files, parse_nc_filename
 # FY4B Aggregation: 15min NetCDF -> Hourly CSV
 # =========================
 
-const ROOT = normpath(joinpath(@__DIR__, ".."))
+# Two levels up, because this file lives in `src/sources/`. The consts below are defaults the
+# `prepare_fy4b_*` scripts override; they are string consts, so a wrong root here would not fail
+# on load - it would surface much later, as a missing input inside whichever script read through
+# one of them.
+const ROOT = normpath(joinpath(@__DIR__, "..", ".."))
 const FY4B_DATA_DIR = joinpath(ROOT, "data", "FY4B")
 const STATION_META_FILE = joinpath(ROOT, "data", "hubei_station_meta.csv")
 const OUTPUT_FILE = joinpath(ROOT, "data", "processed", "hubei_fy4b_hourly_2022_2025_JunSep_strict_navcorrected.csv")
 const QC_FILE = joinpath(ROOT, "output", "input_audit", "fy4b_hourly_qc_2022_2025_JunSep_strict_navcorrected.csv")
-
-function write_csv_atomic(path, df)
-    mkpath(dirname(path))
-    temp_path = string(path, ".tmp-", getpid())
-    CSV.write(temp_path, df)
-    mv(temp_path, path; force=true)
-end
 
 # Satellite parameters for FY4B (from NC files)
 const DEFAULT_SAT_LON = 133.0   # Fallback satellite longitude (degrees)
@@ -32,7 +30,6 @@ const STATION_TIME_OFFSET = Hour(8) # FY4B filenames are UTC; station timestamps
 
 # Computed constants
 const SAT_DISTANCE = SAT_HEIGHT - EARTH_RADIUS  # Distance from surface to satellite
-const SCALE_FACTOR = (GRID_SIZE - 1) / 2.0      # For scaling scan angles to grid indices
 
 """
     latlon_to_scan_angles(lat, lon, sat_lon=DEFAULT_SAT_LON)

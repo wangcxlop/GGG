@@ -1,6 +1,7 @@
 module AppEEARSNDVI
 
 using Base64, CSV, DataFrames, Downloads, JSON, SHA
+using Main.TableIO: column as _column
 
 export MOD13A2_PRODUCT, MOD13A2_LAYERS,
     read_station_coordinates, validate_coordinate_bounds, build_mod13a2_point_task,
@@ -15,13 +16,6 @@ const MOD13A2_LAYERS = [
     "_1_km_16_days_pixel_reliability",
     "_1_km_16_days_composite_day_of_the_year",
 ]
-
-function _column(df::DataFrame, requested::Symbol)
-    columns = Dict(Symbol(lowercase(String(name))) => name for name in names(df))
-    column = get(columns, Symbol(lowercase(String(requested))), nothing)
-    column === nothing && throw(ArgumentError("missing column: $requested"))
-    return column
-end
 
 """Require all point coordinates to lie inside an inclusive lon/lat rectangle."""
 function validate_coordinate_bounds(

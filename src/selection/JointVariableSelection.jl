@@ -7,7 +7,7 @@ using LinearAlgebra
 using Random
 using Statistics
 
-# Shared bookkeeping for every variable-selection path; see src/SelectionScaffolding.jl.
+# Shared bookkeeping for every variable-selection path; see src/selection/SelectionScaffolding.jl.
 using Main.SelectionScaffolding
 
 # All three are loaded through src/load_modules.jl before this file, so each is shared
@@ -16,28 +16,12 @@ using Main.DEMTerrainExperiment
 using Main.ERA5VariableSelection
 using Main.NDVIVariableSelection
 
+# The covariate design vocabulary, shared with `JointCovariateModels` so the two cannot drift.
+using Main.CovariateGroups: JOINT_GROUP_ORDER, GROUP_COLUMNS, GROUP_FAMILY
+
 export JointSelectionConfig, JOINT_GROUP_ORDER, prepare_joint_panel, joint_vif
 export joint_spatial_variability_test, run_joint_variable_selection, select_joint_covariates
 
-const JOINT_GROUP_ORDER = [
-    "elevation", "slope", "aspect", "t2m_c", "d2m_c",
-    "u10", "v10", "sp_hpa", "ndvi",
-]
-const GROUP_COLUMNS = Dict(
-    "elevation" => [:elevation_m],
-    "slope" => [:slope_deg],
-    "aspect" => [:aspect_sin, :aspect_cos],
-    "t2m_c" => [:t2m_c],
-    "d2m_c" => [:d2m_c],
-    "u10" => [:u10],
-    "v10" => [:v10],
-    "sp_hpa" => [:sp_hpa],
-    "ndvi" => [:ndvi],
-)
-const GROUP_FAMILY = Dict(
-    group => (group in ("elevation", "slope", "aspect") ? "dem" :
-        group == "ndvi" ? "ndvi" : "era5") for group in JOINT_GROUP_ORDER
-)
 
 _predictor_label(group::String) = group == "ndvi" ? "ndvi_qc" :
     join(String.(GROUP_COLUMNS[group]), "+")

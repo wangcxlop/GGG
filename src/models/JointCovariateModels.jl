@@ -17,28 +17,13 @@ using Statistics
 using Main: DEMTerrainExperiment
 using Main.DEMTerrainExperiment: mixed_gwr_predict, multiscale_gwr_predict
 
+# The covariate design vocabulary, shared with `JointVariableSelection` so the two cannot drift.
+using Main.CovariateGroups: JOINT_GROUP_ORDER, GROUP_COLUMNS, GROUP_FAMILY
+
 export JointCovariateBenchmarkConfig, JointFoldContext
 export load_joint_covariate_spec, joint_spec_sha256, build_joint_fold_context
 export dynamic_covariate_predict, joint_effective_roles, joint_group_names
 
-const JOINT_GROUP_ORDER = [
-    "elevation", "slope", "aspect", "t2m_c", "d2m_c",
-    "u10", "v10", "sp_hpa", "ndvi",
-]
-const GROUP_COLUMNS = Dict(
-    "elevation" => [:elevation_m],
-    "slope" => [:slope_deg],
-    "aspect" => [:aspect_sin, :aspect_cos],
-    "t2m_c" => [:t2m_c],
-    "d2m_c" => [:d2m_c],
-    "u10" => [:u10],
-    "v10" => [:v10],
-    "sp_hpa" => [:sp_hpa],
-    "ndvi" => [:ndvi],
-)
-const GROUP_FAMILY = Dict(group =>
-    group in ("elevation", "slope", "aspect") ? "dem" :
-    group == "ndvi" ? "ndvi" : "era5" for group in JOINT_GROUP_ORDER)
 
 Base.@kwdef struct JointCovariateBenchmarkConfig
     # `nothing` when the benchmark is configured for nested per-fold selection instead of a
@@ -455,73 +440,6 @@ function _global_predict(
         prediction[target] = dot(@view(Xtrain[target, :]), beta)
     end
     return prediction
-end
-
-function _predict_time(
-    local_train::Vector{Matrix{Float64}}, global_train::Matrix{Float64},
-    y::Vector{Float64}, train_lonlat::Matrix{Float64},
-    local_target::Vector{Matrix{Float64}}, global_target::Matrix{Float64},
-    target_lonlat::Matrix{Float64}, bandwidths::Vector{Int}, cfg;
-    leave_one_out::Bool=false,
-)
-    length(local_train) == length(local_target) == length(bandwidths) ||
-        throw(DimensionMismatch("local group dimensions differ"))
-    train_distances = _haversine_matrix(train_lonlat, train_lonlat)
-    target_distances = leave_one_out ? train_distances :
-        _haversine_matrix(train_lonlat, target_lonlat)
-    train_weights = [_weight_matrix(train_distances, bandwidth;
-        exclude_self=leave_one_out) for bandwidth in bandwidths]
-    target_weights = leave_one_out ? train_weights :
-        [_weight_matrix(target_distances, bandwidth) for bandwidth in bandwidths]
-    local_components = [zeros(length(y)) for _ in local_train]
-    global_component = _global_predict(
-        global_train, y, global_train, cfg.ridge; leave_one_out,
-    )
-    previous_fitted = fill(NaN, length(y))
-    converged = false
-    for _ in 1:cfg.max_iterations
-        for group in eachindex(local_train)
-            partial = y - global_component
-            for other in eachindex(local_components)
-                other == group || (partial .-= local_components[other])
-            end
-            local_components[group] = _local_predict(
-                local_train[group], partial, local_train[group],
-                train_weights[group], cfg.ridge,
-            )
-        end
-        local_sum = isempty(local_components) ? zeros(length(y)) : reduce(+, local_components)
-        global_component = _global_predict(
-            global_train, y - local_sum, global_train, cfg.ridge; leave_one_out,
-        )
-        fitted = local_sum + global_component
-        all(isfinite, fitted) || return fill(NaN, size(target_lonlat, 1)), false
-        change = all(isfinite, previous_fitted) ?
-            norm(fitted - previous_fitted) / max(norm(previous_fitted), eps()) : Inf
-        if change < cfg.tolerance
-            converged = true
-            break
-        end
-        previous_fitted .= fitted
-    end
-    converged || return fill(NaN, size(target_lonlat, 1)), false
-    leave_one_out && return reduce(+, local_components; init=global_component), true
-    local_sum = reduce(+, local_components; init=zeros(length(y)))
-    global_target_component = _global_predict(
-        global_train, y - local_sum, global_target, cfg.ridge,
-    )
-    prediction = global_target_component
-    for group in eachindex(local_train)
-        partial = y - global_component
-        for other in eachindex(local_components)
-            other == group || (partial .-= local_components[other])
-        end
-        prediction .+= _local_predict(
-            local_train[group], partial, local_target[group],
-            target_weights[group], cfg.ridge,
-        )
-    end
-    return prediction, true
 end
 
 function _multiscale_predict_damped(

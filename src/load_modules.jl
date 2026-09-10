@@ -26,11 +26,43 @@ small and acyclic: everything else in `src/` is a leaf.
 function standalone_module_dependencies(name::AbstractString)
     name == "ERA5VariableSelection" && return ["SelectionScaffolding"]
     name == "NDVIVariableSelection" && return ["SelectionScaffolding", "ERA5VariableSelection"]
-    name == "JointCovariateModels" && return ["DEMTerrainExperiment"]
+    name == "JointCovariateModels" && return ["DEMTerrainExperiment", "CovariateGroups"]
     name == "JointVariableSelection" &&
         return ["SelectionScaffolding", "DEMTerrainExperiment", "ERA5VariableSelection",
-                "NDVIVariableSelection"]
+                "NDVIVariableSelection", "CovariateGroups"]
+    # Everything that reads a station table or writes a CSV atomically. Listed as one clause
+    # because the dependency is the same for all of them and the list is the interesting part.
+    name in ("AppEEARSNDVI", "ERA5LandStations", "FY4BPreprocessing", "MGERDataPrep",
+             "MOD13A2NDVIProcessing", "StudyArea", "TerrainFeatures") &&
+        return ["TableIO"]
     return String[]
+end
+
+"""
+Absolute path of `name.jl`, wherever under `src/` it lives.
+
+`src/` is arranged in tiers rather than flat, so a module name no longer determines a directory.
+Searching rather than tabulating keeps the property this loader has always had - a new file in
+`src/` is loadable by name with nothing to register anywhere - where a name-to-directory map would
+have to enumerate every module with no safe default, unlike `standalone_module_dependencies`
+above, which is a sparse exception list. The walk costs nothing: both callers below return early
+on `isdefined`, so it runs at most once per name per process.
+
+Two matches is the failure worth naming. It cannot happen while every basename is unique, but a
+leftover copy from a half-finished move would otherwise be picked by walk order, silently, and the
+symptom would be a module whose contents do not match the file anyone is editing.
+"""
+function locate_src_file(name::AbstractString)
+    matches = String[]
+    for (root, _, files) in walkdir(@__DIR__)
+        "$(name).jl" in files && push!(matches, joinpath(root, "$(name).jl"))
+    end
+    isempty(matches) &&
+        throw(ArgumentError("no file named $(name).jl anywhere under $(@__DIR__)"))
+    length(matches) > 1 && throw(ArgumentError(
+        "$(name).jl exists in more than one place under src/, refusing to guess: " *
+        join(sort(matches), ", ")))
+    return only(matches)
 end
 
 """Load one standalone module into `Main`, dependencies first, skipping anything already there."""
@@ -39,11 +71,9 @@ function load_standalone_module(name::AbstractString)
     for dependency in standalone_module_dependencies(name)
         load_standalone_module(dependency)
     end
-    path = joinpath(@__DIR__, "$(name).jl")
-    isfile(path) || throw(ArgumentError("no standalone module at $path"))
     # Into `Main` regardless of who called us, so there is exactly one copy no matter which
     # script, test, or module triggered the load.
-    Base.include(Main, path)
+    Base.include(Main, locate_src_file(name))
     return nothing
 end
 
@@ -84,6 +114,6 @@ so asking for it is enough.
 """
 function load_pipeline(name::AbstractString)
     isdefined(Main, pipeline_sentinel(name)) && return nothing
-    Base.include(Main, joinpath(@__DIR__, "$(name).jl"))
+    Base.include(Main, locate_src_file(name))
     return nothing
 end

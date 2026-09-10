@@ -186,7 +186,7 @@ when `cfg.bw_include_global` is set - an explicit global candidate. `adaptive_ca
 passed in because the joint path filters its own grid against the training size first.
 
 Global is `(adaptive=false, bw=Inf)`. Every kernel in `GWR_KERNELS` returns exactly 1.0 at
-`bw=Inf` (see `src/kernel.jl`), so the fit is unweighted OLS over the training stations.
+`bw=Inf` (see `src/core/kernel.jl`), so the fit is unweighted OLS over the training stations.
 Expressing it as a bandwidth rather than as its own code path means nothing downstream -
 `predict_selected`, the joint back-fit, the `_scan_row` schema - needs to know about it, and
 `gw_weight`'s `bw > n` branch is never reached during selection or at the final fit.

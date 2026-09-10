@@ -1,4 +1,4 @@
-export GWR_calib, solver_reg2
+export GWR_calib
 
 function GWR_calib(x::Matrix{T}, y::Vector{T}, wMat::AbstractMatrix{T}) where {T<:Real}
   p_local = size(x, 2)
@@ -38,7 +38,7 @@ end
 
 
 """
-    solver_reg2(X::Matrix{T}, y::Vector{T}, w::AbstractVector{T})
+    _solver_reg2(X::Matrix{T}, y::Vector{T}, w::AbstractVector{T})
 
 β = C_i y = [(X' W_i X)⁻¹ X' W_i] y
 ̂y = S y = x_i C_i y
