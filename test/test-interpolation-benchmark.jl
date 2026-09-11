@@ -51,6 +51,30 @@ end
     missing_prediction = tps_predict(lonlat, missing_values, lonlat[1:1, :]; smooth=0.01)
     @test isfinite(missing_prediction[1, 1])
     @test isnan(missing_prediction[1, 2])
+    # A station missing at an hour must be dropped before the weights are formed, not after.
+    # Predicting with the hole must equal predicting from the surviving stations alone: the
+    # absent station may neither consume a slot in the `neighbors` budget (IDW and ADW) nor
+    # shadow its directional neighbours in the angular correction (ADW).
+    holey_values = copy(exact_values)
+    holey_values[1:2, 1] .= NaN
+    survivors = [3, 4, 5]
+    for predictor in (idw_predict, adw_predict), k in (nothing, 2)
+        @test predictor(lonlat, holey_values, asymmetric_target; neighbors=k)[1] ==
+            predictor(
+                lonlat[survivors, :], exact_values[survivors, :], asymmetric_target; neighbors=k,
+            )[1]
+    end
+    # The same statement from the other side: a station that never reports is inert.
+    padded_lonlat = vcat(lonlat, [110.3 30.3])
+    padded_values = vcat(exact_values, fill(NaN, 1, 1))
+    for predictor in (idw_predict, adw_predict), k in (nothing, 2, 4)
+        @test predictor(padded_lonlat, padded_values, asymmetric_target; neighbors=k) ==
+            predictor(lonlat, exact_values, asymmetric_target; neighbors=k)
+    end
+    # The angular correction still has to do something once the hole is accounted for.
+    @test adw_predict(lonlat, holey_values, asymmetric_target)[1] !=
+        idw_predict(lonlat, holey_values, asymmetric_target)[1]
+
     # TPS's lambda scale is fixed once per call from the reporting station network, not derived
     # per missing-value group. The two assertions below pin it to exactly that set, one from
     # each side. Station 6-8 form a distant cluster, so including or excluding them moves the
@@ -94,6 +118,97 @@ end
         constant_values, zeros(size(constant_values)), zeros(1, 3),
     )
 end
+
+ 
+@testset "Tuning and prediction survive missing observations" begin
+    # The end-to-end fixtures further down build obs and sat from deterministic formulas with no
+    # NaN anywhere, so `_valid_groups` returns a single group and the per-availability-group
+    # machinery in `_weighted_predict` and `tps_predict` is never reached above the level of a
+    # direct five-station call. This testset is that missing coverage: the tuning-and-prediction
+    # path idw/adw/tps actually run in, driven with holes in it.
+    rng = MersenneTwister(4242)
+    n_train, n_target, n_time = 48, 12, 120
+    train_lonlat = hcat(109.6 .+ 1.8 .* rand(rng, n_train), 31.3 .+ 1.8 .* rand(rng, n_train))
+    target_lonlat = hcat(109.7 .+ 1.6 .* rand(rng, n_target), 31.4 .+ 1.6 .* rand(rng, n_target))
+    y_sat = 1.0 .+ 0.5 .* randn(rng, n_train, n_time)
+    y_obs = max.(y_sat .+ 0.4 .* randn(rng, n_train, n_time), 0.0)
+    y_sat_target = 1.0 .+ 0.5 .* randn(rng, n_target, n_time)
+
+    y_obs[rand(rng, n_train, n_time) .< 0.08] .= NaN  # scattered gauge gaps
+    y_sat[rand(rng, n_train, n_time) .< 0.03] .= NaN  # ragged eligibility mask
+    blackout = 60
+    y_obs[:, blackout] .= NaN                         # an hour no gauge reports at all
+    dead = 7
+    y_obs[dead, :] .= NaN                             # a gauge that never reports
+
+    # Without this the fixture could later be edited back into the single-group case and every
+    # assertion below would keep passing while testing nothing.
+    @test length(unique(eachcol(isfinite.(y_obs)))) > 1
+    # The satellite mask is ragged too, so the coverage denominator is not a clean
+    # rectangle either.
+    @test any(isnan, y_sat)
+
+    mger = MGERConfig(
+        station_meta_path="unused.csv", obs_hourly_wide_path="unused.csv",
+        sat_paths=Dict("FY4B" => "unused.csv"), outdir="unused",
+        kernels=[GAUSSIAN], bw_adaptive=[8.0, 16.0], bw_fixed_km=[50.0],
+    )
+    cfg = InterpolationBenchmarkConfig(
+        mger=mger, idw_powers=[1.5, 2.0],
+        neighbor_candidates=Union{Nothing,Int}[8, nothing],
+        tps_smooth_candidates=[0.01, 0.1],
+    )
+
+    # Taken from `BENCHMARK_RUNS` rather than assumed: these three run in `direct` mode only,
+    # and this picks up any further pairing without the testset silently going stale.
+    for (mode, method) in BENCHMARK_RUNS
+        method in ("idw", "adw", "tps") || continue
+        values = mode == "direct" ? y_obs : y_obs .- y_sat
+        reported = [time for time in 1:n_time if any(isfinite, @view(values[:, time]))]
+        @test blackout ∉ reported
+
+        rows = NamedTuple[]
+        selected = select_interpolation_parameter!(
+            rows, cfg, method, mode, :balanced_spatial, "TEST", 1, train_lonlat, y_obs, y_sat,
+        )
+        @test all(row.status == "success" for row in rows)
+        @test count(row.selected for row in rows) == 1
+        @test selected.coverage >= cfg.min_tuning_coverage
+
+        prediction = predict_selected(
+            selected, method, mode, train_lonlat, target_lonlat, y_obs, y_sat, y_sat_target,
+        )
+        @test size(prediction) == (n_target, n_time)
+        # An hour some gauge reports must be predicted at every target; an hour none reports
+        # must come back NaN, rather than throwing or quietly resolving to zero.
+        @test all(isfinite, prediction[:, reported])
+        @test all(isnan, prediction[:, blackout])
+    end
+
+    # A gauge that never reports is inert for the distance-weighted methods here too, not only
+    # in a direct `idw_predict` call. Asserted through `predict_selected` with a fixed parameter
+    # row: going through the scan instead would rebuild the inner spatial split around a
+    # different station count and confound the comparison. TPS is left out deliberately - its
+    # projection centre is the mean of every training row, so dropping a station shifts
+    # `cosd(lat0)` and moves the fit for reasons that have nothing to do with missing values.
+    # `isequal` rather than `==`: the blacked-out hour is NaN in both, and `NaN == NaN` is
+    # false, which would fail the comparison for a reason unrelated to the invariant.
+    live = setdiff(1:n_train, [dead])
+    for method in ("idw", "adw"), neighbors in (8, 0)
+        row = (; power=2.0, neighbors=neighbors)
+        @test isequal(
+            predict_selected(
+                row, method, "direct", train_lonlat, target_lonlat,
+                y_obs, y_sat, y_sat_target,
+            ),
+            predict_selected(
+                row, method, "direct", train_lonlat[live, :], target_lonlat,
+                y_obs[live, :], y_sat[live, :], y_sat_target,
+            ),
+        )
+    end
+end
+
 
 @testset "mixed_gwr and mgwr sweep every configured kernel" begin
     # `gwr`/`residual_gwr` have always swept every configured kernel; `mixed_gwr`/`mgwr` used to
