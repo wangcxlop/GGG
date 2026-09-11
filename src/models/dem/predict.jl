@@ -8,6 +8,10 @@ The contract is "the distances of the coordinate arguments exactly as passed":
 `indices`/`target_indices` subsetting below is then applied to the matrix the same way it is
 applied to the coordinates, so the submatrix is elementwise what `_haversine_matrix` would have
 returned for the subset. `nothing` (the default) computes them here, as before.
+
+`unsupported` is forwarded to the *target* hat only, never to the back-fit hat - see
+[`_local_hat`](@ref) for why that distinction matters. `:missing` is what lets a target the local
+fit could not support surface as a `NaN` prediction instead of a silent zero correction.
 """
 function mixed_gwr_predict(
     Xlocal_train::Matrix{Float64}, Xglobal_train::Matrix{Float64}, Ytrain::Matrix{Float64},
@@ -15,7 +19,7 @@ function mixed_gwr_predict(
     Xglobal_target::Matrix{Float64}, target_lonlat::Matrix{Float64}, bandwidth::Float64,
     kernel::Function; adaptive::Bool=true,
     ridge::Float64=1e-8, tolerance::Float64=1e-5, max_iterations::Int=200,
-    exclude_self::Bool=false,
+    exclude_self::Bool=false, unsupported::Symbol=:zero,
     train_distances::Union{Nothing,Matrix{Float64}}=nothing,
     target_distances::Union{Nothing,Matrix{Float64}}=nothing,
 )
@@ -64,7 +68,7 @@ function mixed_gwr_predict(
             target_hat = _local_hat(
                 local_train_valid, local_target_valid,
                 target_distances_valid, adjusted_bandwidth, kernel;
-                adaptive, ridge, exclude_self,
+                adaptive, ridge, exclude_self, unsupported,
             )
             global_hat = _global_projection(global_train_valid; ridge)
             (; local_train_valid, global_train_valid, global_target_valid,
@@ -98,6 +102,7 @@ function multiscale_gwr_predict(
     target_lonlat::Matrix{Float64}, bandwidths::Vector{Float64}, kernel::Function;
     adaptive::Bool=true, ridge::Float64=1e-8,
     tolerance::Float64=1e-5, max_iterations::Int=200, exclude_self::Bool=false,
+    unsupported::Symbol=:zero,
     train_distances::Union{Nothing,Matrix{Float64}}=nothing,
     target_distances::Union{Nothing,Matrix{Float64}}=nothing,
 )
@@ -145,13 +150,14 @@ function multiscale_gwr_predict(
             global_hat = _global_projection(global_valid; ridge)
             target_hats = if exclude_self
                 [_local_hat(X, X, train_distances_valid, bw, kernel;
-                    adaptive, ridge, exclude_self=true)
+                    adaptive, ridge, exclude_self=true, unsupported)
                     for (X, bw) in zip(local_valid, adjusted_bandwidths)]
             else
                 target_distances_valid = target_distances === nothing ?
                     _haversine_matrix(lonlat_valid, target_lonlat_valid) :
                     _distance_subset(target_distances, indices, target_indices)
-                [_local_hat(X, Xt, target_distances_valid, bw, kernel; adaptive, ridge)
+                [_local_hat(X, Xt, target_distances_valid, bw, kernel;
+                    adaptive, ridge, unsupported)
                     for (X, Xt, bw) in zip(local_valid, local_target_valid, adjusted_bandwidths)]
             end
             (; local_valid, global_valid, global_target_valid, target_indices,

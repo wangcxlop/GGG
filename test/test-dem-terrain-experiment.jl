@@ -307,6 +307,38 @@ end
         Xwide, Xwide, train_distances, 2.0, bisquare,
     ))
 
+    # `unsupported=:missing` records the same unfittable target as NaN instead, which is what
+    # lets the benchmark's coverage gates see it rather than scoring a fabricated zero
+    # correction as a real prediction.
+    @test all(isnan, DEMTerrainExperiment._local_hat(
+        Xwide, Xwide, train_distances, 2.0, bisquare; unsupported=:missing,
+    ))
+    @test_throws ArgumentError DEMTerrainExperiment._local_hat(
+        Xwide, Xwide, train_distances, 2.0, bisquare; unsupported=:nan,
+    )
+
+    # Where the fit *is* supported the two settings must agree exactly, so the encoding change
+    # cannot move a fitted value. Mixed support in one call: a bandwidth wide enough for some
+    # targets and not others must differ only on the unsupported rows.
+    Xnarrow = hcat(ones(n), randn(rng, n, 2))
+    for bandwidth in (6.0, 12.0, 40.0)
+        zero_hat = DEMTerrainExperiment._local_hat(
+            Xnarrow, Xnarrow, train_distances, bandwidth, bisquare,
+        )
+        nan_hat = DEMTerrainExperiment._local_hat(
+            Xnarrow, Xnarrow, train_distances, bandwidth, bisquare; unsupported=:missing,
+        )
+        for target in axes(zero_hat, 1)
+            zero_row = @view zero_hat[target, :]
+            nan_row = @view nan_hat[target, :]
+            if all(isnan, nan_row)
+                @test all(iszero, zero_row)      # exactly the rows the old code fabricated
+            else
+                @test isequal(collect(zero_row), collect(nan_row))
+            end
+        end
+    end
+
     # The ridge is applied to the normal equations, so a larger one shrinks the operator.
     Xtrain = hcat(ones(n), randn(rng, n, 2))
     weak = DEMTerrainExperiment._local_hat(
