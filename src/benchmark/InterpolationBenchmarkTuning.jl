@@ -521,6 +521,10 @@ function select_interpolation_parameter!(
     return _select_candidate!(scan_rows, first_row, cfg.min_tuning_coverage)
 end
 
+# The only contender pair `select_auto_method` may collapse, in survivor-first order. See the
+# docstring below for why it is a fixed pair rather than any two equal predictions.
+const COLLAPSIBLE_PAIR = ["residual_gwr", "mixed_gwr"]
+
 """
 Pick one GWR-family method for a fold, using only the inner selection split.
 
@@ -537,6 +541,24 @@ means some contender was patchy and the comparison rests on less than the full r
 not the same quantity as `run_status.csv`'s `prediction_coverage`, which is measured on the
 outer held-out stations.
 
+`residual_gwr` and `mixed_gwr` are collapsed to the first of the two when they produced the same
+prediction, and the `collapsed` field names the dropped one against its twin. They build the
+identical design whenever the fold's role map has no `"global"` role — 19 of 30 fold-cells on the
+2026-09-02 full nested run (see `joint_models_coincide`) — and left in, that duplicate makes
+`n_contenders` overstate how much of a choice was made and makes `runner_up` the winner's own twin
+at a margin of zero.
+
+Only that one pair is eligible, and this is narrower than it looks on purpose. Equality here is
+tested on the *inner-split* prediction, but the caller goes on to consume
+`fold_predictions[chosen]`, the *outer-fold* prediction. For this pair the two are the same model
+end to end, so collapsing cannot move a number. For any other pair an inner-split tie would not
+carry that guarantee, and dropping one of them could silently change which outer-fold prediction
+`auto` reports. The `@warn` in `_run_benchmark_fold!` is what checks the guarantee still holds.
+
+`COLLAPSIBLE_PAIR` order decides which name survives, keeping the more constrained model
+(`residual_gwr` before `mixed_gwr`) rather than letting the alphabetical tie-break below pick —
+`"mixed_gwr" < "residual_gwr"`, so without this the duplicate would win on name alone.
+
 Returns `nothing` when there is no shared mask to score on — the caller then leaves `auto`
 unpredicted for the fold rather than guessing, and `run_status.csv` records it.
 """
@@ -545,14 +567,24 @@ function select_auto_method(
     time_weights::Union{Nothing,Vector{Float64}}=nothing,
 )
     isempty(contenders) && return nothing
-    shared = .!isnan.(y_obs) .& .!isnan.(y_sat)
+    distinct = empty(contenders)
+    collapsed = String[]
     for contender in contenders
+        twin = findfirst(distinct) do kept
+            kept.method in COLLAPSIBLE_PAIR && contender.method in COLLAPSIBLE_PAIR &&
+                isequal(kept.prediction, contender.prediction)
+        end
+        twin === nothing ? push!(distinct, contender) :
+            push!(collapsed, "$(contender.method)=$(distinct[twin].method)")
+    end
+    shared = .!isnan.(y_obs) .& .!isnan.(y_sat)
+    for contender in distinct
         shared = shared .& .!isnan.(contender.prediction)
     end
     any(shared) || return nothing
     scored = [merge((; contender.method), _candidate_metrics(
         y_obs, y_sat, ifelse.(shared, contender.prediction, NaN); time_weights,
-    )) for contender in contenders]
+    )) for contender in distinct]
     # Method name breaks ties so a fold's choice does not depend on `BENCHMARK_RUNS` ordering.
     order = sortperm(scored; by=row -> (row.RMSE, row.MAE, row.method))
     best = scored[order[1]]
@@ -561,6 +593,7 @@ function select_auto_method(
         chosen=best.method, chosen_rmse=best.RMSE, chosen_mae=best.MAE,
         runner_up=runner_up === nothing ? "" : runner_up.method,
         runner_up_rmse=runner_up === nothing ? NaN : runner_up.RMSE,
-        n=best.n, shared_mask_coverage=best.coverage, n_contenders=length(contenders),
+        n=best.n, shared_mask_coverage=best.coverage, n_contenders=length(distinct),
+        collapsed=join(collapsed, " | "),
     )
 end

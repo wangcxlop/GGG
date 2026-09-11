@@ -30,7 +30,7 @@ function verify(mode::Symbol)
     nrow(prerequisite) == 3 || error("Expected three prerequisite families")
     Set(prerequisite.family) == Set(["dem", "era5", "ndvi"]) || error("Prerequisite families differ")
     all(prerequisite.verified) || error("Independent full prerequisite verification failed")
-    all(==(8067), prerequisite.time_count) || error("Independent full time count differs")
+    all(==(8069), prerequisite.time_count) || error("Independent full time count differs")
     all(==(999), prerequisite.association_permutations) || error("Independent full association permutations differ")
     all(==(999), prerequisite.spatial_permutations) || error("Independent full spatial permutations differ")
 

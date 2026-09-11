@@ -51,7 +51,7 @@ function main()
     )
     assert_wide(
         joinpath(STUDY_DATA, "hubei_fy4b_hourly_2022_2025_JunSep_strict_navcorrected.csv"),
-        10_770, 237,
+        10_772, 237,
     )
 
     for product in ("gpm", "gsmap")
@@ -81,11 +81,19 @@ function main()
         ROOT, "output", "input_audit",
         "fy4b_hourly_qc_2022_2025_JunSep_strict_navcorrected.csv",
     )
+    # This QC table is not currently produced for the Jun-Sep window, so the block is inert and
+    # its constants could not be re-measured against the 2026-09-02 rebuild. Two of them follow
+    # by construction and were updated with the wide file above: the strict wide CSV carries one
+    # row per `complete` hour (10_772, measured), and `nrow` is the window length (11_712,
+    # confirmed unchanged by the GPM/GSMaP wide files), so `incomplete` is the difference. The
+    # three below them are counts this repository cannot currently derive from anything on disk;
+    # they still describe the pre-rebuild QC pass and will need re-measuring when the table is
+    # regenerated.
     if isfile(full_qc_path)
         full_qc = CSV.read(full_qc_path, DataFrame)
         @assert nrow(full_qc) == 11_712
-        @assert count(==("complete"), full_qc.status) == 10_770
-        @assert count(==("incomplete"), full_qc.status) == 942
+        @assert count(==("complete"), full_qc.status) == 10_772
+        @assert count(==("incomplete"), full_qc.status) == 940
         @assert sum(full_qc.missing_count) == 1_562
         @assert sum(full_qc.unreadable_count) == 3
         @assert count((full_qc.status .== "incomplete") .& full_qc.native_hourly_available) == 674
@@ -109,7 +117,7 @@ function main()
         DataFrame,
     )
     @assert all(full_input_audit.global_common_station_count .== 237)
-    @assert all(full_input_audit.global_common_timestamp_count .== 8_067)
+    @assert all(full_input_audit.global_common_timestamp_count .== 8_069)
 
     status = CSV.read(joinpath(RESULT, "kernel_run_status.csv"), DataFrame)
     @assert nrow(status) == 5

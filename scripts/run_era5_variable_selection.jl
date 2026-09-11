@@ -31,7 +31,7 @@ function experiment_inputs(mode::Symbol)
         outdir=outdir,
         analysis_start=DateTime(2022, 6, 1, 9),
         analysis_end=smoke ? DateTime(2022, 7, 1, 8) : DateTime(2024, 10, 1, 8),
-        expected_common_time_count=smoke ? nothing : 8067,
+        expected_common_time_count=smoke ? nothing : 8069,
     )
     cfg = ERA5SelectionConfig(
         outdir=outdir,

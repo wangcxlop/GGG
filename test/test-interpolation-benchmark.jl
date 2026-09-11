@@ -920,11 +920,82 @@ end
     @test choice.shared_mask_coverage ≈ 0.5
     @test choice.chosen_rmse ≈ 0.1
 
+    # An undeduplicated contender list makes `auto` look like a wider choice than it was:
+    # `residual_gwr` and `mixed_gwr` are the same model whenever the fold's role map has no
+    # "global" role, so one of them is the other's twin at a margin of zero.
+    twin = select_auto_method(
+        [(; method="residual_gwr", prediction=steady),
+         (; method="mixed_gwr", prediction=copy(steady)),
+         (; method="patchy", prediction=patchy)],
+        y_obs, y_sat,
+    )
+    @test twin.n_contenders == 2                       # not 3
+    @test twin.collapsed == "mixed_gwr=residual_gwr"   # first occurrence keeps the name
+    @test twin.chosen == "residual_gwr"
+    @test twin.runner_up == "patchy"                   # a real alternative, not the twin
+    # Survivor order is `COLLAPSIBLE_PAIR`, not alphabetical: `"mixed_gwr" < "residual_gwr"`, so
+    # the tie-break inside `sortperm` would have kept the wrong one.
+    @test first(COLLAPSIBLE_PAIR) == "residual_gwr"
+    # Collapsing must not change what wins or what it scored.
+    plain = select_auto_method(
+        [(; method="residual_gwr", prediction=steady), (; method="patchy", prediction=patchy)],
+        y_obs, y_sat,
+    )
+    @test twin.chosen == plain.chosen
+    @test twin.chosen_rmse == plain.chosen_rmse
+    @test twin.n == plain.n
+    @test isempty(plain.collapsed)
+    # `isequal`, not `==`: these matrices carry NaN, and two contenders that both gave up on the
+    # same cells are still the same contender.
+    @test select_auto_method(
+        [(; method="residual_gwr", prediction=patchy),
+         (; method="mixed_gwr", prediction=copy(patchy))],
+        y_obs, y_sat,
+    ).n_contenders == 1
+    # Predictions that differ anywhere are two contenders, however close.
+    nudged = copy(steady); nudged[1, 1] = nextfloat(nudged[1, 1])
+    @test select_auto_method(
+        [(; method="residual_gwr", prediction=steady), (; method="mixed_gwr", prediction=nudged)],
+        y_obs, y_sat,
+    ).n_contenders == 2
+    # Only that one pair may collapse. Equality is tested on the inner-split prediction, but the
+    # caller goes on to consume the *outer-fold* prediction of whichever name survives; for any
+    # other pair an inner-split tie carries no guarantee that the outer-fold predictions agree,
+    # so collapsing there could silently change what `auto` reports.
+    others = select_auto_method(
+        [(; method="gwr", prediction=steady), (; method="mgwr", prediction=copy(steady))],
+        y_obs, y_sat,
+    )
+    @test others.n_contenders == 2
+    @test isempty(others.collapsed)
+
     # Nothing to score on: the caller must be told, not handed a default.
     @test select_auto_method(
         [(; method="empty", prediction=fill(NaN, 2, 4))], y_obs, y_sat,
     ) === nothing
     @test select_auto_method(NamedTuple[], y_obs, y_sat) === nothing
+end
+
+@testset "auto is held to the same coverage gate as the fitted runs" begin
+    # The seven fitted runs set `partial` below `min_tuning_coverage`. `auto` used to report
+    # `success` whenever a contender was chosen, whatever its coverage, so one table carried two
+    # meanings of the same word: on the 2026-09-02 full run, three `auto` rows read `success` at
+    # exactly the coverage that made the `mgwr` row beside them read `partial`.
+    @test _auto_status(true, 0.99, 0.95, false, true, String[]) == ("success", "")
+    @test _auto_status(true, 0.9028, 0.95, false, true, String[]) ==
+        ("partial", "prediction coverage below minimum")
+    # The boundary belongs to success, matching `coverage >= cfg.min_tuning_coverage` above.
+    @test first(_auto_status(true, 0.95, 0.95, false, true, String[])) == "success"
+
+    # The three non-choosing branches are unchanged, and are not coverage-gated: a fold where
+    # `auto` never ran has coverage 0.0 and must still read `skipped`, not `partial`.
+    @test _auto_status(false, 0.0, 0.95, true, false, String[]) ==
+        ("skipped", "auto is not run on the legacy DEM path")
+    @test _auto_status(false, 0.0, 0.95, false, false, String[]) ==
+        ("skipped", "fold has no inner selection split to choose on")
+    failed = _auto_status(false, 0.0, 0.95, false, true, ["mgwr: boom"])
+    @test first(failed) == "failed"
+    @test occursin("mgwr: boom", last(failed))
 end
 
 @testset "Interpolation benchmark fixture" begin

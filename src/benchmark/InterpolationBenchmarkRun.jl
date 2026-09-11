@@ -20,13 +20,46 @@ function _run_status_role_fields(
     effective_roles = uses_joint ? join([
         "$group=$(effective_role_map[group])" for group in joint_context.variables
     ], ";") : ""
-    return (; uses_dem, uses_joint, selected_roles, effective_role_map, effective_roles)
+    # `mixed_gwr` collapses onto `residual_gwr` whenever this fold's role map has no "global":
+    # identical design, identical grid, identical numbers (see `joint_models_coincide`). Recorded
+    # as a column so a reader of `run_status.csv` can see the two rows are one model, instead of
+    # having to notice that their RMSEs match to the last digit.
+    duplicate_of = uses_joint && output_method == "mixed_gwr" &&
+        joint_models_coincide(joint_context, "mixed_gwr", "residual_gwr") ? "residual_gwr" : ""
+    return (;
+        uses_dem, uses_joint, selected_roles, effective_role_map, effective_roles, duplicate_of,
+    )
 end
 
 """Non-NaN share of the held-out cells a method could have predicted."""
 _prediction_coverage(eligible, prediction) =
     count(eligible) == 0 ? 0.0 :
         count(eligible .& .!isnan.(prediction)) / count(eligible)
+
+"""
+`auto`'s `(status, error)` for one fold.
+
+"skipped" rather than "failed" where `auto` was never applicable, so a genuine breakage stays
+visible instead of being lost among expected non-runs.
+
+A fold that did choose a contender is held to the same coverage gate as the seven fitted runs,
+with the same reason string. Without that the `status` column meant two different things in one
+table: `auto` read "success" at the very coverage that makes the model it selected read
+"partial", so filtering `run_status.csv` on `status == "success"` kept the `auto` row and dropped
+the joint-model rows describing the same fold at the same coverage. Measured on the 2026-09-02
+full nested run, that was three rows — balanced_spatial/fold 4 for each product, at coverage
+0.9028 against a 0.95 bar.
+"""
+function _auto_status(
+    chose_contender::Bool, coverage::Float64, min_coverage::Float64,
+    dem_enabled::Bool, has_selection_split::Bool, failures::Vector{String},
+)
+    chose_contender && return coverage >= min_coverage ? ("success", "") :
+        ("partial", "prediction coverage below minimum")
+    dem_enabled && return ("skipped", "auto is not run on the legacy DEM path")
+    has_selection_split || return ("skipped", "fold has no inner selection split to choose on")
+    return ("failed", "no auto contender scored: $(join(failures, " | "))")
+end
 
 """
 One row of `run_status.csv`.
@@ -44,7 +77,7 @@ function _benchmark_status_row(
     scheme, product, fold, repeat::Int, seed::Int, mode::String, method::String,
     output_method::String, status::String, error::String, prediction_coverage::Float64,
 )
-    (; uses_dem, uses_joint, selected_roles, effective_roles) =
+    (; uses_dem, uses_joint, selected_roles, effective_roles, duplicate_of) =
         _run_status_role_fields(dem_context, joint_context, mode, method, output_method)
     return (;
         scheme, product, fold, repeat, seed, method=output_method, status, error,
@@ -60,6 +93,10 @@ function _benchmark_status_row(
         covariate_selected_roles=selected_roles,
         covariate_effective_roles=effective_roles,
         covariate_spec_sha256=uses_joint ? something(joint_inputs.spec_sha256, "") : "",
+        # Appended rather than grouped with the other status fields: existing readers of this
+        # table index it by name, but the ad-hoc awk/pandas kind does not, and a new column at
+        # the end cannot shift anything that already exists.
+        duplicate_of,
     )
 end
 
@@ -277,9 +314,44 @@ function _write_benchmark_outputs(
             ],
         ))
     end
+    append!(scope, _git_provenance())
     CSV.write(joinpath(cfg.mger.outdir, "benchmark_scope.csv"), scope)
     return (; metrics, scans, bootstrap, status, claim, repeat_summary, fold_summary,
         rank_stability, auto_selection=DataFrame(auto_selection_rows))
+end
+
+"""
+Which code produced this run, as `scope` rows.
+
+`benchmark_scope.csv` recorded the CV scope and nothing about provenance, so a published run
+could be dated but not attributed. `git_dirty` is the load-bearing one: a clean tree means
+`git_commit` fully determines the code, and a dirty tree means it does not, which is the
+difference between a citable baseline and a plausible one.
+
+Every call is wrapped. A missing git, a checkout that is not a repository, or an ownership check
+that refuses records `"unavailable"` rather than aborting a run that takes hours.
+"""
+function _git_provenance()
+    # Two levels up: this file lives in `src/benchmark/`. Derived rather than configured —
+    # `src/` must not read fixed absolute paths, and the process working directory is whatever
+    # the calling script was launched from.
+    root = normpath(joinpath(@__DIR__, "..", ".."))
+    run_git(args::Vector{String}) = try
+        String(strip(read(pipeline(`git -C $root $args`; stderr=devnull), String)))
+    catch
+        nothing
+    end
+    commit = run_git(["rev-parse", "HEAD"])
+    branch = run_git(["rev-parse", "--abbrev-ref", "HEAD"])
+    porcelain = run_git(["status", "--porcelain"])
+    return DataFrame(
+        key=["git_commit", "git_branch", "git_dirty"],
+        value=[
+            something(commit, "unavailable"),
+            something(branch, "unavailable"),
+            porcelain === nothing ? "unavailable" : string(!isempty(porcelain)),
+        ],
+    )
 end
 
 """
@@ -352,22 +424,15 @@ function _run_fold_auto!(
         # which would make `auto` mean something different in different folds.
         fold_predictions[AUTO_METHOD] = fill(NaN, length(val_idx), size(y_obs, 2))
     end
-    # "skipped" rather than "failed" where `auto` was never applicable, so a genuine
-    # breakage stays visible instead of being lost among expected non-runs.
-    auto_status, auto_error = if auto_choice !== nothing
-        ("success", "")
-    elseif _dem_enabled(cfg)
-        ("skipped", "auto is not run on the legacy DEM path")
-    elseif selection_groups === nothing
-        ("skipped", "fold has no inner selection split to choose on")
-    else
-        ("failed", "no auto contender scored: $(join(auto_failures, " | "))")
-    end
     # Measured the same way as every other method's row - non-NaN share of the
     # held-out cells it could have predicted - so the column means one thing across the
     # table. `auto_selection.csv` carries the inner-split mask coverage separately.
     auto_eligible = .!isnan.(y_obs[val_idx, :]) .& .!isnan.(y_sat_val)
     auto_coverage = _prediction_coverage(auto_eligible, fold_predictions[AUTO_METHOD])
+    auto_status, auto_error = _auto_status(
+        auto_choice !== nothing, auto_coverage, cfg.min_tuning_coverage,
+        _dem_enabled(cfg), selection_groups !== nothing, auto_failures,
+    )
     push!(run_status_rows, _benchmark_status_row(
         nothing, nothing, joint_inputs, nested_joint;
         scheme, product, fold, repeat=repeat_index, seed=repeat_seed,
@@ -554,6 +619,22 @@ function _run_benchmark_fold!(
                 error=sprint(showerror, e), prediction_coverage=0.0,
             ))
         end
+    end
+
+    # `mixed_gwr` and `residual_gwr` are the same model whenever this fold's role map has no
+    # "global" role, so the second of the two scans is redundant work. It is kept rather than
+    # skipped, and turned into a check: the two search the same grid through the same scorer over
+    # the same designs, so if they ever disagree here, the designs or the grids have drifted
+    # apart and the `duplicate_of` column in `run_status.csv` is lying.
+    if joint_context !== nothing &&
+            haskey(fold_predictions, "mixed_gwr") && haskey(fold_predictions, "residual_gwr") &&
+            joint_models_coincide(joint_context, "mixed_gwr", "residual_gwr") &&
+            !isequal(fold_predictions["mixed_gwr"], fold_predictions["residual_gwr"])
+        @warn(
+            "mixed_gwr and residual_gwr have identical designs on this fold but produced " *
+            "different predictions",
+            scheme, product, fold, repeat=repeat_index,
+        )
     end
 
     for index in scan_start:length(all_scan_rows)
