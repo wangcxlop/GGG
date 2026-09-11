@@ -63,7 +63,7 @@ function load_ndvi_covariates(path::AbstractString, station_ids::Vector{String})
     table = CSV.read(path, DataFrame; types=Dict(:station_id => String))
     required = [
         :station_id, :lon, :lat, :composite_start, :observation_date,
-        :ndvi_qc, :pixel_reliability, :quality_class, :land_water_class,
+        :ndvi_qc, :ndvi_land_qc, :pixel_reliability, :quality_class, :land_water_class,
     ]
     missing_columns = setdiff(required, propertynames(table))
     isempty(missing_columns) || throw(ArgumentError(
@@ -135,7 +135,14 @@ function align_ndvi_asof(
     for (station, station_id) in enumerate(station_ids)
         haskey(groups, station_id) || continue
         rows = groups[station_id]
-        valid = filter(:ndvi_qc => !ismissing, rows)
+        # `MOD13A2NDVIProcessing` has always emitted `ndvi_land_qc` - QC-passing NDVI further
+        # restricted to a land pixel - and nothing ever read it, so water and shoreline pixels
+        # entered the covariate. Requiring both drops 1147 rather than 351 station-period rows
+        # on the 2026-09-02 rebuild, and removes NDVI entirely from stations 61937000 and
+        # 61937150. The audit path deliberately still counts non-land stations.
+        valid = filter(
+            [:ndvi_qc, :ndvi_land_qc] => (q, l) -> !ismissing(q) && !ismissing(l), rows,
+        )
         nrow(valid) == 0 && continue
         effective = DateTime.(valid.observation_date) .+ Day(1)
         order = sortperm(effective)

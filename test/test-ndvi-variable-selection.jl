@@ -13,12 +13,17 @@ function synthetic_ndvi_inputs(n::Int=40, nperiods::Int=12; seed::Int=71)
     spatial = collect(range(-1.0, 1.0; length=n))
     for station in 1:n, period in 1:nperiods
         value = clamp(0.55 + 0.18 * spatial[station] + 0.08 * sin(period), -0.2, 1.0)
+        surface = station == n ? "shoreline" : "land"
         push!(rows, (
             station_id=ids[station], lon=109.0 + station / n * 3,
             lat=29.5 + 0.4 * sin(station / 5), composite_start=periods[period],
             observation_date=periods[period] + Day(2), ndvi_qc=value,
+            # `ndvi_land_qc` is `ndvi_qc` with `require_land=true`, so it mirrors `ndvi_qc` on a
+            # land pixel and is `missing` everywhere else. Station `n` stays a shoreline pixel:
+            # the audit still counts it, but `align_ndvi_asof` now has no usable period for it.
+            ndvi_land_qc=surface == "land" ? value : missing,
             pixel_reliability=0, quality_class="good",
-            land_water_class=station == n ? "shoreline" : "land",
+            land_water_class=surface,
         ))
     end
     table = DataFrame(rows)
@@ -43,7 +48,10 @@ end
         composite_start=[Date(2022, 1, 1), Date(2022, 2, 18)],
         observation_date=[Date(2022, 1, 3), Date(2022, 2, 20)],
         ndvi_qc=Union{Missing,Float64}[0.5, missing], pixel_reliability=[0, 3],
-        quality_class=["good", "cloudy"], land_water_class=["shoreline", "shoreline"],
+        quality_class=["good", "cloudy"], land_water_class=["land", "land"],
+        # Land pixels, so `ndvi_land_qc` mirrors `ndvi_qc` and this stays a test of the as-of
+        # carry-forward rather than of the land filter, which the next testset covers.
+        ndvi_land_qc=Union{Missing,Float64}[0.5, missing],
     )
     times = [
         DateTime(2022, 1, 3, 23), DateTime(2022, 1, 4),
@@ -57,6 +65,25 @@ end
     @test aligned.qc.interpolation[1] == "none"
     @test aligned.intervals.effective_time[1] == DateTime(2022, 1, 4)
     @test aligned.intervals.valid_until_exclusive[1] == DateTime(2022, 2, 5)
+end
+
+# MOD13A2 over a shoreline or inland-water pixel is not a vegetation signal, so a station whose
+# every period is non-land contributes no NDVI at all rather than a contaminated value. Both
+# periods below pass the `ndvi_qc` reliability screen and are dropped only by the land filter.
+@testset "NDVI as-of alignment drops a station with no land pixel" begin
+    table = DataFrame(
+        station_id=["A", "A"], lon=[110.0, 110.0], lat=[30.0, 30.0],
+        composite_start=[Date(2022, 1, 1), Date(2022, 2, 18)],
+        observation_date=[Date(2022, 1, 3), Date(2022, 2, 20)],
+        ndvi_qc=Union{Missing,Float64}[0.5, 0.6], pixel_reliability=[0, 0],
+        quality_class=["good", "good"], land_water_class=["shoreline", "shoreline"],
+        ndvi_land_qc=Union{Missing,Float64}[missing, missing],
+    )
+    times = [DateTime(2022, 1, 4), DateTime(2022, 2, 21)]
+    aligned = align_ndvi_asof(table, ["A"], times; max_age_days=32)
+    @test all(isnan, aligned.values[1, :])
+    @test all(==(0), aligned.source_period[1, :])
+    @test isempty(aligned.intervals)
 end
 
 @testset "NDVI quality audit retains non-land stations" begin
