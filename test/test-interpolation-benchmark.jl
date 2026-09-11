@@ -51,6 +51,30 @@ end
     missing_prediction = tps_predict(lonlat, missing_values, lonlat[1:1, :]; smooth=0.01)
     @test isfinite(missing_prediction[1, 1])
     @test isnan(missing_prediction[1, 2])
+    # TPS's lambda scale is fixed once per call from the reporting station network, not derived
+    # per missing-value group. The two assertions below pin it to exactly that set, one from
+    # each side. Station 6-8 form a distant cluster, so including or excluding them moves the
+    # scale by a factor of ~32 rather than by a rounding step.
+    tps_lonlat = [110.0 30.0; 110.2 30.1; 110.1 30.3; 110.4 30.2; 110.3 30.5;
+                  111.4 31.4; 111.5 31.6; 111.3 31.8]
+    tps_target = reshape([110.6, 30.7], 1, 2)
+    tps_values = reshape([0.4, 1.1, 0.7, 2.3, 1.5, 3.2, 2.8, 3.9], 8, 1)
+    tps_gap = copy(tps_values)
+    tps_gap[6:8, 1] .= NaN
+    # A station absent this hour but reporting in another still counts toward the scale, so the
+    # gapped hour is not fitted as though that cluster did not exist.
+    @test tps_predict(tps_lonlat, hcat(tps_values, tps_gap), tps_target; smooth=0.1)[1, 2] !=
+        tps_predict(tps_lonlat, tps_gap, tps_target; smooth=0.1)[1, 1]
+    # A station reporting at no hour at all counts toward nothing. It has to sit exactly on the
+    # projection centre: `local_km_coordinates` scales x by `cosd(lat0)`, so an off-centre pad
+    # would shift every coordinate and move the prediction by ~2e-5 for reasons unrelated to the
+    # scale.
+    tps_centre = reshape([mean(tps_lonlat[:, 1]), mean(tps_lonlat[:, 2])], 1, 2)
+    @test tps_predict(
+            vcat(tps_lonlat, tps_centre), vcat(tps_values, fill(NaN, 1, 1)), tps_target;
+            smooth=0.1,
+        ) == tps_predict(tps_lonlat, tps_values, tps_target; smooth=0.1)
+
     collinear = [110.0 30.0; 110.1 30.0; 110.2 30.0; 110.3 30.0]
     @test all(isnan, tps_predict(collinear, fill(1.0, 4, 1), collinear; smooth=0.01))
 

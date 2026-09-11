@@ -206,16 +206,38 @@ function _tps_kernel_matrix(a::AbstractMatrix{<:Real}, b::AbstractMatrix{<:Real}
     return out
 end
 
-function _tps_system(xy::Matrix{Float64}, smooth::Float64)
+"""
+The magnitude the dimensionless `smooth` is measured against: the median non-zero TPS kernel
+value over a station network. Since `K = 0.5 r^2 ln r^2` is monotone in `r` past `r = e^-0.5`
+km, this is the kernel evaluated at the median pairwise station distance - a proxy for the
+network's extent and density.
+"""
+function _tps_scale(xy::AbstractMatrix{<:Real})
+    K = _tps_kernel_matrix(xy, xy)
+    positive = abs.(K[.!iszero.(K)])
+    return isempty(positive) ? 1.0 : median(positive)
+end
+
+"""
+Stations reporting at some hour, and the `_tps_scale` of the network they form.
+
+Taken over the whole call rather than per missing-value group. Derived per group - as this was
+until the hour-to-hour flicker was measured - the effective smoothing depended on which gauges
+happened to report in a given hour, so the same `smooth` meant a different lambda from one hour
+to the next. It also re-sorted a fresh n^2/2 vector for every group to do it.
+"""
+function _tps_reporting_scale(values::AbstractMatrix{<:Real}, xy::AbstractMatrix{<:Real})
+    reporting = findall(station -> any(isfinite, @view(values[station, :])), axes(values, 1))
+    return length(reporting) >= 2 ? _tps_scale(@view(xy[reporting, :])) : 1.0
+end
+
+function _tps_system(xy::Matrix{Float64}, smooth::Float64, scale::Float64)
     n = size(xy, 1)
     n >= 3 || throw(ArgumentError("TPS requires at least three valid stations"))
     P = hcat(ones(Float64, n), xy)
     rank(P) == 3 || throw(ArgumentError("TPS stations must not be collinear"))
     K = _tps_kernel_matrix(xy, xy)
-    positive = abs.(K[.!iszero.(K)])
-    scale = isempty(positive) ? 1.0 : median(positive)
-    lambda = smooth * scale
-    A = [K + lambda * I P; transpose(P) zeros(Float64, 3, 3)]
+    A = [K + smooth * scale * I P; transpose(P) zeros(Float64, 3, 3)]
     return A, K, P
 end
 
@@ -229,8 +251,15 @@ function _valid_groups(values::AbstractMatrix{<:Real})
 end
 
 """
-Two-dimensional thin-plate smoothing spline. `smooth` is dimensionless and is
-scaled by the median non-zero TPS kernel magnitude for the current station set.
+Two-dimensional thin-plate smoothing spline. `smooth` is dimensionless, scaled by the median
+non-zero TPS kernel magnitude over the stations that report at least one hour.
+
+That scale is fixed once per call, so the effective smoothing does not depend on which gauges
+reported in any given hour. It does still differ between training sets of different extent -
+the inner selection split spans a smaller network than the fold it is selected for, so the
+applied lambda is not exactly the one validated. That is deliberate, and matches every other
+method here: GWR's adaptive bandwidth is a neighbour count whose radius likewise grows when
+stations are withheld.
 """
 function tps_predict(
     train_lonlat::AbstractMatrix{<:Real}, values::AbstractMatrix{<:Real},
@@ -241,6 +270,7 @@ function tps_predict(
     center = (mean(train_lonlat[:, 1]), mean(train_lonlat[:, 2]))
     train_xy_all = local_km_coordinates(train_lonlat; center=center)
     target_xy = local_km_coordinates(target_lonlat; center=center)
+    scale = _tps_reporting_scale(values, train_xy_all)
     prediction = fill(NaN, size(target_lonlat, 1), size(values, 2))
 
     for (key, times) in _valid_groups(values)
@@ -248,7 +278,7 @@ function tps_predict(
         length(idx) >= 3 || continue
         try
             train_xy = Matrix{Float64}(train_xy_all[idx, :])
-            A, _, _ = _tps_system(train_xy, Float64(smooth))
+            A, _, _ = _tps_system(train_xy, Float64(smooth), scale)
             rhs = vcat(Float64.(values[idx, times]), zeros(Float64, 3, length(times)))
             coefficients = A \ rhs
             K_target = transpose(_tps_kernel_matrix(train_xy, target_xy))
@@ -270,6 +300,7 @@ function tps_loo_predict(
     smooth > 0 || throw(ArgumentError("TPS LOOCV requires positive smoothing"))
     center = (mean(train_lonlat[:, 1]), mean(train_lonlat[:, 2]))
     train_xy_all = local_km_coordinates(train_lonlat; center=center)
+    scale = _tps_reporting_scale(values, train_xy_all)
     prediction = fill(NaN, size(values))
 
     for (key, times) in _valid_groups(values)
@@ -277,7 +308,7 @@ function tps_loo_predict(
         length(idx) >= 4 || continue
         try
             xy = Matrix{Float64}(train_xy_all[idx, :])
-            A, K, P = _tps_system(xy, Float64(smooth))
+            A, K, P = _tps_system(xy, Float64(smooth), scale)
             selector = vcat(Matrix{Float64}(I, length(idx), length(idx)), zeros(3, length(idx)))
             mapping = A \ selector
             H = hcat(K, P) * mapping
