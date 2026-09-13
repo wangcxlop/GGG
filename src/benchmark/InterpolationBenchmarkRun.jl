@@ -162,7 +162,8 @@ function _write_benchmark_outputs(
     cfg::InterpolationBenchmarkConfig, products, seeds, nested_joint::Bool, joint_inputs,
     dem_store, joint_store, joint_scaling_tables, joint_qc_tables,
     all_metric_rows, all_scan_rows, all_bootstrap_rows, run_status_rows,
-    auto_selection_rows, hurdle_rows, selection_fallback_cells,
+    auto_selection_rows, blend_selection_rows, fused_anchor_rows, hurdle_rows,
+    selection_fallback_cells,
 )
     metrics = DataFrame(all_metric_rows)
     scans = DataFrame(all_scan_rows)
@@ -200,6 +201,16 @@ function _write_benchmark_outputs(
     # gap to `runner_up_rmse` says whether the choice was decisive or a coin flip.
     isempty(auto_selection_rows) ||
         CSV.write(joinpath(cfg.mger.outdir, "auto_selection.csv"), DataFrame(auto_selection_rows))
+    isempty(blend_selection_rows) ||
+        CSV.write(joinpath(cfg.mger.outdir, "blend_selection.csv"), DataFrame(blend_selection_rows))
+    # The fusion coefficients each derived product's anchor was built from, per fold. Worth
+    # reporting for the same reason `auto_selection.csv` is: they are fitted quantities the
+    # published numbers rest on, and their stability across folds is the evidence that the anchor
+    # is a property of the products rather than of one partition. `fell_back` marks a fold whose
+    # normal equations were singular and which therefore used equal weights instead.
+    isempty(fused_anchor_rows) ||
+        CSV.write(joinpath(cfg.mger.outdir, "fused_anchor_selection.csv"),
+            DataFrame(fused_anchor_rows))
     _dem_enabled(cfg) && _write_dem_outputs(cfg.mger.outdir, dem_store, scans, status)
     if joint_inputs !== nothing
         scaling = isempty(joint_scaling_tables) ? DataFrame() :
@@ -314,6 +325,46 @@ function _write_benchmark_outputs(
             ],
         ))
     end
+    if cfg.satellite_wet_blend
+        append!(scope, DataFrame(
+            key=["satellite_wet_blend", "satellite_wet_blend_selection", "blend_axes"],
+            value=[
+                "blended counterparts of $(join(BLEND_SOURCE_METHODS, ", ")) reported as " *
+                "$(join([_blend_method(m, a) for a in cfg.blend_axes
+                         for m in BLEND_SOURCE_METHODS], ", ")): where the " *
+                "satellite reports at least $(cfg.mger.rain_threshold) mm, the prediction is " *
+                "blended toward $(BLEND_FALLBACK_METHOD)",
+                "blending weight chosen per fold on the inner selection split over " *
+                "$(BLEND_LAMBDAS), never on held-out cells; see blend_selection.csv. The " *
+                "blended methods are scored on the shared mask but do not define it, so adding " *
+                "them leaves every other method's denominator unchanged",
+                "$(join(cfg.blend_axes, ", ")). `constant` is one weight for every " *
+                "satellite-wet cell. `agreement_envelope` gives one weight per band of (how " *
+                "many source products call the cell wet) x (their maximum, on " *
+                "$(BLEND_ENVELOPE_EDGES)), which widens the intervention set: a cell this " *
+                "product calls dry but another calls wet is blended, where the constant axis " *
+                "would not have touched it",
+            ],
+        ))
+    end
+    if !isempty(cfg.fused_anchor_variants)
+        append!(scope, DataFrame(
+            key=["fused_anchor", "fused_anchor_leakage"],
+            value=[
+                "derived products $(join([_fused_product_name(v) for v in
+                    sort(cfg.fused_anchor_variants)], ", ")): the anchor is a combination of the " *
+                "products that have files, not a satellite field as shipped. Their `raw` row is " *
+                "therefore a gauge-trained predictor that uses only satellites at prediction " *
+                "time, and is reported so the fusion's contribution can be read separately from " *
+                "the correction built on top of it",
+                "fusion coefficients fitted inside every fold on that fold's training stations " *
+                "alone and applied to every station, so a held-out gauge never reaches the " *
+                "anchor its own prediction is built on; see fused_anchor_selection.csv. A " *
+                "derived product's evaluation mask needs every source product finite, so it is " *
+                "a different cell population from any of them",
+            ],
+        ))
+    end
     append!(scope, _git_provenance())
     CSV.write(joinpath(cfg.mger.outdir, "benchmark_scope.csv"), scope)
     return (; metrics, scans, bootstrap, status, claim, repeat_summary, fold_summary,
@@ -362,6 +413,9 @@ Split out of `_run_benchmark_fold!`, which was 262 lines. Mutates `fold_predicti
 `auto` entry, NaN when no contender could be scored), `auto_selection_rows` and `run_status_rows`.
 Parameters keep the names the enclosing locals had, so the body is unchanged from when it was
 inline.
+
+Returns the inner-split contenders and the tuning hours they were scored over, which
+`_run_fold_blend!` reuses.
 """
 function _run_fold_auto!(
     cfg::InterpolationBenchmarkConfig, fold::Int, scheme, product, repeat_index::Int,
@@ -439,13 +493,164 @@ function _run_fold_auto!(
         mode="", method=AUTO_METHOD, output_method=AUTO_METHOD,
         status=auto_status, error=auto_error, prediction_coverage=auto_coverage,
     ))
+    # Handed back rather than discarded: `_run_fold_blend!` needs the same inner-split predictions
+    # for the same methods over the same tuning hours, and re-deriving them would double the most
+    # expensive thing this function does.
+    return (; contenders=auto_contenders, time_indices=auto_time_indices,
+        time_weights=auto_time_weights, applicable=auto_applicable)
+end
+
+"""
+One `blend_selection.csv` row shape for both weight rules.
+
+The constant axis chooses a scalar and the banded one a vector, and a table whose column count
+depends on the axis would be a nuisance to read and impossible to concatenate across runs. The
+weights therefore go into one `lambdas` string with `n_bands` beside it, and `lambda` is the single
+weight for the constant axis while carrying the first band's weight for the others.
+"""
+function _blend_selection_weights(choice, axis::Symbol)
+    weights = hasproperty(choice, :lambdas) ? choice.lambdas : [choice.lambda]
+    return (;
+        lambda=choice.lambda, lambdas=join(weights, "|"), n_bands=length(weights),
+        inner_RMSE=choice.inner_RMSE, inner_MAE=choice.inner_MAE,
+        unblended_RMSE=choice.unblended_RMSE, n=choice.n, coverage=choice.coverage,
+        wet_cells=choice.wet_cells,
+    )
+end
+
+"""
+Blended counterparts of the anchored methods: on satellite-wet cells, blend toward `adw`.
+
+Runs after `_run_fold_auto!` and reuses its inner-split contenders, so the only fit this adds is
+the fallback's - `adw` is deliberately not an `auto` candidate, so its inner prediction is the one
+thing not already on hand. Everything else here is arithmetic over matrices that exist.
+
+The weight is chosen on the inner selection split, never on the held-out cells. A replay that
+sweeps the weight over the test set bounds what is reachable; a method has to pick one without
+looking and will therefore score worse than that bound.
+
+A fold with no inner split, or with no fallback prediction, leaves the blended methods NaN rather
+than falling back to the unblended source. Silently reporting the source under a blended name
+would make the method mean different things in different folds - the same reason `auto` leaves
+itself unpredicted rather than defaulting.
+
+Mutates `predictions`, `fold_predictions`, `blend_selection_rows` and `run_status_rows`.
+"""
+function _run_fold_blend!(
+    cfg::InterpolationBenchmarkConfig, fold::Int, scheme, product, repeat_index::Int,
+    repeat_seed::Int, val_idx, y_obs, y_sat_val, y_obs_train, y_sat_train, train_lonlat,
+    selection_groups, auto_inner, fold_selected, fold_predictions, predictions,
+    blend_band_train, blend_band_val, blend_selection_rows, run_status_rows,
+)
+    threshold = cfg.mger.rain_threshold
+    eligible = .!isnan.(y_obs[val_idx, :]) .& .!isnan.(y_sat_val)
+
+    # One `run_status.csv` row for a blended method, which carries no covariate model.
+    status_row(output_method, status, message, coverage) = _benchmark_status_row(
+        nothing, nothing, nothing, false;
+        scheme, product, fold, repeat=repeat_index, seed=repeat_seed,
+        mode="", method=output_method, output_method,
+        status, error=message, prediction_coverage=coverage,
+    )
+
+    # Leave every blended method unpredicted, with one status row each saying why.
+    function skip_all(status::String, message::String)
+        for axis in cfg.blend_axes, source in BLEND_SOURCE_METHODS
+            output_method = _blend_method(source, axis)
+            fold_predictions[output_method] = fill(NaN, length(val_idx), size(y_obs, 2))
+            push!(run_status_rows, status_row(output_method, status, message, 0.0))
+        end
+        return nothing
+    end
+
+    auto_inner.applicable || return skip_all(
+        "skipped", "fold has no inner selection split to choose a blending weight on",
+    )
+    haskey(fold_selected, BLEND_FALLBACK_METHOD) || return skip_all(
+        "skipped", "$BLEND_FALLBACK_METHOD did not fit on this fold, so there is nothing to " *
+        "blend toward",
+    )
+
+    # The one fit this adds. `adw` is not an `auto` candidate - the traditional baselines are what
+    # the GWR claim is assessed against - so its inner-split prediction is not already computed.
+    fallback_inner = try
+        inner_selection_prediction(
+            fold_selected[BLEND_FALLBACK_METHOD], BLEND_FALLBACK_METHOD, "direct",
+            train_lonlat, y_obs_train, y_sat_train, selection_groups;
+            time_indices=auto_inner.time_indices,
+        )
+    catch e
+        return skip_all("failed",
+            "$BLEND_FALLBACK_METHOD inner prediction failed: $(sprint(showerror, e))")
+    end
+
+    inner_obs = Matrix{Float64}(y_obs_train[:, auto_inner.time_indices])
+    inner_sat = Matrix{Float64}(y_sat_train[:, auto_inner.time_indices])
+
+    for axis in cfg.blend_axes, source in BLEND_SOURCE_METHODS
+        output_method = _blend_method(source, axis)
+        contender = findfirst(entry -> entry.method == source, auto_inner.contenders)
+        if contender === nothing || !haskey(fold_predictions, source) ||
+                !haskey(fold_predictions, BLEND_FALLBACK_METHOD)
+            fold_predictions[output_method] = fill(NaN, length(val_idx), size(y_obs, 2))
+            push!(run_status_rows, status_row(output_method, "skipped",
+                "$source has no inner-split prediction to choose a weight on", 0.0))
+            continue
+        end
+        # The constant axis keeps its scalar code path rather than being expressed as a one-band
+        # case of the banded one. Both give the same answer, and only one of them cannot regress
+        # the constant-weight method by accident.
+        inner_prediction = auto_inner.contenders[contender].prediction
+        choice = if axis === :constant
+            select_blend_lambda(
+                inner_obs, inner_sat, inner_prediction, fallback_inner,
+                BLEND_LAMBDAS, threshold; time_weights=auto_inner.time_weights,
+            )
+        else
+            select_blend_lambdas(
+                inner_obs, inner_sat, blend_band_train[axis][:, auto_inner.time_indices],
+                inner_prediction, fallback_inner, BLEND_LAMBDAS, blend_band_count(axis);
+                time_weights=auto_inner.time_weights,
+            )
+        end
+        if choice === nothing
+            fold_predictions[output_method] = fill(NaN, length(val_idx), size(y_obs, 2))
+            push!(run_status_rows, status_row(output_method, "failed",
+                "no inner-split cell was scorable for $source and $BLEND_FALLBACK_METHOD", 0.0))
+            continue
+        end
+        blended = if axis === :constant
+            satellite_wet_blend_prediction(
+                y_sat_val, fold_predictions[source], fold_predictions[BLEND_FALLBACK_METHOD],
+                choice.lambda, threshold,
+            )
+        else
+            banded_blend_prediction(
+                blend_band_val[axis], fold_predictions[source],
+                fold_predictions[BLEND_FALLBACK_METHOD], choice.lambdas,
+            )
+        end
+        fold_predictions[output_method] = blended
+        predictions[output_method][val_idx, :] = blended
+        push!(blend_selection_rows, merge(
+            (; scheme, product, fold, repeat=repeat_index, seed=repeat_seed,
+                method=output_method, source, fallback=BLEND_FALLBACK_METHOD, threshold,
+                axis=String(axis)),
+            _blend_selection_weights(choice, axis),
+        ))
+        coverage = _prediction_coverage(eligible, blended)
+        push!(run_status_rows, status_row(output_method,
+            coverage >= cfg.min_tuning_coverage ? "success" : "partial",
+            coverage >= cfg.min_tuning_coverage ? "" : "prediction coverage below minimum",
+            coverage))
+    end
     return nothing
 end
 
 """
 Everything one cross-validation fold does: split the stations, build the fold's DEM/joint/hurdle
-contexts, tune and predict each `BENCHMARK_RUNS` method, run `auto`, and append the fold's metric,
-scan and status rows.
+contexts, tune and predict each `BENCHMARK_RUNS` method, run `auto` and the blends, and append the
+fold's metric, scan and status rows.
 
 Extracted verbatim from `run_interpolation_benchmark`, whose body was a single 580-line function
 with the fold loop nested four deep. Parameters are named for the values they receive so the body
@@ -458,16 +663,13 @@ function _run_benchmark_fold!(
     cfg::InterpolationBenchmarkConfig, fold::Int, folds, id_map, ids, products, product,
     data, lonlat, y_obs, y_sat, terrain, joint_inputs, nested_joint::Bool,
     scheme, scheme_symbol, repeat_index::Int, repeat_seed::Int,
-    predictions, nearest_train_distance,
+    predictions, nearest_train_distance, blend_bands,
     dem_store, joint_store, joint_scaling_tables, joint_qc_tables,
-    all_metric_rows, all_scan_rows, run_status_rows, auto_selection_rows, hurdle_rows,
-    selection_fallback_cells,
+    all_metric_rows, all_scan_rows, run_status_rows, auto_selection_rows,
+    blend_selection_rows, hurdle_rows, selection_fallback_cells,
 )
 
-    val_ids = folds[fold]
-    train_ids = reduce(vcat, (folds[index] for index in 1:cfg.k if index != fold))
-    train_idx = [id_map[id] for id in train_ids]
-    val_idx = [id_map[id] for id in val_ids]
+    train_ids, val_ids, train_idx, val_idx = _fold_station_indices(folds, id_map, cfg.k, fold)
     train_lonlat = Matrix{Float64}(lonlat[train_idx, :])
     val_lonlat = Matrix{Float64}(lonlat[val_idx, :])
     y_obs_train = Matrix{Float64}(y_obs[train_idx, :])
@@ -643,15 +845,25 @@ function _run_benchmark_fold!(
         )
     end
 
-    _run_fold_auto!(
+    auto_inner = _run_fold_auto!(
         cfg, fold, scheme, product, repeat_index, repeat_seed, val_idx, y_obs, y_sat_val,
         y_obs_train, y_sat_train, train_lonlat, selection_groups, joint_selection_contexts,
         joint_inputs, nested_joint, fold_selected, fold_predictions, predictions,
         auto_selection_rows, run_status_rows,
     )
+    if cfg.satellite_wet_blend
+        blend_band_train = Dict(axis => band[train_idx, :] for (axis, band) in blend_bands)
+        blend_band_val = Dict(axis => band[val_idx, :] for (axis, band) in blend_bands)
+        _run_fold_blend!(
+            cfg, fold, scheme, product, repeat_index, repeat_seed, val_idx, y_obs, y_sat_val,
+            y_obs_train, y_sat_train, train_lonlat, selection_groups, auto_inner,
+            fold_selected, fold_predictions, predictions, blend_band_train, blend_band_val,
+            blend_selection_rows, run_status_rows,
+        )
+    end
     fold_mask = _common_method_mask(Matrix{Float64}(y_obs[val_idx, :]), fold_predictions)
     if any(fold_mask)
-        for method in BENCHMARK_METHODS
+        for method in benchmark_methods(cfg)
             append_stratified_metrics!(
                 all_metric_rows, scheme, product, method, data.times,
                 Matrix{Float64}(y_obs[val_idx, :]), fold_predictions[method], fold_mask,
@@ -663,20 +875,88 @@ function _run_benchmark_fold!(
     return nothing
 end
 
+"""
+The station ids and row indices a fold trains on and validates on.
+
+Lifted out of `_run_benchmark_fold!` so the product loop can build a fold's fused anchor against
+exactly the training stations the fold will then use, rather than deriving the split twice.
+"""
+function _fold_station_indices(folds, id_map, k::Int, fold::Int)
+    val_ids = folds[fold]
+    train_ids = reduce(vcat, (folds[index] for index in 1:k if index != fold))
+    return train_ids, val_ids, [id_map[id] for id in train_ids], [id_map[id] for id in val_ids]
+end
+
+"""
+Products derived by fusing the ones that have files, keyed by product name.
+
+Each entry carries the variant and the source matrices, which are the real products' own `Y_sat`
+in `products` order - so the fusion's design is the same one everywhere, and
+`fused_anchor_selection.csv` can name its coefficients.
+
+The derived product shares the source products' `times`, `ids` and `Y_obs`:
+`load_global_common_product_data` has already put every product on one common station set and one
+common time grid, so there is nothing to align. Its `Y_sat` starts as NaN and is filled per fold,
+because the anchor depends on which stations were held out - which is exactly what keeps a held-out
+gauge out of the anchor its own prediction is built on.
+"""
+function _build_fused_products!(
+    cfg::InterpolationBenchmarkConfig, products::Vector{String}, product_data::Dict{String,Any},
+)
+    isempty(cfg.fused_anchor_variants) && return String[], Dict{String,Any}()
+    source_names = copy(products)
+    sources = [Matrix{Float64}(product_data[name].Y_sat) for name in source_names]
+    template = product_data[first(source_names)]
+    derived = String[]
+    specifications = Dict{String,Any}()
+    for variant in sort(cfg.fused_anchor_variants)
+        name = _fused_product_name(variant)
+        haskey(product_data, name) &&
+            throw(ArgumentError("derived product $name collides with a configured product"))
+        product_data[name] = (;
+            template.times, template.ids, template.Y_obs,
+            Y_sat=fill(NaN, size(template.Y_obs)),
+        )
+        specifications[name] = (; variant, source_names, sources)
+        push!(derived, name)
+    end
+    return derived, specifications
+end
+
 function run_interpolation_benchmark(cfg::InterpolationBenchmarkConfig)
     mkpath(cfg.mger.outdir)
     station_meta = load_station_meta(cfg.mger.station_meta_path;
         station_id_col=cfg.mger.station_id_col, lon_col=cfg.mger.lon_col, lat_col=cfg.mger.lat_col)
-    products, ids, product_data = load_global_common_product_data(cfg.mger)
+    source_products, ids, product_data = load_global_common_product_data(cfg.mger)
     lonlat = build_X_lonlat(station_meta, ids)
     _validate_benchmark_config(cfg, length(ids))
+    # Derived products are appended after validation, and the joint inputs below are loaded for the
+    # source products only: `load_joint_benchmark_inputs` reads a fixed specification keyed by
+    # product, which a product with no file cannot appear in, and which the config validation has
+    # already ruled out alongside a fused anchor.
+    _, fused_specifications = _build_fused_products!(cfg, source_products, product_data)
+    products = benchmark_products(cfg, source_products)
     terrain = _dem_enabled(cfg) ? load_aligned_terrain(something(cfg.terrain_path), ids) : nothing
     dem_store = _empty_dem_store()
     common_times = product_data[first(products)].times
     joint_inputs = _joint_enabled(cfg) ? load_joint_benchmark_inputs(
-        something(cfg.joint_covariates), products, ids, common_times,
+        something(cfg.joint_covariates), source_products, ids, common_times,
     ) : nothing
     nested_joint = _joint_enabled(cfg) && cfg.joint_selection !== nothing
+    # Band matrices for the non-constant blend axes. They are read off the source products alone,
+    # so they depend on neither the fold nor the scheme nor which product is being corrected, and
+    # are built once here rather than per fold. The constant axis keeps its own code path in
+    # `_run_fold_blend!` so that turning another axis on cannot perturb what it reports.
+    blend_bands = Dict{Symbol,Matrix{Int}}()
+    if cfg.satellite_wet_blend
+        band_sources = [Matrix{Float64}(product_data[name].Y_sat) for name in source_products]
+        for axis in cfg.blend_axes
+            axis === :constant && continue
+            blend_bands[axis] = blend_band_matrix(
+                axis, first(band_sources), band_sources, cfg.mger.rain_threshold,
+            )
+        end
+    end
     joint_store = _empty_joint_store()
     joint_scaling_tables = DataFrame[]
     joint_qc_tables = DataFrame[]
@@ -687,6 +967,8 @@ function run_interpolation_benchmark(cfg::InterpolationBenchmarkConfig)
     all_bootstrap_rows = NamedTuple[]
     run_status_rows = NamedTuple[]
     auto_selection_rows = NamedTuple[]
+    blend_selection_rows = NamedTuple[]
+    fused_anchor_rows = NamedTuple[]
     hurdle_rows = NamedTuple[]
     # Cells where the fold was too small for an inner selection split and fell back to
     # leave-one-out. Reported in `benchmark_scope.csv` so the fallback is never silent.
@@ -719,19 +1001,46 @@ function run_interpolation_benchmark(cfg::InterpolationBenchmarkConfig)
                 data = product_data[product]
                 y_obs = data.Y_obs
                 y_sat = data.Y_sat
-                predictions = Dict(method => fill(NaN, size(y_obs)) for method in BENCHMARK_METHODS)
-                predictions["raw"] .= y_sat
+                fusion = get(fused_specifications, product, nothing)
+                predictions = Dict(
+                    method => fill(NaN, size(y_obs)) for method in benchmark_methods(cfg)
+                )
+                # A derived product has no anchor until a fold says which stations may be used to
+                # fit one, so `raw` is filled per fold below instead of in one assignment here.
+                fusion === nothing && (predictions["raw"] .= y_sat)
                 nearest_train_distance = fill(NaN, length(ids))
 
                 for fold in 1:cfg.k
+                    fold_sat = y_sat
+                    if fusion !== nothing
+                        _, _, fusion_train_idx, fusion_val_idx =
+                            _fold_station_indices(folds, id_map, cfg.k, fold)
+                        coefficients, used, fell_back = fusion_coefficients(
+                            fusion.variant, y_obs, fusion.sources, fusion_train_idx,
+                        )
+                        # Fitted on the training stations, applied everywhere: the fold's own
+                        # training rows need the same anchor its held-out rows get, or the
+                        # residual target would mean two different things inside one fit.
+                        fold_sat = apply_satellite_fusion(fusion.sources, coefficients)
+                        predictions["raw"][fusion_val_idx, :] = fold_sat[fusion_val_idx, :]
+                        push!(fused_anchor_rows, merge(
+                            (; scheme, product, fold, repeat=repeat_index, seed=repeat_seed,
+                                variant=String(fusion.variant),
+                                n_train_station=length(fusion_train_idx), n_train_cell=used,
+                                fell_back, intercept=coefficients[1]),
+                            NamedTuple{Tuple(Symbol("beta_", lowercase(name))
+                                             for name in fusion.source_names)}(
+                                Tuple(coefficients[2:end])),
+                        ))
+                    end
                     _run_benchmark_fold!(
                         cfg, fold, folds, id_map, ids, products, product,
-                        data, lonlat, y_obs, y_sat, terrain, joint_inputs, nested_joint,
+                        data, lonlat, y_obs, fold_sat, terrain, joint_inputs, nested_joint,
                         scheme, scheme_symbol, repeat_index, repeat_seed,
-                        predictions, nearest_train_distance,
+                        predictions, nearest_train_distance, blend_bands,
                         dem_store, joint_store, joint_scaling_tables, joint_qc_tables,
                         all_metric_rows, all_scan_rows, run_status_rows, auto_selection_rows,
-                        hurdle_rows, selection_fallback_cells,
+                        blend_selection_rows, hurdle_rows, selection_fallback_cells,
                     )
                 end
 
@@ -745,7 +1054,7 @@ function run_interpolation_benchmark(cfg::InterpolationBenchmarkConfig)
                 end
                 product_dir = joinpath(scheme_dir, lowercase(product))
                 mkpath(product_dir)
-                for method in BENCHMARK_METHODS
+                for method in benchmark_methods(cfg)
                     # The per-station OOF tables are large; only the first repeat writes them.
                     repeat_index == 1 && write_wide(
                         joinpath(product_dir, "oof_$(method).csv"), data.times, ids, predictions[method],
@@ -777,6 +1086,7 @@ function run_interpolation_benchmark(cfg::InterpolationBenchmarkConfig)
         cfg, products, seeds, nested_joint, joint_inputs,
         dem_store, joint_store, joint_scaling_tables, joint_qc_tables,
         all_metric_rows, all_scan_rows, all_bootstrap_rows, run_status_rows,
-        auto_selection_rows, hurdle_rows, selection_fallback_cells,
+        auto_selection_rows, blend_selection_rows, fused_anchor_rows, hurdle_rows,
+        selection_fallback_cells,
     )
 end

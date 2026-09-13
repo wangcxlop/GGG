@@ -189,7 +189,7 @@ which git matches at any depth, so files there would be silently untracked.
    their own, so they must never be `include`d directly by anything else.
 
 2. **Standalone modules** — each defines its *own* `module X ... end` and is loaded through
-   `src/load_modules.jl`, never through the `MixedGWR` module. Nineteen of them:
+   `src/load_modules.jl`, never through the `MixedGWR` module. Twenty of them:
    - `sources/`: `StudyArea.jl`, `FY4BPreprocessing.jl`, `ERA5LandStations.jl`,
      `ERA5LandProcessing.jl`, `ERA5LandCovariates.jl`, `MOD13A2NDVIProcessing.jl`,
      `AppEEARSNDVI.jl`, `TerrainFeatures.jl`, `LandformClassification.jl` (DEM relief regions for
@@ -198,8 +198,10 @@ which git matches at any depth, so files there would be silently untracked.
      `annotate_selection!`, `append_selection!`, `selection_schemes`), `ERA5VariableSelection.jl`,
      `NDVIVariableSelection.jl`, `JointVariableSelection.jl`.
    - `models/`: `TraditionalInterpolation.jl`, `DEMTerrainExperiment.jl`,
-     `JointCovariateModels.jl` — everything that fits something — plus `CovariateGroups.jl`, the
-     group/column/family vocabulary the fitting and the selection sides share.
+     `JointCovariateModels.jl`, `SatelliteFusion.jl` (least-squares or equal-weight merge of
+     several products into one anchor) — everything that fits something — plus
+     `CovariateGroups.jl`, the group/column/family vocabulary the fitting and the selection sides
+     share.
    - `util/TableIO.jl`: `write_csv_atomic` and the case-insensitive `column` lookup, shared by
      seven modules across `sources/` and `mger/`.
    - `benchmark/BenchmarkDiagnostics.jl`, which reads a finished run's artefacts. It shares that
@@ -223,6 +225,23 @@ fragments sharing one namespace, not modules, so a name defined in a later file 
 an earlier one; include order only has to put shared consts and structs first.
 `InterpolationBenchmarkHurdle.jl` holds the deliberately-disabled `hurdle_gwr` model, which is
 absent from `BENCHMARK_RUNS` and unreachable in a normal run.
+
+Three opt-in flags widen what a run reports without moving any pre-existing number (the end-to-end
+test asserts every incumbent metric row is identical with them on):
+
+- `--satellite-wet-blend` adds `blend_residual_gwr`, `blend_mixed_gwr` and `blend_mgwr`: where the
+  satellite reports rain, the anchored prediction is blended toward `adw`, with the weight chosen
+  per fold on the inner selection split (`blend_selection.csv`).
+- `--blend-axis agreement_envelope` adds `blend_agrenv_*` beside them, with one weight per band of
+  (how many products call the cell wet) x (their maximum).
+- `--fused-anchor` adds the derived products `MERGED_OLS` and `MERGED_MEAN`, whose anchor is a
+  combination of FY4B, GPM and GSMaP. The OLS coefficients are fitted inside every fold on its
+  training stations only (`fused_anchor_selection.csv`), so a held-out gauge never reaches its own
+  anchor; it needs nested covariate selection. `run_claim_reassessment.jl` assesses every product
+  the run scored, derived ones included.
+
+Blended methods are scored on the shared mask but never join `MASK_METHODS`, so they cannot move
+another method's denominator.
 
 ### Loading `src/` from a script or test
 

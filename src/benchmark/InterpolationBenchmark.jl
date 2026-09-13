@@ -10,6 +10,7 @@ load_pipeline("MGERPipeline")
 load_standalone_modules(
     "TraditionalInterpolation", "DEMTerrainExperiment", "JointCovariateModels",
     "ERA5VariableSelection", "NDVIVariableSelection", "JointVariableSelection",
+    "SatelliteFusion",
 )
 
 using .TraditionalInterpolation
@@ -20,6 +21,7 @@ using .DEMTerrainExperiment: mixed_gwr_predict, multiscale_gwr_predict
 using .DEMTerrainExperiment: select_mixed_bandwidth, select_multiscale_bandwidths
 using .JointCovariateModels
 using .JointVariableSelection: JointSelectionConfig, select_joint_covariates
+using .SatelliteFusion
 
 # The benchmark's implementation is split across concern-specific files (config, fold-splitting,
 # DEM, joint-covariates, predictors, tuning, metrics, bootstrap, orchestrator) purely for

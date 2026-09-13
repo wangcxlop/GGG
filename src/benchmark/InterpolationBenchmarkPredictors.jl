@@ -269,3 +269,227 @@ function inner_selection_prediction(
     end)
     return is_joint ? out_of_fold[:, columns] : out_of_fold
 end
+
+"""
+Blend a residual-family prediction toward a gauge-only one on the cells the satellite calls wet.
+
+`lambda = 0` returns `prediction` untouched, `lambda = 1` replaces it with `fallback` on those
+cells and leaves the satellite-dry cells alone either way. The test is on the satellite, which is
+knowable at prediction time - this is a model, not an oracle.
+
+A NaN in `prediction` or the satellite propagates. A NaN in `fallback` does not: the cell simply
+keeps its unblended prediction, so a fallback that failed on some cells cannot shrink the blended
+method's coverage below its source's. That matters because coverage feeds the run's status rows.
+"""
+function satellite_wet_blend_prediction(
+    y_sat::Matrix{Float64}, prediction::Matrix{Float64}, fallback::Matrix{Float64},
+    lambda::Float64, threshold::Float64,
+)
+    size(prediction) == size(y_sat) == size(fallback) || throw(DimensionMismatch(
+        "satellite, prediction and fallback must have the same shape",
+    ))
+    out = similar(prediction)
+    @inbounds for index in eachindex(prediction)
+        satellite = y_sat[index]
+        predicted = prediction[index]
+        other = fallback[index]
+        if isnan(satellite) || isnan(predicted)
+            out[index] = NaN
+        elseif satellite >= threshold && !isnan(other)
+            out[index] = (1 - lambda) * predicted + lambda * other
+        else
+            out[index] = predicted
+        end
+    end
+    return out
+end
+
+"""
+Blend toward the fallback with one weight per band, the band read off a precomputed matrix.
+
+The vector-weight twin of `satellite_wet_blend_prediction`, and it keeps that function's rules
+exactly: band 0 is never touched, a NaN prediction propagates, and a NaN fallback leaves the cell
+at its unblended value rather than poisoning it. That last one is what makes the per-band
+selection in `select_blend_lambdas` exact - the set of finite cells does not move as the weights
+move, so pooled SSE is additive over the bands and each band minimises independently.
+
+`band` is `0` for a cell no weight reaches, and otherwise an index into `lambdas`.
+"""
+function banded_blend_prediction(
+    band::Matrix{Int}, prediction::Matrix{Float64}, fallback::Matrix{Float64},
+    lambdas::Vector{Float64},
+)
+    size(prediction) == size(band) == size(fallback) || throw(DimensionMismatch(
+        "band, prediction and fallback must have the same shape",
+    ))
+    out = similar(prediction)
+    @inbounds for index in eachindex(prediction)
+        predicted = prediction[index]
+        other = fallback[index]
+        position = band[index]
+        if isnan(predicted)
+            out[index] = NaN
+        elseif position == 0 || isnan(other)
+            out[index] = predicted
+        else
+            1 <= position <= length(lambdas) || throw(BoundsError(lambdas, position))
+            lambda = lambdas[position]
+            out[index] = (1 - lambda) * predicted + lambda * other
+        end
+    end
+    return out
+end
+
+"""
+Band index per cell for `axis`, from the source products the fusion also draws on.
+
+`:constant` reproduces the scalar intervention set exactly - band 1 wherever the *target's* own
+anchor calls the cell wet - so a one-band run of the banded path is the scalar path.
+
+`:agreement_envelope` bands on the source products instead: `(agreement - 1) * 3 + envelope`,
+where `agreement` counts how many products call the cell wet and `envelope` places `max` over them
+in `BLEND_ENVELOPE_EDGES`. A NaN source counts as not wet rather than poisoning the cell, so a
+cell can still be reached when one product is missing and the count is then a lower bound - which
+biases the weight toward the unblended model rather than toward blending on absent evidence. Any
+product being wet puts the envelope at or above the first edge, so a nonzero agreement always
+pairs with a nonzero envelope band.
+"""
+function blend_band_matrix(
+    axis::Symbol, y_sat::Matrix{Float64}, sources::Vector{Matrix{Float64}}, threshold::Float64,
+)
+    axis in BLEND_AXES || throw(ArgumentError("unknown blend axis: $axis"))
+    out = zeros(Int, size(y_sat))
+    if axis === :constant
+        @inbounds for index in eachindex(out)
+            value = y_sat[index]
+            out[index] = (isnan(value) || value < threshold) ? 0 : 1
+        end
+        return out
+    end
+    isempty(sources) && throw(ArgumentError("$axis needs the source products to band on"))
+    for source in sources
+        size(source) == size(y_sat) ||
+            throw(DimensionMismatch("every source product must have the anchor's shape"))
+    end
+    n_envelope = length(BLEND_ENVELOPE_EDGES)
+    @inbounds for index in eachindex(out)
+        agreement = 0
+        envelope = -Inf
+        for source in sources
+            value = source[index]
+            isnan(value) && continue
+            envelope = max(envelope, value)
+            value >= threshold && (agreement += 1)
+        end
+        agreement == 0 && continue
+        agreement = min(agreement, 3)
+        band = 1
+        for (position, edge) in enumerate(BLEND_ENVELOPE_EDGES)
+            envelope >= edge && (band = position)
+        end
+        out[index] = (agreement - 1) * n_envelope + band
+    end
+    return out
+end
+
+"""
+Choose one blending weight per band on the inner selection split.
+
+Scores the cells where the source and the fallback are both finite, as the scalar version does, so
+the choice is not partly a question of which one dropped the harder cells. Each band's weight is
+then minimised over `lambdas` independently, which is exact rather than a shortcut: see
+`banded_blend_prediction` for why the bands separate.
+
+Ties go to the smaller weight, matching `select_blend_lambda`: at equal error the answer that
+departs less from the fitted model is the one to prefer, and it keeps the choice off the order of
+the grid. A band with no scorable cell keeps weight 0, i.e. is left unblended - the same answer a
+fold that cannot be helped gets.
+
+Returns `nothing` when no cell is scorable at all, which the caller reports as a skipped fold.
+"""
+function select_blend_lambdas(
+    y_obs::Matrix{Float64}, y_sat::Matrix{Float64}, band::Matrix{Int},
+    prediction::Matrix{Float64}, fallback::Matrix{Float64}, lambdas::Vector{Float64},
+    n_bands::Int; time_weights::Union{Nothing,Vector{Float64}}=nothing,
+)
+    shared = .!isnan.(y_obs) .& .!isnan.(y_sat) .&
+        .!isnan.(prediction) .& .!isnan.(fallback)
+    any(shared) || return nothing
+    scored_band = ifelse.(shared, band, 0)
+    chosen = zeros(Float64, n_bands)
+    for target in 1:n_bands
+        best_sse = Inf
+        best_lambda = 0.0
+        for lambda in lambdas
+            sse = 0.0
+            count = 0
+            @inbounds for index in eachindex(scored_band)
+                scored_band[index] == target || continue
+                difference = (1 - lambda) * prediction[index] + lambda * fallback[index] -
+                    y_obs[index]
+                sse += difference * difference
+                count += 1
+            end
+            count == 0 && continue
+            if sse < best_sse - 1e-12
+                best_sse = sse
+                best_lambda = lambda
+            end
+        end
+        chosen[target] = best_lambda
+    end
+    restricted_prediction = ifelse.(shared, prediction, NaN)
+    restricted_fallback = ifelse.(shared, fallback, NaN)
+    blended = banded_blend_prediction(
+        scored_band, restricted_prediction, restricted_fallback, chosen,
+    )
+    best = _candidate_metrics(y_obs, y_sat, blended; time_weights)
+    unblended = _candidate_metrics(y_obs, y_sat, restricted_prediction; time_weights)
+    return (;
+        lambda=chosen[1], lambdas=chosen, inner_RMSE=best.RMSE, inner_MAE=best.MAE,
+        unblended_RMSE=unblended.RMSE, n=best.n, coverage=best.coverage,
+        wet_cells=count(index -> scored_band[index] > 0, eachindex(scored_band)),
+    )
+end
+
+"""
+Choose the blending weight on the inner selection split.
+
+Scores every candidate in `lambdas` on the cells where the source and the fallback are both finite,
+so the choice is not partly a question of which one dropped the harder cells - the same discipline
+`select_auto_method` applies to its contenders.
+
+Ties go to the smaller `lambda`: at equal inner RMSE the answer that departs less from the fitted
+model is the one to prefer, and it keeps the choice from depending on the order of the grid.
+
+Returns `nothing` when no cell is scorable, which the caller reports as a skipped fold rather than
+defaulting to a weight.
+"""
+function select_blend_lambda(
+    y_obs::Matrix{Float64}, y_sat::Matrix{Float64}, prediction::Matrix{Float64},
+    fallback::Matrix{Float64}, lambdas::Vector{Float64}, threshold::Float64;
+    time_weights::Union{Nothing,Vector{Float64}}=nothing,
+)
+    shared = .!isnan.(y_obs) .& .!isnan.(y_sat) .&
+        .!isnan.(prediction) .& .!isnan.(fallback)
+    any(shared) || return nothing
+    restricted_prediction = ifelse.(shared, prediction, NaN)
+    restricted_fallback = ifelse.(shared, fallback, NaN)
+    scored = NamedTuple[]
+    for lambda in lambdas
+        blended = satellite_wet_blend_prediction(
+            y_sat, restricted_prediction, restricted_fallback, lambda, threshold,
+        )
+        push!(scored, merge((; lambda),
+            _candidate_metrics(y_obs, y_sat, blended; time_weights)))
+    end
+    order = sortperm(scored; by=row -> (row.RMSE, row.MAE, row.lambda))
+    best = scored[order[1]]
+    unblended = scored[findfirst(row -> row.lambda == 0.0, scored)]
+    return (;
+        lambda=best.lambda, inner_RMSE=best.RMSE, inner_MAE=best.MAE,
+        unblended_RMSE=unblended.RMSE, n=best.n, coverage=best.coverage,
+        wet_cells=count(index -> shared[index] && y_sat[index] >= threshold,
+            eachindex(shared)),
+    )
+end

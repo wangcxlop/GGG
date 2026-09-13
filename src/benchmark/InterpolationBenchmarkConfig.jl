@@ -37,6 +37,84 @@ _output_method(mode::AbstractString, method::AbstractString) =
     method in ("mixed_gwr", "mgwr") ? String(method) :
         (mode == "direct" ? String(method) : "residual_$(method)")
 
+# `satellite_wet_blend`: on the cells the satellite calls wet, blend the residual family's
+# prediction toward a gauge-only interpolator.
+#
+# Not another estimator - a combiner over two that are already fitted. The satellite anchor enters
+# the residual family as a fixed offset, so a satellite false alarm reaches the prediction in full;
+# falling back toward a gauge-only estimate where the satellite reports rain is the one lever that
+# lifted RMSE and POD together in the replays that motivated this. A location-varying satellite
+# coefficient cannot substitute: the response contains `-y_sat`, so it discounts genuine wet/wet
+# cells as readily as false alarms.
+#
+# `adw` is the fallback because it was the best of the gauge-only estimators the replay swept. The
+# sources are the three anchored methods; `gwr` and the traditional baselines carry no anchor, so
+# there is nothing to blend away.
+const BLEND_SOURCE_METHODS = ["residual_gwr", "mixed_gwr", "mgwr"]
+const BLEND_FALLBACK_METHOD = "adw"
+# The replay's winners sat at 0.7-0.8, well inside this grid.
+const BLEND_LAMBDAS = collect(0.0:0.1:1.0)
+
+# The axes a blending weight may be conditioned on. `:constant` is one weight for every
+# satellite-wet cell, which is what `--satellite-wet-blend` does on its own.
+#
+# `:agreement_envelope` gives the weight one value per band of (how many of the source products
+# call the cell wet) x (`max` over them, on `BLEND_ENVELOPE_EDGES`). Keying on the target product's
+# own `y_sat` moves pooled RMSE and heavy-rain skill against each other, because the satellite's own
+# magnitude is exactly what fails on the cells worth protecting; how many *independent* products
+# agree is not keyed on that failure. P(gauge wet) runs 0.019 / 0.149 / 0.384 / 0.571 as none / one /
+# two / three products call a cell wet.
+#
+# Note what this widens: a cell the target product calls dry but another calls wet is in band 1
+# and is therefore blended, where the constant axis would never have touched it. That is a
+# different intervention set, not just a different weight on the same one.
+const BLEND_AXES = (:constant, :agreement_envelope)
+
+"""Band edges of the three-product envelope (mm/h)."""
+const BLEND_ENVELOPE_EDGES = [0.1, 2.5, 8.0]
+
+"""How many bands an axis carries. `:constant` is one band covering every satellite-wet cell."""
+blend_band_count(axis::Symbol) = axis === :constant ? 1 :
+    axis === :agreement_envelope ? 3 * length(BLEND_ENVELOPE_EDGES) :
+    throw(ArgumentError("unknown blend axis: $axis"))
+
+"""Short tag an axis contributes to a method name; the constant axis keeps the plain name."""
+blend_axis_tag(axis::Symbol) = axis === :constant ? "" : "agrenv_"
+
+"""Method name a blended counterpart of `method` reports under."""
+_blend_method(method::AbstractString, axis::Symbol=:constant) =
+    "blend_$(blend_axis_tag(axis))$(method)"
+
+# Products derived by fusing the real ones, rather than read from a file. See `SatelliteFusion`
+# for why both variants exist and why neither is a tuned parameter.
+_fused_product_name(variant::Symbol) = "MERGED_$(uppercase(String(variant)))"
+
+"""
+The methods a run reports: `BENCHMARK_METHODS`, plus the blended counterparts when
+`satellite_wet_blend` is on.
+
+A function of the config rather than a longer const, so a run with the option off writes exactly
+the files and metric rows it wrote before the option existed. Adding the blends unconditionally
+would put all-NaN `oof_blend_*.csv` and NaN metric rows into every baseline.
+"""
+function benchmark_methods(cfg)
+    methods = copy(BENCHMARK_METHODS)
+    cfg.satellite_wet_blend && append!(methods, [_blend_method(method, axis)
+        for axis in cfg.blend_axes for method in BLEND_SOURCE_METHODS])
+    return methods
+end
+
+"""
+The products a run scores: the ones with files, plus one derived product per fusion variant.
+
+Sorted so the order does not depend on how the variants were listed, matching
+`load_global_common_product_data`, which sorts `sat_paths`.
+"""
+benchmark_products(cfg, products::Vector{String}) = isempty(cfg.fused_anchor_variants) ?
+    products :
+    vcat(products, sort([_fused_product_name(variant)
+                         for variant in cfg.fused_anchor_variants]))
+
 const AUTO_METHOD = "auto"
 # The runs `auto` may choose between: the GWR family only.
 #
@@ -68,6 +146,22 @@ Base.@kwdef struct InterpolationBenchmarkConfig
     # once on the full station set (`joint_covariates.spec_path`). Exactly one of the two must
     # be set when `joint_covariates` is enabled.
     joint_selection::Union{Nothing,JointSelectionConfig} = nothing
+    # Report blended counterparts of the anchored methods: on satellite-wet cells, blend toward
+    # `BLEND_FALLBACK_METHOD`. The blending weight is chosen inside the training fold, on the same
+    # inner selection split `auto` uses - reading it off the held-out cells would be the
+    # selection-on-test that `auto` exists to avoid. Off by default; output directory suffix
+    # `_satwetblend`.
+    satellite_wet_blend::Bool = false
+    # Which axes the blending weight is conditioned on. One blended method is reported per axis
+    # per source, so a run can carry more than one rule and have them compared on identical cells.
+    # That is nearly free: the only fit `_run_fold_blend!` adds is the fallback's inner
+    # prediction, computed once, and everything after it is arithmetic over matrices already in
+    # hand. Ignored unless `satellite_wet_blend` is set.
+    blend_axes::Vector{Symbol} = [:constant]
+    # Fusion variants to add as derived products, each fitted inside every fold on that fold's
+    # training stations alone (see `SatelliteFusion`). Empty means the run scores only the
+    # products that have files. Output directory suffix `_fusedanchor`.
+    fused_anchor_variants::Vector{Symbol} = Symbol[]
     # Acknowledges that this run's numbers are not admissible as a result.
     #
     # `joint_covariates.spec_path` names a variable set and local/global role map screened over
@@ -265,6 +359,38 @@ function _validate_benchmark_config(cfg::InterpolationBenchmarkConfig, n_station
         all(>(1), cfg.dem.bandwidth_candidates) ||
             throw(ArgumentError("DEM bandwidth candidates must exceed one neighbor"))
     end
+    # Refused on the legacy DEM path for the same reason `auto` is skipped there:
+    # `inner_selection_prediction` deliberately carries no `dem_context`, so there is no way to
+    # choose a blending weight inside the fold.
+    cfg.satellite_wet_blend && cfg.dem !== nothing && throw(ArgumentError(
+        "satellite_wet_blend needs an inner selection split to choose its weight on, which the " *
+        "legacy DEM path does not provide",
+    ))
+    isempty(cfg.blend_axes) && throw(ArgumentError("blend_axes must not be empty"))
+    all(axis -> axis in BLEND_AXES, cfg.blend_axes) ||
+        throw(ArgumentError("blend_axes must be drawn from $BLEND_AXES"))
+    length(unique(cfg.blend_axes)) == length(cfg.blend_axes) ||
+        throw(ArgumentError("blend_axes must be unique"))
+    all(variant -> variant in FUSION_VARIANTS, cfg.fused_anchor_variants) ||
+        throw(ArgumentError("fused_anchor_variants must be drawn from $FUSION_VARIANTS"))
+    length(unique(cfg.fused_anchor_variants)) == length(cfg.fused_anchor_variants) ||
+        throw(ArgumentError("fused_anchor_variants must be unique"))
+    # A derived product has no file, so a fixed full-data specification has no role map for it and
+    # `joint_inputs.specification.role_maps[product]` would throw mid-run. Nested per-fold
+    # selection screens whatever product it is handed, which is what these need.
+    isempty(cfg.fused_anchor_variants) || cfg.joint_covariates === nothing ||
+        cfg.joint_selection !== nothing || throw(ArgumentError(
+            "fused anchor products need nested per-fold covariate selection: a product built " *
+            "from other products has no entry in a fixed full-data specification, so " *
+            "joint_inputs.specification.role_maps would have nothing to hand it",
+        ))
+    # 0.0 is load-bearing twice over: it is the "do not blend" option, so a fold that cannot be
+    # helped is not forced to blend anyway, and it is the reference `unblended_RMSE` that
+    # `blend_selection.csv` reports the chosen weight against.
+    0.0 in BLEND_LAMBDAS ||
+        throw(ArgumentError("BLEND_LAMBDAS must contain 0.0, the unblended identity"))
+    all(lambda -> 0.0 <= lambda <= 1.0, BLEND_LAMBDAS) ||
+        throw(ArgumentError("BLEND_LAMBDAS must lie in [0, 1]"))
     if cfg.joint_covariates !== nothing
         joint = cfg.joint_covariates
         xor(joint.spec_path === nothing, cfg.joint_selection === nothing) || throw(ArgumentError(

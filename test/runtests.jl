@@ -23,6 +23,7 @@ end
 include("test-study-area.jl")
 include("test-mger-five-kernels.jl")
 include("test-interpolation-benchmark.jl")
+include("test-satellite-fusion.jl")
 include("test-appeears-ndvi.jl")
 include("test-era5-land-stations.jl")
 include("test-era5-land-processing.jl")

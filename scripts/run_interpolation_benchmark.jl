@@ -25,11 +25,20 @@ function benchmark_config(
     nested_covariates::Bool=false, local_grid::Bool=false,
     stratified_tuning_weights::Bool=false, legacy_tuning_geometry::Bool=false,
     mgwr_grouping::Symbol=:intercept_only, residual_shrinkage::Bool=true,
-    unsupported_local_target::Symbol=:missing,
+    unsupported_local_target::Symbol=:missing, satellite_wet_blend::Bool=false,
+    blend_axes::Vector{Symbol}=[:constant], fused_anchor::Bool=false,
 )
     mode in (:smoke, :full) || throw(ArgumentError("mode must be :smoke or :full"))
     nested_covariates && legacy_dem && throw(ArgumentError(
         "--nested-covariates only applies to the joint-covariate path, not --legacy-dem",
+    ))
+    satellite_wet_blend && legacy_dem && throw(ArgumentError(
+        "--satellite-wet-blend blends the joint-covariate path's anchored methods, " *
+        "not --legacy-dem",
+    ))
+    satellite_wet_blend || blend_axes == [:constant] || throw(ArgumentError(
+        "--blend-axis only has an effect with --satellite-wet-blend, which produces the " *
+        "blended methods it would weight",
     ))
     smoke = mode == :smoke
     # Repeated runs, and nested-selection runs, get their own directory so they never overwrite
@@ -53,6 +62,12 @@ function benchmark_config(
             # which is archived before the corrected run is made rather than being protected by
             # a suffix - the two are on the same 13471-hour grid and are meant to be compared.
             (unsupported_local_target === :zero ? "_legacyzero" : "") *
+            # Keyed on the opt-in: a run reporting blended methods, a second blending rule, or a
+            # product built by fusing the others lands somewhere new rather than beside the
+            # baseline it is measured against.
+            (satellite_wet_blend ? "_satwetblend" : "") *
+            (blend_axes == [:constant] ? "" : "_blendagrenv") *
+            (fused_anchor ? "_fusedanchor" : "") *
             (repeats > 1 ? "_repeats$(repeats)" : ""),
     )
     mkpath(outdir)
@@ -205,6 +220,9 @@ function benchmark_config(
         dem=dem,
         joint_covariates=joint,
         joint_selection=joint_selection,
+        satellite_wet_blend=satellite_wet_blend,
+        blend_axes=blend_axes,
+        fused_anchor_variants=fused_anchor ? collect(Symbol, FUSION_VARIANTS) : Symbol[],
         # The joint path without nested selection reads a full-data spec, which the config
         # validator refuses unless the run admits it is exploratory. --no-nested-covariates is
         # exactly that admission, so it is the only way this turns on.
@@ -244,6 +262,24 @@ function parse_mgwr_grouping(args)
         "--mgwr-grouping expects split, shared, or intercept_only, got $text",
     ))
     return grouping
+end
+
+"""
+Parse `--blend-axis <agreement_envelope>`; the constant axis is always reported alongside it.
+
+Only the non-constant axes are nameable here: `:constant` is not something to select, it is what
+every blended run produces.
+"""
+function parse_blend_axis(args)
+    index = findfirst(startswith("--blend-axis"), args)
+    index === nothing && return :constant
+    text = args[index] == "--blend-axis" ? get(args, index + 1, "") :
+        split(args[index], "=", limit=2)[2]
+    axis = Symbol(text)
+    axis === :agreement_envelope || throw(ArgumentError(
+        "--blend-axis expects agreement_envelope, got $text",
+    ))
+    return axis
 end
 
 """Parse `--repeats N`; absent means a single partition (the historical behaviour)."""
@@ -306,9 +342,21 @@ function main(args=ARGS)
     # `mgwr`'s reported GPM own-coverage from an honest 0.79 to 0.9985. See the field comment in
     # `JointCovariateBenchmarkConfig`. --legacy-unsupported-zero reproduces the pre-fix numbers.
     unsupported_local_target = "--legacy-unsupported-zero" in args ? :zero : :missing
+    # The residual family takes the satellite as a fixed offset, so a satellite false alarm reaches
+    # its prediction in full. --satellite-wet-blend reports blended counterparts that lean toward
+    # `adw` where the satellite reports rain, with the weight chosen inside the training fold.
+    satellite_wet_blend = "--satellite-wet-blend" in args
+    # A second blending rule, keyed on how many *independent* products call a cell wet rather than
+    # on the target product's own magnitude. Reported beside the constant rule, not instead of it.
+    blend_axes = "--blend-axis" in args || any(startswith("--blend-axis="), args) ?
+        [:constant, parse_blend_axis(args)] : Symbol[:constant]
+    # Add MERGED_OLS and MERGED_MEAN: products whose anchor is a fusion of the three real ones,
+    # fitted per fold on training stations only. See `SatelliteFusion` for why both variants exist.
+    fused_anchor = "--fused-anchor" in args
     cfg = benchmark_config(mode; with_random, legacy_dem, repeats, nested_covariates,
         local_grid, stratified_tuning_weights, legacy_tuning_geometry, mgwr_grouping,
-        residual_shrinkage, unsupported_local_target)
+        residual_shrinkage, unsupported_local_target, satellite_wet_blend, blend_axes,
+        fused_anchor)
     !legacy_dem && Threads.nthreads() == 1 && @warn(
         "Joint dynamic models are compute intensive; use julia -t auto for parallel hourly fits",
     )
@@ -324,6 +372,9 @@ function main(args=ARGS)
         "mgwr_grouping=$mgwr_grouping, " *
         "residual_shrinkage=$residual_shrinkage, " *
         "unsupported_local_target=$unsupported_local_target, " *
+        "satellite_wet_blend=$satellite_wet_blend, " *
+        "blend_axes=$(join(blend_axes, "+")), " *
+        "fused_anchor=$fused_anchor, " *
         "output=$(cfg.mger.outdir)")
     result = run_interpolation_benchmark(cfg)
     println("Finished: $(nrow(result.metrics)) metric rows, $(nrow(result.scans)) scan rows")
