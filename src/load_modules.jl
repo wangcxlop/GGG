@@ -35,6 +35,7 @@ function standalone_module_dependencies(name::AbstractString)
     name in ("AppEEARSNDVI", "ERA5LandStations", "FY4BPreprocessing", "MGERDataPrep",
              "MOD13A2NDVIProcessing", "StudyArea", "TerrainFeatures") &&
         return ["TableIO"]
+    name == "HeavyRainEvents" && return ["TraditionalInterpolation"]
     return String[]
 end
 
