@@ -36,6 +36,8 @@ function standalone_module_dependencies(name::AbstractString)
              "MOD13A2NDVIProcessing", "StudyArea", "TerrainFeatures") &&
         return ["TableIO"]
     name == "HeavyRainEvents" && return ["TraditionalInterpolation"]
+    name == "LandformClassification" && return ["TerrainFeatures"]
+    name == "SatelliteTemporalEvaluation" && return ["HeavyRainEvents"]
     return String[]
 end
 

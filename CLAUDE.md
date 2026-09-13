@@ -192,7 +192,8 @@ which git matches at any depth, so files there would be silently untracked.
    `src/load_modules.jl`, never through the `MixedGWR` module. Nineteen of them:
    - `sources/`: `StudyArea.jl`, `FY4BPreprocessing.jl`, `ERA5LandStations.jl`,
      `ERA5LandProcessing.jl`, `ERA5LandCovariates.jl`, `MOD13A2NDVIProcessing.jl`,
-     `AppEEARSNDVI.jl`, `TerrainFeatures.jl` — one data source or ingest stage each.
+     `AppEEARSNDVI.jl`, `TerrainFeatures.jl`, `LandformClassification.jl` (DEM relief regions for
+     the gauges, window chosen by mean change-point) — one data source or ingest stage each.
    - `selection/`: `SelectionScaffolding.jl` (bookkeeping shared by the searches —
      `annotate_selection!`, `append_selection!`, `selection_schemes`), `ERA5VariableSelection.jl`,
      `NDVIVariableSelection.jl`, `JointVariableSelection.jl`.
@@ -204,6 +205,9 @@ which git matches at any depth, so files there would be silently untracked.
    - `benchmark/BenchmarkDiagnostics.jl`, which reads a finished run's artefacts. It shares that
      directory with the fragments below but not their discipline: it is a real module and takes no
      part in their include chain.
+   - `benchmark/SatelliteTemporalEvaluation.jl`: hourly, event, diurnal and regional-series scores
+     of the satellite products against the gauges, stratified by intensity class, season and
+     landform region. Same standalone discipline as `BenchmarkDiagnostics`.
    - `mger/MGERDataPrep.jl`, beside the pipeline it serves.
 
 3. **`MGERPipeline.jl` and `InterpolationBenchmark.jl` are *not* modules** — they are top-level
