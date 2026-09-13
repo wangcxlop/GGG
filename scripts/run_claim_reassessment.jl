@@ -35,7 +35,33 @@ const SCHEME = "balanced_spatial"
 # directories that still contain it can be re-assessed; methods absent from disk are skipped.
 const ASSESSED_METHODS = [
     "gwr", "residual_gwr", "mixed_gwr", "mgwr", "hurdle_gwr",
+    # The blended counterparts, present only in a `--satellite-wet-blend` run. Listed here rather
+    # than assessed inside the benchmark because `paired_comparisons.csv` and
+    # `claim_assessment.csv` are produced for `DEFAULT_CLAIM_METHOD` alone, and widening those
+    # would change files every earlier run also writes. Methods absent from disk are skipped, so
+    # this costs nothing on a run that did not produce them.
+    "blend_residual_gwr", "blend_mixed_gwr", "blend_mgwr",
+    # The banded counterparts, present only in a `--blend-axis` run. Same reasoning.
+    "blend_agrenv_residual_gwr", "blend_agrenv_mixed_gwr", "blend_agrenv_mgwr",
 ]
+
+"""
+Products this run actually scored, paired with the directory each one wrote.
+
+Read off the run's own `metrics_pooled.csv` rather than off `sat_paths`, for two reasons. A
+`--fused-anchor` run scores derived products that have no file and so cannot appear in
+`sat_paths` at all; and the product *string* is load-bearing even for the ones that do, because
+`paired_bootstrap_rows` seeds its RNG with `sum(codeunits(product))`. Recovering the name by
+upper-casing a directory would silently turn `GSMaP` into `GSMAP` and change every draw.
+"""
+function assessed_products(run_dir::AbstractString, scheme_dir::AbstractString)
+    path = joinpath(run_dir, "metrics_pooled.csv")
+    isfile(path) || error("no metrics_pooled.csv in $run_dir; the run did not finish")
+    names = unique(String.(CSV.read(path, DataFrame; select=[:product]).product))
+    present = [name for name in names if isdir(joinpath(scheme_dir, lowercase(name)))]
+    isempty(present) && error("none of $(names) has a directory under $scheme_dir")
+    return sort(present)
+end
 
 """The `MGERConfig` the full benchmark run used, so the common station/time grid matches."""
 function study_config(outdir::AbstractString)
@@ -75,6 +101,11 @@ This is also what the shared evaluation mask requires, since `raw` is one of the
 so it is the common denominator for "did this method predict where it could?" — unlike the
 `coverage` column in `metrics_pooled.csv`, which divides by the whole station x time grid and
 which every method inherits from direct `gwr`'s failures.
+
+Read off the stored `raw` matrix rather than the satellite file, so a derived product is treated
+the same way as one with a file. For a product with a file the two are the same numbers - the run
+assigns `predictions["raw"] .= y_sat` over the whole grid - while a fused product's anchor exists
+only per fold, and `oof_raw.csv` is where the run recorded it.
 """
 evaluable_cells(y_obs::Matrix{Float64}, y_sat::Matrix{Float64}) =
     .!isnan.(y_obs) .& .!isnan.(y_sat)
@@ -95,31 +126,15 @@ function scheme_directory(run_dir::AbstractString)
     error("no $SCHEME directory in $run_dir (looked for $flat and $nested)")
 end
 
-"""
-Per-station distance to the nearest station outside its own fold.
-
-`append_stratified_metrics!` needs this for the `nearest_train_km` stratum. The benchmark computes
-it in the fold loop and does not write it out, so it is rebuilt here from `split_common.csv`
-rather than passing `NaN` and leaving a whole stratum empty in the rebuilt table.
-"""
-function nearest_train_km(fold_of::Vector{Int}, lonlat::Matrix{Float64})
-    distance = fill(NaN, length(fold_of))
-    for fold in sort(unique(fold_of))
-        validation = findall(==(fold), fold_of)
-        training = findall(!=(fold), fold_of)
-        (isempty(validation) || isempty(training)) && continue
-        distance[validation] = nearest_training_distance(
-            lonlat[training, :], lonlat[validation, :])
-    end
-    return distance
-end
-
 function main(args=ARGS)
     run_dir = isempty(args) ? DEFAULT_RUN : abspath(args[1])
     outdir = benchmark_diagnostics_outdir(ROOT, run_dir)
 
     mger = study_config(outdir)
-    products, ids, product_data = load_global_common_product_data(mger)
+    # The three products with files define the common station/time grid, which every product in
+    # the run shares - a derived product is built on that grid by construction. Which products to
+    # *assess* is a separate question, answered from the run's own outputs below.
+    _, ids, product_data = load_global_common_product_data(mger)
     # Only `bootstrap_reps` and `seed` are read out of the config here; both must match the run
     # that wrote the artefacts or the bootstrap draws differ.
     cfg = InterpolationBenchmarkConfig(mger=mger, bootstrap_reps=2000, seed=20260627)
@@ -131,11 +146,16 @@ function main(args=ARGS)
     # (`seed + 1000 * baseline_index + sum(codeunits(product))`), so feeding it the lowercase
     # directory name would silently change every draw.
     scheme_dir = scheme_directory(run_dir)
+    products = assessed_products(run_dir, scheme_dir)
+    println("Assessing products: $(join(products, ", "))")
     predictions = Dict(product => load_predictions(
         joinpath(scheme_dir, lowercase(product)), ids) for product in products)
     masks = Dict(product => read_mask_matrix(
         joinpath(scheme_dir, lowercase(product), "common_evaluation_mask.csv"), ids)
         for product in products)
+    # Observations and the time axis are shared across products, so they come from whichever
+    # product the grid was loaded for; a derived product has no entry of its own in `product_data`.
+    grid = product_data[first(keys(product_data))]
     # Rebuilt for the `nearest_train_km` stratum of the metrics table assembled below.
     station_meta = load_station_meta(mger.station_meta_path;
         station_id_col=mger.station_id_col, lon_col=mger.lon_col, lat_col=mger.lat_col)
@@ -143,8 +163,12 @@ function main(args=ARGS)
     fold_map = read_fold_map(joinpath(scheme_dir, "split_common.csv"))
     fold_of = [fold_map[id] for id in ids]
     nearest_distance = nearest_train_km(fold_of, lonlat)
-    evaluable = Dict(product => evaluable_cells(
-        product_data[product].Y_obs, product_data[product].Y_sat) for product in products)
+    for product in products
+        haskey(predictions[product], "raw") ||
+            error("$product has no oof_raw.csv, so its anchor cannot be recovered")
+    end
+    evaluable = Dict(product => evaluable_cells(grid.Y_obs, predictions[product]["raw"])
+                     for product in products)
 
     bootstrap_rows = NamedTuple[]
     claim_frames = DataFrame[]
@@ -168,7 +192,6 @@ function main(args=ARGS)
         method_bootstrap_rows = NamedTuple[]
         for product in products
             haskey(predictions[product], method) || continue
-            data = product_data[product]
             mask = masks[product]
             n_evaluable = count(evaluable[product])
             own[product] = count(
@@ -192,13 +215,13 @@ function main(args=ARGS)
             ))
             for scored_method in vcat(TRADITIONAL_METHODS, [method])
                 append_stratified_metrics!(
-                    method_metric_rows, SCHEME, product, scored_method, data.times, data.Y_obs,
+                    method_metric_rows, SCHEME, product, scored_method, grid.times, grid.Y_obs,
                     predictions[product][scored_method], claim_mask, nearest_distance,
                     cfg.event_thresholds; repeat=1, seed=cfg.seed,
                 )
             end
             append!(method_bootstrap_rows, paired_bootstrap_rows(
-                cfg, SCHEME, product, data.times, data.Y_obs, predictions[product], claim_mask;
+                cfg, SCHEME, product, grid.times, grid.Y_obs, predictions[product], claim_mask;
                 method, pairwise_mask=true,
             ))
             println("  $method / $product: own coverage " *

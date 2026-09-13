@@ -304,6 +304,36 @@ function assess_gwr_claim(
         # Worst case across baselines, matching what the gate above requires.
         heavy_relative_improvement = minimum(values(heavy_improvements))
 
+        # The same gate read off the bootstrap interval instead of the point estimate, reported
+        # beside the point version rather than replacing it.
+        #
+        # The overall gate above demands `ci_low > 0 && pvalue_holm < 0.05`; the heavy gate demands
+        # >= 5% of a bare ratio and consults no uncertainty at all - even though
+        # `paired_bootstrap_rows` already emits a heavy row, with its interval, for every
+        # (product, method, baseline). The heavy stratum is 0.25% of the cells and its interval is
+        # wide against the threshold (a half-width near 1.8 points against a 5-point bar), so a
+        # point estimate near 7% is needed before >= 5% is supported. `heavy_win_count` is left
+        # exactly as it was so earlier runs stay reproducible; read `heavy_win_count_ci` for what
+        # the data support.
+        heavy_bootstrap = filter(row ->
+            row.scheme == "balanced_spatial" && row.product == product &&
+            row.stratum == "heavy" && row.repeat == repeat_value &&
+            (!bootstrap_has_method || row.method == method),
+            bootstrap,
+        )
+        # Keyed by baseline so `ci_low` and the denominator it is a fraction of always come from
+        # the same row; joining them across rows is the one way this could look right and be wrong.
+        heavy_ci_per_baseline = Dict(String(row.baseline) => let
+                base = row.RMSE_baseline
+                isfinite(base) && base > 0 ? row.ci_low / base : NaN
+            end for row in eachrow(heavy_bootstrap))
+        heavy_win_count_ci = count(>=(0.05),
+            filter(isfinite, collect(values(heavy_ci_per_baseline))))
+        heavy_ok_ci = length(heavy_ci_per_baseline) == length(TRADITIONAL_METHODS) &&
+            heavy_win_count_ci == length(TRADITIONAL_METHODS)
+        heavy_relative_ci_low = isempty(heavy_ci_per_baseline) ? NaN :
+            minimum(values(heavy_ci_per_baseline))
+
         # Moderate: GWR is allowed to be marginally worse here (non-inferiority), but not by
         # more than 2% against any baseline.
         gwr_moderate = _one_metric(metrics, product, method, "rain_intensity", "moderate"; repeat=repeat_value).RMSE
@@ -348,6 +378,10 @@ function assess_gwr_claim(
         direction_improved = gwr_overall.RMSE < best_overall.RMSE
         product_supported = significant && heavy_ok && moderate_ok && majority_years &&
             event_not_degraded && coverage_acceptable
+        # The same conjunction with the interval-based heavy gate swapped in. Strictly stronger:
+        # it can only be true where `product_supported` already is.
+        product_supported_ci = significant && heavy_ok_ci && moderate_ok && majority_years &&
+            event_not_degraded && coverage_acceptable
         head = (;
             repeat=repeat_value, product, best_traditional=best_method,
             RMSE_best_traditional=best_overall.RMSE,
@@ -356,11 +390,13 @@ function assess_gwr_claim(
             overall_relative_improvement=(best_overall.RMSE - gwr_overall.RMSE) / best_overall.RMSE,
             paired_significant=significant, overall_win_count=overall_win_count,
             heavy_relative_improvement=heavy_relative_improvement, heavy_win_count=heavy_win_count,
+            heavy_relative_ci_low=heavy_relative_ci_low, heavy_win_count_ci=heavy_win_count_ci,
+            heavy_ok_ci=heavy_ok_ci,
             moderate_relative_degradation=moderate_relative_degradation,
             moderate_win_count=moderate_win_count,
             year_win_count=year_wins, year_count=length(year_levels), majority_years,
             event_not_degraded, event_win_count, common_coverage=gwr_overall.coverage,
-            coverage_acceptable, direction_improved, product_supported,
+            coverage_acceptable, direction_improved, product_supported, product_supported_ci,
         )
         push!(rows, if tagged
             merge((; method), head,
@@ -374,10 +410,14 @@ function assess_gwr_claim(
     supported_products = count(row -> row.product_supported, rows)
     improved_products = count(row -> row.direction_improved, rows)
     overall_supported = supported_products >= 2 && improved_products >= 2
+    supported_products_ci = count(row -> row.product_supported_ci, rows)
+    overall_supported_ci = supported_products_ci >= 2 && improved_products >= 2
     append!(all_rows, [merge(row, (;
         supported_product_count=supported_products,
         improved_product_count=improved_products,
         overall_claim_supported=overall_supported,
+        supported_product_count_ci=supported_products_ci,
+        overall_claim_supported_ci=overall_supported_ci,
     )) for row in rows])
     end
     return DataFrame(all_rows)

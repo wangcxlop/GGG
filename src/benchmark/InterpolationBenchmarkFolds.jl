@@ -262,6 +262,25 @@ function _selection_oof(
     return out_of_fold
 end
 
+"""
+Per-station distance to the nearest station outside its own fold.
+
+`append_stratified_metrics!` needs this for the `nearest_train_km` stratum. The benchmark computes
+it in the fold loop and does not write it out, so scripts that re-score a finished run rebuild it
+from `split_common.csv` rather than passing `NaN` and leaving a whole stratum empty.
+"""
+function nearest_train_km(fold_of::Vector{Int}, lonlat::Matrix{Float64})
+    distance = fill(NaN, length(fold_of))
+    for fold in sort(unique(fold_of))
+        validation = findall(==(fold), fold_of)
+        training = findall(!=(fold), fold_of)
+        (isempty(validation) || isempty(training)) && continue
+        distance[validation] = nearest_training_distance(
+            lonlat[training, :], lonlat[validation, :])
+    end
+    return distance
+end
+
 function _write_split(path::String, ids::Vector{String}, folds::Vector{Vector{String}}, scheme::Symbol)
     fold_map = Dict(id => fold for (fold, fold_ids) in enumerate(folds) for id in fold_ids)
     CSV.write(path, DataFrame(
