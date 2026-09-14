@@ -27,6 +27,75 @@ function _daily_bootstrap_delta(
     return deltas
 end
 
+"""
+Day-block bootstrap of the difference in detection skill, `treatment - baseline`, at one threshold.
+
+The categorical counterpart of `_daily_bootstrap_delta`. POD, FAR and CSI are ratios of pooled
+contingency counts, so a day is resampled as its (hits, misses, false alarms) for both predictions
+together: the pairing is kept, the hours and stations of one weather system stay in one block, and
+every replicate's scores are recomputed from the summed counts exactly as `metric_event` computes
+them from the cells (`>=` on both sides).
+
+Only days with at least one masked cell are resampled, matching `_daily_bootstrap_delta`.
+
+Returns `baseline` and `treatment` (POD, FAR, CSI on the full sample) and `deltas`, a `reps x 3`
+matrix of `treatment - baseline` for POD, FAR and CSI. A replicate whose denominator is empty scores
+NaN, so callers should summarise the finite values.
+"""
+function daily_bootstrap_event_delta(
+    rng::AbstractRNG, times::Vector{DateTime}, y_obs::Matrix{Float64},
+    baseline::Matrix{Float64}, treatment::Matrix{Float64}, mask::BitMatrix,
+    threshold::Float64, reps::Int,
+)
+    size(baseline) == size(y_obs) == size(treatment) == size(mask) || throw(DimensionMismatch(
+        "observations, predictions and mask must have the same shape",
+    ))
+    days = Date.(times)
+    unique_days = sort(unique(days))
+    # Columns: hits, misses, false alarms for the baseline, then the same for the treatment.
+    counts = zeros(Int, length(unique_days), 6)
+    cells = zeros(Int, length(unique_days))
+    for (day_index, day) in enumerate(unique_days)
+        for time in findall(==(day), days), station in axes(y_obs, 1)
+            mask[station, time] || continue
+            cells[day_index] += 1
+            observed = y_obs[station, time] >= threshold
+            for (offset, prediction) in ((0, baseline), (3, treatment))
+                estimated = prediction[station, time] >= threshold
+                if observed && estimated
+                    counts[day_index, offset + 1] += 1
+                elseif observed
+                    counts[day_index, offset + 2] += 1
+                elseif estimated
+                    counts[day_index, offset + 3] += 1
+                end
+            end
+        end
+    end
+
+    scores(hit, miss, false_alarm) = (
+        hit + miss > 0 ? hit / (hit + miss) : NaN,
+        hit + false_alarm > 0 ? false_alarm / (hit + false_alarm) : NaN,
+        hit + miss + false_alarm > 0 ? hit / (hit + miss + false_alarm) : NaN,
+    )
+    function paired_scores(rows)
+        total = vec(sum(@view(counts[rows, :]); dims=1))
+        return scores(total[1], total[2], total[3]), scores(total[4], total[5], total[6])
+    end
+
+    keep = findall(>(0), cells)
+    deltas = fill(NaN, reps, 3)
+    isempty(keep) && return (; baseline=(NaN, NaN, NaN), treatment=(NaN, NaN, NaN), deltas)
+    base_all, treat_all = paired_scores(keep)
+    for rep in 1:reps
+        base, treat = paired_scores(rand(rng, keep, length(keep)))
+        for metric in 1:3
+            deltas[rep, metric] = treat[metric] - base[metric]
+        end
+    end
+    return (; baseline=base_all, treatment=treat_all, deltas)
+end
+
 function _holm_adjust(pvalues::AbstractVector)
     pvalues = Float64.(pvalues)
     m = length(pvalues)

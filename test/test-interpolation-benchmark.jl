@@ -1261,6 +1261,63 @@ end
         ["FY4B", "GPM", "GSMaP", "MERGED_MEAN", "MERGED_OLS"]
 end
 
+@testset "Day-block bootstrap of detection skill" begin
+    rng = MersenneTwister(7)
+    times = collect(DateTime(2022, 6, 1):Hour(1):DateTime(2022, 6, 4, 23))
+    n_station = 6
+    y_obs = [rand(rng) < 0.3 ? 10 * rand(rng) : 0.0 for _ in 1:n_station, _ in eachindex(times)]
+    baseline = max.(y_obs .+ randn(rng, size(y_obs)), 0.0)
+    treatment = max.(y_obs .+ 0.3 .* randn(rng, size(y_obs)), 0.0)
+    mask = trues(size(y_obs))
+    mask[2, 5:30] .= false
+
+    result = daily_bootstrap_event_delta(
+        MersenneTwister(1), times, y_obs, baseline, treatment, BitMatrix(mask), 2.5, 200,
+    )
+    # The full-sample scores are exactly what `metric_event` gives on the same cells.
+    for (prediction, scores) in ((baseline, result.baseline), (treatment, result.treatment))
+        reference = metric_event(y_obs, prediction; mask=mask, thr=2.5)
+        @test collect(scores) ≈ [reference.POD, reference.FAR, reference.CSI]
+    end
+    @test size(result.deltas) == (200, 3)
+    # A better treatment on this fixture: CSI rises in the full sample and in most replicates.
+    @test result.treatment[3] > result.baseline[3]
+    @test mean(result.deltas[:, 3] .> 0) > 0.9
+
+    # Identical predictions differ by nothing, in every replicate.
+    same = daily_bootstrap_event_delta(
+        MersenneTwister(1), times, y_obs, baseline, copy(baseline), BitMatrix(mask), 2.5, 50,
+    )
+    @test all(iszero, same.deltas)
+
+    # Same seed, same draws.
+    again = daily_bootstrap_event_delta(
+        MersenneTwister(1), times, y_obs, baseline, treatment, BitMatrix(mask), 2.5, 200,
+    )
+    @test isequal(again.deltas, result.deltas)
+
+    # Masking a whole day drops those cells from the full-sample scores, exactly as `metric_event`
+    # drops them.
+    day_masked = copy(mask)
+    day_masked[:, Date.(times) .== Date(2022, 6, 2)] .= false
+    dropped = daily_bootstrap_event_delta(
+        MersenneTwister(1), times, y_obs, baseline, treatment, BitMatrix(day_masked), 2.5, 20,
+    )
+    reference = metric_event(y_obs, treatment; mask=day_masked, thr=2.5)
+    @test collect(dropped.treatment) ≈ [reference.POD, reference.FAR, reference.CSI]
+
+    # Nothing scored at all: NaN scores and NaN replicates, not an error.
+    empty = daily_bootstrap_event_delta(
+        MersenneTwister(1), times, y_obs, baseline, treatment, falses(size(y_obs)), 2.5, 5,
+    )
+    @test all(isnan, empty.deltas)
+    @test all(isnan, collect(empty.baseline))
+
+    @test_throws DimensionMismatch daily_bootstrap_event_delta(
+        MersenneTwister(1), times, y_obs, baseline, treatment[1:2, :], BitMatrix(mask), 2.5, 5,
+    )
+end
+
 @testset "Interpolation benchmark fixture" begin
     mktempdir() do temp_dir
         ids = string.(2001:2016)
