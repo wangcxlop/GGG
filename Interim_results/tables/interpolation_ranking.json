@@ -1,0 +1,83 @@
+[
+ {
+  "stratum": "overall",
+  "method": "IDW",
+  "RMSE": "0.874",
+  "RMSE_adw": "0.871",
+  "change": "-0.3",
+  "ci": "(-0.4, -0.3)",
+  "p_holm": "0.000"
+ },
+ {
+  "stratum": "overall",
+  "method": "TPS",
+  "RMSE": "0.931",
+  "RMSE_adw": "0.871",
+  "change": "-6.9",
+  "ci": "(-8.4, -5.5)",
+  "p_holm": "0.000"
+ },
+ {
+  "stratum": "overall",
+  "method": "GWR (gauges only)",
+  "RMSE": "0.922",
+  "RMSE_adw": "0.871",
+  "change": "-5.9",
+  "ci": "(-7.0, -4.8)",
+  "p_holm": "0.000"
+ },
+ {
+  "stratum": "moderate",
+  "method": "IDW",
+  "RMSE": "2.652",
+  "RMSE_adw": "2.633",
+  "change": "-0.8",
+  "ci": "(-1.0, -0.6)",
+  "p_holm": "0.000"
+ },
+ {
+  "stratum": "moderate",
+  "method": "TPS",
+  "RMSE": "2.714",
+  "RMSE_adw": "2.633",
+  "change": "-3.1",
+  "ci": "(-5.9, -0.4)",
+  "p_holm": "0.060"
+ },
+ {
+  "stratum": "moderate",
+  "method": "GWR (gauges only)",
+  "RMSE": "2.710",
+  "RMSE_adw": "2.633",
+  "change": "-3.0",
+  "ci": "(-5.0, -0.9)",
+  "p_holm": "0.012"
+ },
+ {
+  "stratum": "heavy",
+  "method": "IDW",
+  "RMSE": "14.741",
+  "RMSE_adw": "14.741",
+  "change": "-0.0",
+  "ci": "(-0.0, +0.0)",
+  "p_holm": "1.000"
+ },
+ {
+  "stratum": "heavy",
+  "method": "TPS",
+  "RMSE": "14.483",
+  "RMSE_adw": "14.741",
+  "change": "+1.8",
+  "ci": "(+0.9, +2.6)",
+  "p_holm": "0.000"
+ },
+ {
+  "stratum": "heavy",
+  "method": "GWR (gauges only)",
+  "RMSE": "14.881",
+  "RMSE_adw": "14.741",
+  "change": "-1.0",
+  "ci": "(-1.8, -0.1)",
+  "p_holm": "0.026"
+ }
+]

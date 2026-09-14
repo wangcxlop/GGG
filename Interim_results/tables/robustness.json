@@ -1,0 +1,122 @@
+[
+ {
+  "scheme": "balanced spatial",
+  "anchor": "FY4B",
+  "RMSE_adw": "0.874",
+  "RMSE_infold": "0.964",
+  "infold_vs_adw": "-10.3",
+  "RMSE_blend": "0.870",
+  "blend_vs_adw": "+0.5",
+  "blend_2022": "+0.7",
+  "blend_2023": "+0.5",
+  "blend_2024": "+0.3"
+ },
+ {
+  "scheme": "random",
+  "anchor": "FY4B",
+  "RMSE_adw": "0.658",
+  "RMSE_infold": "0.691",
+  "infold_vs_adw": "-5.1",
+  "RMSE_blend": "0.659",
+  "blend_vs_adw": "-0.2",
+  "blend_2022": "–",
+  "blend_2023": "–",
+  "blend_2024": "–"
+ },
+ {
+  "scheme": "balanced spatial",
+  "anchor": "GPM",
+  "RMSE_adw": "0.871",
+  "RMSE_infold": "0.917",
+  "infold_vs_adw": "-5.3",
+  "RMSE_blend": "0.844",
+  "blend_vs_adw": "+3.1",
+  "blend_2022": "+3.0",
+  "blend_2023": "+3.5",
+  "blend_2024": "+2.7"
+ },
+ {
+  "scheme": "random",
+  "anchor": "GPM",
+  "RMSE_adw": "0.655",
+  "RMSE_infold": "0.684",
+  "infold_vs_adw": "-4.4",
+  "RMSE_blend": "0.655",
+  "blend_vs_adw": "-0.1",
+  "blend_2022": "–",
+  "blend_2023": "–",
+  "blend_2024": "–"
+ },
+ {
+  "scheme": "balanced spatial",
+  "anchor": "GSMaP",
+  "RMSE_adw": "0.871",
+  "RMSE_infold": "0.962",
+  "infold_vs_adw": "-10.5",
+  "RMSE_blend": "0.853",
+  "blend_vs_adw": "+2.1",
+  "blend_2022": "+1.4",
+  "blend_2023": "+2.8",
+  "blend_2024": "+1.8"
+ },
+ {
+  "scheme": "random",
+  "anchor": "GSMaP",
+  "RMSE_adw": "0.653",
+  "RMSE_infold": "0.680",
+  "infold_vs_adw": "-4.2",
+  "RMSE_blend": "0.653",
+  "blend_vs_adw": "-0.0",
+  "blend_2022": "–",
+  "blend_2023": "–",
+  "blend_2024": "–"
+ },
+ {
+  "scheme": "balanced spatial",
+  "anchor": "MERGED_MEAN",
+  "RMSE_adw": "0.874",
+  "RMSE_infold": "0.877",
+  "infold_vs_adw": "-0.3",
+  "RMSE_blend": "0.845",
+  "blend_vs_adw": "+3.4",
+  "blend_2022": "+2.5",
+  "blend_2023": "+3.8",
+  "blend_2024": "+3.5"
+ },
+ {
+  "scheme": "random",
+  "anchor": "MERGED_MEAN",
+  "RMSE_adw": "0.658",
+  "RMSE_infold": "0.687",
+  "infold_vs_adw": "-4.4",
+  "RMSE_blend": "0.657",
+  "blend_vs_adw": "+0.1",
+  "blend_2022": "–",
+  "blend_2023": "–",
+  "blend_2024": "–"
+ },
+ {
+  "scheme": "balanced spatial",
+  "anchor": "MERGED_OLS",
+  "RMSE_adw": "0.876",
+  "RMSE_infold": "0.851",
+  "infold_vs_adw": "+2.9",
+  "RMSE_blend": "0.844",
+  "blend_vs_adw": "+3.6",
+  "blend_2022": "+2.9",
+  "blend_2023": "+4.0",
+  "blend_2024": "+3.7"
+ },
+ {
+  "scheme": "random",
+  "anchor": "MERGED_OLS",
+  "RMSE_adw": "0.658",
+  "RMSE_infold": "0.684",
+  "infold_vs_adw": "-4.0",
+  "RMSE_blend": "0.658",
+  "blend_vs_adw": "+0.0",
+  "blend_2022": "–",
+  "blend_2023": "–",
+  "blend_2024": "–"
+ }
+]

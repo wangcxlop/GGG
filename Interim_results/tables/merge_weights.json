@@ -1,0 +1,22 @@
+[
+ {
+  "scheme": "balanced_spatial",
+  "product": "MERGED_OLS",
+  "intercept": "0.043",
+  "FY4B": "0.034",
+  "GPM": "0.398",
+  "GSMaP": "0.159",
+  "GPM_range": "0.39–0.41",
+  "fell_back": "0"
+ },
+ {
+  "scheme": "random",
+  "product": "MERGED_OLS",
+  "intercept": "0.043",
+  "FY4B": "0.034",
+  "GPM": "0.398",
+  "GSMaP": "0.158",
+  "GPM_range": "0.40–0.40",
+  "fell_back": "0"
+ }
+]

@@ -1,0 +1,982 @@
+[
+ {
+  "anchor": "FY4B",
+  "method": "GWR family, chosen in-fold",
+  "group": "rain_intensity",
+  "level": "no_rain",
+  "change": "-73.1"
+ },
+ {
+  "anchor": "FY4B",
+  "method": "GWR family, chosen in-fold",
+  "group": "rain_intensity",
+  "level": "light",
+  "change": "-46.6"
+ },
+ {
+  "anchor": "FY4B",
+  "method": "GWR family, chosen in-fold",
+  "group": "rain_intensity",
+  "level": "moderate",
+  "change": "-9.1"
+ },
+ {
+  "anchor": "FY4B",
+  "method": "GWR family, chosen in-fold",
+  "group": "rain_intensity",
+  "level": "heavy",
+  "change": "+5.9"
+ },
+ {
+  "anchor": "FY4B",
+  "method": "GWR family, chosen in-fold",
+  "group": "nearest_train_km",
+  "level": "0_20",
+  "change": "-9.9"
+ },
+ {
+  "anchor": "FY4B",
+  "method": "GWR family, chosen in-fold",
+  "group": "nearest_train_km",
+  "level": "20_50",
+  "change": "-10.2"
+ },
+ {
+  "anchor": "FY4B",
+  "method": "GWR family, chosen in-fold",
+  "group": "nearest_train_km",
+  "level": "50_100",
+  "change": "-11.5"
+ },
+ {
+  "anchor": "FY4B",
+  "method": "MGWR",
+  "group": "rain_intensity",
+  "level": "no_rain",
+  "change": "-73.1"
+ },
+ {
+  "anchor": "FY4B",
+  "method": "MGWR",
+  "group": "rain_intensity",
+  "level": "light",
+  "change": "-46.6"
+ },
+ {
+  "anchor": "FY4B",
+  "method": "MGWR",
+  "group": "rain_intensity",
+  "level": "moderate",
+  "change": "-9.1"
+ },
+ {
+  "anchor": "FY4B",
+  "method": "MGWR",
+  "group": "rain_intensity",
+  "level": "heavy",
+  "change": "+5.9"
+ },
+ {
+  "anchor": "FY4B",
+  "method": "MGWR",
+  "group": "nearest_train_km",
+  "level": "0_20",
+  "change": "-9.9"
+ },
+ {
+  "anchor": "FY4B",
+  "method": "MGWR",
+  "group": "nearest_train_km",
+  "level": "20_50",
+  "change": "-10.2"
+ },
+ {
+  "anchor": "FY4B",
+  "method": "MGWR",
+  "group": "nearest_train_km",
+  "level": "50_100",
+  "change": "-11.5"
+ },
+ {
+  "anchor": "FY4B",
+  "method": "MGWR + ADW blend",
+  "group": "rain_intensity",
+  "level": "no_rain",
+  "change": "-12.3"
+ },
+ {
+  "anchor": "FY4B",
+  "method": "MGWR + ADW blend",
+  "group": "rain_intensity",
+  "level": "light",
+  "change": "-5.3"
+ },
+ {
+  "anchor": "FY4B",
+  "method": "MGWR + ADW blend",
+  "group": "rain_intensity",
+  "level": "moderate",
+  "change": "+0.2"
+ },
+ {
+  "anchor": "FY4B",
+  "method": "MGWR + ADW blend",
+  "group": "rain_intensity",
+  "level": "heavy",
+  "change": "+2.1"
+ },
+ {
+  "anchor": "FY4B",
+  "method": "MGWR + ADW blend",
+  "group": "nearest_train_km",
+  "level": "0_20",
+  "change": "-1.0"
+ },
+ {
+  "anchor": "FY4B",
+  "method": "MGWR + ADW blend",
+  "group": "nearest_train_km",
+  "level": "20_50",
+  "change": "+0.1"
+ },
+ {
+  "anchor": "FY4B",
+  "method": "MGWR + ADW blend",
+  "group": "nearest_train_km",
+  "level": "50_100",
+  "change": "+0.9"
+ },
+ {
+  "anchor": "FY4B",
+  "method": "MGWR + agreement blend",
+  "group": "rain_intensity",
+  "level": "no_rain",
+  "change": "-9.2"
+ },
+ {
+  "anchor": "FY4B",
+  "method": "MGWR + agreement blend",
+  "group": "rain_intensity",
+  "level": "light",
+  "change": "-3.4"
+ },
+ {
+  "anchor": "FY4B",
+  "method": "MGWR + agreement blend",
+  "group": "rain_intensity",
+  "level": "moderate",
+  "change": "+1.4"
+ },
+ {
+  "anchor": "FY4B",
+  "method": "MGWR + agreement blend",
+  "group": "rain_intensity",
+  "level": "heavy",
+  "change": "+2.1"
+ },
+ {
+  "anchor": "FY4B",
+  "method": "MGWR + agreement blend",
+  "group": "nearest_train_km",
+  "level": "0_20",
+  "change": "-0.2"
+ },
+ {
+  "anchor": "FY4B",
+  "method": "MGWR + agreement blend",
+  "group": "nearest_train_km",
+  "level": "20_50",
+  "change": "+0.7"
+ },
+ {
+  "anchor": "FY4B",
+  "method": "MGWR + agreement blend",
+  "group": "nearest_train_km",
+  "level": "50_100",
+  "change": "+1.5"
+ },
+ {
+  "anchor": "GPM",
+  "method": "GWR family, chosen in-fold",
+  "group": "rain_intensity",
+  "level": "no_rain",
+  "change": "-32.0"
+ },
+ {
+  "anchor": "GPM",
+  "method": "GWR family, chosen in-fold",
+  "group": "rain_intensity",
+  "level": "light",
+  "change": "-45.8"
+ },
+ {
+  "anchor": "GPM",
+  "method": "GWR family, chosen in-fold",
+  "group": "rain_intensity",
+  "level": "moderate",
+  "change": "-18.2"
+ },
+ {
+  "anchor": "GPM",
+  "method": "GWR family, chosen in-fold",
+  "group": "rain_intensity",
+  "level": "heavy",
+  "change": "+6.0"
+ },
+ {
+  "anchor": "GPM",
+  "method": "GWR family, chosen in-fold",
+  "group": "nearest_train_km",
+  "level": "0_20",
+  "change": "-9.2"
+ },
+ {
+  "anchor": "GPM",
+  "method": "GWR family, chosen in-fold",
+  "group": "nearest_train_km",
+  "level": "20_50",
+  "change": "-4.4"
+ },
+ {
+  "anchor": "GPM",
+  "method": "GWR family, chosen in-fold",
+  "group": "nearest_train_km",
+  "level": "50_100",
+  "change": "+0.5"
+ },
+ {
+  "anchor": "GPM",
+  "method": "MGWR",
+  "group": "rain_intensity",
+  "level": "no_rain",
+  "change": "-32.0"
+ },
+ {
+  "anchor": "GPM",
+  "method": "MGWR",
+  "group": "rain_intensity",
+  "level": "light",
+  "change": "-45.8"
+ },
+ {
+  "anchor": "GPM",
+  "method": "MGWR",
+  "group": "rain_intensity",
+  "level": "moderate",
+  "change": "-18.2"
+ },
+ {
+  "anchor": "GPM",
+  "method": "MGWR",
+  "group": "rain_intensity",
+  "level": "heavy",
+  "change": "+6.0"
+ },
+ {
+  "anchor": "GPM",
+  "method": "MGWR",
+  "group": "nearest_train_km",
+  "level": "0_20",
+  "change": "-9.2"
+ },
+ {
+  "anchor": "GPM",
+  "method": "MGWR",
+  "group": "nearest_train_km",
+  "level": "20_50",
+  "change": "-4.4"
+ },
+ {
+  "anchor": "GPM",
+  "method": "MGWR",
+  "group": "nearest_train_km",
+  "level": "50_100",
+  "change": "+0.5"
+ },
+ {
+  "anchor": "GPM",
+  "method": "MGWR + ADW blend",
+  "group": "rain_intensity",
+  "level": "no_rain",
+  "change": "+8.5"
+ },
+ {
+  "anchor": "GPM",
+  "method": "MGWR + ADW blend",
+  "group": "rain_intensity",
+  "level": "light",
+  "change": "-0.5"
+ },
+ {
+  "anchor": "GPM",
+  "method": "MGWR + ADW blend",
+  "group": "rain_intensity",
+  "level": "moderate",
+  "change": "+2.4"
+ },
+ {
+  "anchor": "GPM",
+  "method": "MGWR + ADW blend",
+  "group": "rain_intensity",
+  "level": "heavy",
+  "change": "+2.6"
+ },
+ {
+  "anchor": "GPM",
+  "method": "MGWR + ADW blend",
+  "group": "nearest_train_km",
+  "level": "0_20",
+  "change": "+0.8"
+ },
+ {
+  "anchor": "GPM",
+  "method": "MGWR + ADW blend",
+  "group": "nearest_train_km",
+  "level": "20_50",
+  "change": "+3.3"
+ },
+ {
+  "anchor": "GPM",
+  "method": "MGWR + ADW blend",
+  "group": "nearest_train_km",
+  "level": "50_100",
+  "change": "+6.8"
+ },
+ {
+  "anchor": "GPM",
+  "method": "MGWR + agreement blend",
+  "group": "rain_intensity",
+  "level": "no_rain",
+  "change": "+6.3"
+ },
+ {
+  "anchor": "GPM",
+  "method": "MGWR + agreement blend",
+  "group": "rain_intensity",
+  "level": "light",
+  "change": "+0.5"
+ },
+ {
+  "anchor": "GPM",
+  "method": "MGWR + agreement blend",
+  "group": "rain_intensity",
+  "level": "moderate",
+  "change": "+3.5"
+ },
+ {
+  "anchor": "GPM",
+  "method": "MGWR + agreement blend",
+  "group": "rain_intensity",
+  "level": "heavy",
+  "change": "+2.8"
+ },
+ {
+  "anchor": "GPM",
+  "method": "MGWR + agreement blend",
+  "group": "nearest_train_km",
+  "level": "0_20",
+  "change": "+1.0"
+ },
+ {
+  "anchor": "GPM",
+  "method": "MGWR + agreement blend",
+  "group": "nearest_train_km",
+  "level": "20_50",
+  "change": "+3.4"
+ },
+ {
+  "anchor": "GPM",
+  "method": "MGWR + agreement blend",
+  "group": "nearest_train_km",
+  "level": "50_100",
+  "change": "+7.2"
+ },
+ {
+  "anchor": "GSMaP",
+  "method": "GWR family, chosen in-fold",
+  "group": "rain_intensity",
+  "level": "no_rain",
+  "change": "-48.5"
+ },
+ {
+  "anchor": "GSMaP",
+  "method": "GWR family, chosen in-fold",
+  "group": "rain_intensity",
+  "level": "light",
+  "change": "-65.0"
+ },
+ {
+  "anchor": "GSMaP",
+  "method": "GWR family, chosen in-fold",
+  "group": "rain_intensity",
+  "level": "moderate",
+  "change": "-29.7"
+ },
+ {
+  "anchor": "GSMaP",
+  "method": "GWR family, chosen in-fold",
+  "group": "rain_intensity",
+  "level": "heavy",
+  "change": "+6.5"
+ },
+ {
+  "anchor": "GSMaP",
+  "method": "GWR family, chosen in-fold",
+  "group": "nearest_train_km",
+  "level": "0_20",
+  "change": "-8.7"
+ },
+ {
+  "anchor": "GSMaP",
+  "method": "GWR family, chosen in-fold",
+  "group": "nearest_train_km",
+  "level": "20_50",
+  "change": "-10.2"
+ },
+ {
+  "anchor": "GSMaP",
+  "method": "GWR family, chosen in-fold",
+  "group": "nearest_train_km",
+  "level": "50_100",
+  "change": "-15.7"
+ },
+ {
+  "anchor": "GSMaP",
+  "method": "MGWR",
+  "group": "rain_intensity",
+  "level": "no_rain",
+  "change": "-42.2"
+ },
+ {
+  "anchor": "GSMaP",
+  "method": "MGWR",
+  "group": "rain_intensity",
+  "level": "light",
+  "change": "-70.0"
+ },
+ {
+  "anchor": "GSMaP",
+  "method": "MGWR",
+  "group": "rain_intensity",
+  "level": "moderate",
+  "change": "-33.9"
+ },
+ {
+  "anchor": "GSMaP",
+  "method": "MGWR",
+  "group": "rain_intensity",
+  "level": "heavy",
+  "change": "+7.4"
+ },
+ {
+  "anchor": "GSMaP",
+  "method": "MGWR",
+  "group": "nearest_train_km",
+  "level": "0_20",
+  "change": "-9.4"
+ },
+ {
+  "anchor": "GSMaP",
+  "method": "MGWR",
+  "group": "nearest_train_km",
+  "level": "20_50",
+  "change": "-10.1"
+ },
+ {
+  "anchor": "GSMaP",
+  "method": "MGWR",
+  "group": "nearest_train_km",
+  "level": "50_100",
+  "change": "-11.8"
+ },
+ {
+  "anchor": "GSMaP",
+  "method": "MGWR + ADW blend",
+  "group": "rain_intensity",
+  "level": "no_rain",
+  "change": "-4.4"
+ },
+ {
+  "anchor": "GSMaP",
+  "method": "MGWR + ADW blend",
+  "group": "rain_intensity",
+  "level": "light",
+  "change": "-7.6"
+ },
+ {
+  "anchor": "GSMaP",
+  "method": "MGWR + ADW blend",
+  "group": "rain_intensity",
+  "level": "moderate",
+  "change": "+1.7"
+ },
+ {
+  "anchor": "GSMaP",
+  "method": "MGWR + ADW blend",
+  "group": "rain_intensity",
+  "level": "heavy",
+  "change": "+3.9"
+ },
+ {
+  "anchor": "GSMaP",
+  "method": "MGWR + ADW blend",
+  "group": "nearest_train_km",
+  "level": "0_20",
+  "change": "+0.6"
+ },
+ {
+  "anchor": "GSMaP",
+  "method": "MGWR + ADW blend",
+  "group": "nearest_train_km",
+  "level": "20_50",
+  "change": "+2.4"
+ },
+ {
+  "anchor": "GSMaP",
+  "method": "MGWR + ADW blend",
+  "group": "nearest_train_km",
+  "level": "50_100",
+  "change": "+4.2"
+ },
+ {
+  "anchor": "GSMaP",
+  "method": "MGWR + agreement blend",
+  "group": "rain_intensity",
+  "level": "no_rain",
+  "change": "-5.1"
+ },
+ {
+  "anchor": "GSMaP",
+  "method": "MGWR + agreement blend",
+  "group": "rain_intensity",
+  "level": "light",
+  "change": "-7.0"
+ },
+ {
+  "anchor": "GSMaP",
+  "method": "MGWR + agreement blend",
+  "group": "rain_intensity",
+  "level": "moderate",
+  "change": "+2.8"
+ },
+ {
+  "anchor": "GSMaP",
+  "method": "MGWR + agreement blend",
+  "group": "rain_intensity",
+  "level": "heavy",
+  "change": "+3.9"
+ },
+ {
+  "anchor": "GSMaP",
+  "method": "MGWR + agreement blend",
+  "group": "nearest_train_km",
+  "level": "0_20",
+  "change": "+0.7"
+ },
+ {
+  "anchor": "GSMaP",
+  "method": "MGWR + agreement blend",
+  "group": "nearest_train_km",
+  "level": "20_50",
+  "change": "+2.5"
+ },
+ {
+  "anchor": "GSMaP",
+  "method": "MGWR + agreement blend",
+  "group": "nearest_train_km",
+  "level": "50_100",
+  "change": "+3.9"
+ },
+ {
+  "anchor": "MERGED_MEAN",
+  "method": "GWR family, chosen in-fold",
+  "group": "rain_intensity",
+  "level": "no_rain",
+  "change": "-26.2"
+ },
+ {
+  "anchor": "MERGED_MEAN",
+  "method": "GWR family, chosen in-fold",
+  "group": "rain_intensity",
+  "level": "light",
+  "change": "-30.7"
+ },
+ {
+  "anchor": "MERGED_MEAN",
+  "method": "GWR family, chosen in-fold",
+  "group": "rain_intensity",
+  "level": "moderate",
+  "change": "-5.7"
+ },
+ {
+  "anchor": "MERGED_MEAN",
+  "method": "GWR family, chosen in-fold",
+  "group": "rain_intensity",
+  "level": "heavy",
+  "change": "+8.1"
+ },
+ {
+  "anchor": "MERGED_MEAN",
+  "method": "GWR family, chosen in-fold",
+  "group": "nearest_train_km",
+  "level": "0_20",
+  "change": "-2.8"
+ },
+ {
+  "anchor": "MERGED_MEAN",
+  "method": "GWR family, chosen in-fold",
+  "group": "nearest_train_km",
+  "level": "20_50",
+  "change": "+0.4"
+ },
+ {
+  "anchor": "MERGED_MEAN",
+  "method": "GWR family, chosen in-fold",
+  "group": "nearest_train_km",
+  "level": "50_100",
+  "change": "+2.9"
+ },
+ {
+  "anchor": "MERGED_MEAN",
+  "method": "MGWR",
+  "group": "rain_intensity",
+  "level": "no_rain",
+  "change": "-26.2"
+ },
+ {
+  "anchor": "MERGED_MEAN",
+  "method": "MGWR",
+  "group": "rain_intensity",
+  "level": "light",
+  "change": "-30.7"
+ },
+ {
+  "anchor": "MERGED_MEAN",
+  "method": "MGWR",
+  "group": "rain_intensity",
+  "level": "moderate",
+  "change": "-5.7"
+ },
+ {
+  "anchor": "MERGED_MEAN",
+  "method": "MGWR",
+  "group": "rain_intensity",
+  "level": "heavy",
+  "change": "+8.1"
+ },
+ {
+  "anchor": "MERGED_MEAN",
+  "method": "MGWR",
+  "group": "nearest_train_km",
+  "level": "0_20",
+  "change": "-2.8"
+ },
+ {
+  "anchor": "MERGED_MEAN",
+  "method": "MGWR",
+  "group": "nearest_train_km",
+  "level": "20_50",
+  "change": "+0.4"
+ },
+ {
+  "anchor": "MERGED_MEAN",
+  "method": "MGWR",
+  "group": "nearest_train_km",
+  "level": "50_100",
+  "change": "+2.9"
+ },
+ {
+  "anchor": "MERGED_MEAN",
+  "method": "MGWR + ADW blend",
+  "group": "rain_intensity",
+  "level": "no_rain",
+  "change": "-4.7"
+ },
+ {
+  "anchor": "MERGED_MEAN",
+  "method": "MGWR + ADW blend",
+  "group": "rain_intensity",
+  "level": "light",
+  "change": "-5.5"
+ },
+ {
+  "anchor": "MERGED_MEAN",
+  "method": "MGWR + ADW blend",
+  "group": "rain_intensity",
+  "level": "moderate",
+  "change": "+4.2"
+ },
+ {
+  "anchor": "MERGED_MEAN",
+  "method": "MGWR + ADW blend",
+  "group": "rain_intensity",
+  "level": "heavy",
+  "change": "+5.2"
+ },
+ {
+  "anchor": "MERGED_MEAN",
+  "method": "MGWR + ADW blend",
+  "group": "nearest_train_km",
+  "level": "0_20",
+  "change": "+1.2"
+ },
+ {
+  "anchor": "MERGED_MEAN",
+  "method": "MGWR + ADW blend",
+  "group": "nearest_train_km",
+  "level": "20_50",
+  "change": "+3.9"
+ },
+ {
+  "anchor": "MERGED_MEAN",
+  "method": "MGWR + ADW blend",
+  "group": "nearest_train_km",
+  "level": "50_100",
+  "change": "+6.7"
+ },
+ {
+  "anchor": "MERGED_MEAN",
+  "method": "MGWR + agreement blend",
+  "group": "rain_intensity",
+  "level": "no_rain",
+  "change": "-3.7"
+ },
+ {
+  "anchor": "MERGED_MEAN",
+  "method": "MGWR + agreement blend",
+  "group": "rain_intensity",
+  "level": "light",
+  "change": "-4.3"
+ },
+ {
+  "anchor": "MERGED_MEAN",
+  "method": "MGWR + agreement blend",
+  "group": "rain_intensity",
+  "level": "moderate",
+  "change": "+4.3"
+ },
+ {
+  "anchor": "MERGED_MEAN",
+  "method": "MGWR + agreement blend",
+  "group": "rain_intensity",
+  "level": "heavy",
+  "change": "+5.0"
+ },
+ {
+  "anchor": "MERGED_MEAN",
+  "method": "MGWR + agreement blend",
+  "group": "nearest_train_km",
+  "level": "0_20",
+  "change": "+1.3"
+ },
+ {
+  "anchor": "MERGED_MEAN",
+  "method": "MGWR + agreement blend",
+  "group": "nearest_train_km",
+  "level": "20_50",
+  "change": "+3.8"
+ },
+ {
+  "anchor": "MERGED_MEAN",
+  "method": "MGWR + agreement blend",
+  "group": "nearest_train_km",
+  "level": "50_100",
+  "change": "+6.8"
+ },
+ {
+  "anchor": "MERGED_OLS",
+  "method": "GWR family, chosen in-fold",
+  "group": "rain_intensity",
+  "level": "no_rain",
+  "change": "+1.1"
+ },
+ {
+  "anchor": "MERGED_OLS",
+  "method": "GWR family, chosen in-fold",
+  "group": "rain_intensity",
+  "level": "light",
+  "change": "-2.8"
+ },
+ {
+  "anchor": "MERGED_OLS",
+  "method": "GWR family, chosen in-fold",
+  "group": "rain_intensity",
+  "level": "moderate",
+  "change": "+0.1"
+ },
+ {
+  "anchor": "MERGED_OLS",
+  "method": "GWR family, chosen in-fold",
+  "group": "rain_intensity",
+  "level": "heavy",
+  "change": "+4.1"
+ },
+ {
+  "anchor": "MERGED_OLS",
+  "method": "GWR family, chosen in-fold",
+  "group": "nearest_train_km",
+  "level": "0_20",
+  "change": "-0.3"
+ },
+ {
+  "anchor": "MERGED_OLS",
+  "method": "GWR family, chosen in-fold",
+  "group": "nearest_train_km",
+  "level": "20_50",
+  "change": "+3.6"
+ },
+ {
+  "anchor": "MERGED_OLS",
+  "method": "GWR family, chosen in-fold",
+  "group": "nearest_train_km",
+  "level": "50_100",
+  "change": "+7.4"
+ },
+ {
+  "anchor": "MERGED_OLS",
+  "method": "MGWR",
+  "group": "rain_intensity",
+  "level": "no_rain",
+  "change": "+1.1"
+ },
+ {
+  "anchor": "MERGED_OLS",
+  "method": "MGWR",
+  "group": "rain_intensity",
+  "level": "light",
+  "change": "-2.8"
+ },
+ {
+  "anchor": "MERGED_OLS",
+  "method": "MGWR",
+  "group": "rain_intensity",
+  "level": "moderate",
+  "change": "+0.1"
+ },
+ {
+  "anchor": "MERGED_OLS",
+  "method": "MGWR",
+  "group": "rain_intensity",
+  "level": "heavy",
+  "change": "+4.1"
+ },
+ {
+  "anchor": "MERGED_OLS",
+  "method": "MGWR",
+  "group": "nearest_train_km",
+  "level": "0_20",
+  "change": "-0.3"
+ },
+ {
+  "anchor": "MERGED_OLS",
+  "method": "MGWR",
+  "group": "nearest_train_km",
+  "level": "20_50",
+  "change": "+3.6"
+ },
+ {
+  "anchor": "MERGED_OLS",
+  "method": "MGWR",
+  "group": "nearest_train_km",
+  "level": "50_100",
+  "change": "+7.4"
+ },
+ {
+  "anchor": "MERGED_OLS",
+  "method": "MGWR + ADW blend",
+  "group": "rain_intensity",
+  "level": "no_rain",
+  "change": "+8.9"
+ },
+ {
+  "anchor": "MERGED_OLS",
+  "method": "MGWR + ADW blend",
+  "group": "rain_intensity",
+  "level": "light",
+  "change": "+6.1"
+ },
+ {
+  "anchor": "MERGED_OLS",
+  "method": "MGWR + ADW blend",
+  "group": "rain_intensity",
+  "level": "moderate",
+  "change": "+3.7"
+ },
+ {
+  "anchor": "MERGED_OLS",
+  "method": "MGWR + ADW blend",
+  "group": "rain_intensity",
+  "level": "heavy",
+  "change": "+2.8"
+ },
+ {
+  "anchor": "MERGED_OLS",
+  "method": "MGWR + ADW blend",
+  "group": "nearest_train_km",
+  "level": "0_20",
+  "change": "+1.7"
+ },
+ {
+  "anchor": "MERGED_OLS",
+  "method": "MGWR + ADW blend",
+  "group": "nearest_train_km",
+  "level": "20_50",
+  "change": "+4.1"
+ },
+ {
+  "anchor": "MERGED_OLS",
+  "method": "MGWR + ADW blend",
+  "group": "nearest_train_km",
+  "level": "50_100",
+  "change": "+7.0"
+ },
+ {
+  "anchor": "MERGED_OLS",
+  "method": "MGWR + agreement blend",
+  "group": "rain_intensity",
+  "level": "no_rain",
+  "change": "+7.8"
+ },
+ {
+  "anchor": "MERGED_OLS",
+  "method": "MGWR + agreement blend",
+  "group": "rain_intensity",
+  "level": "light",
+  "change": "+4.4"
+ },
+ {
+  "anchor": "MERGED_OLS",
+  "method": "MGWR + agreement blend",
+  "group": "rain_intensity",
+  "level": "moderate",
+  "change": "+2.7"
+ },
+ {
+  "anchor": "MERGED_OLS",
+  "method": "MGWR + agreement blend",
+  "group": "rain_intensity",
+  "level": "heavy",
+  "change": "+3.2"
+ },
+ {
+  "anchor": "MERGED_OLS",
+  "method": "MGWR + agreement blend",
+  "group": "nearest_train_km",
+  "level": "0_20",
+  "change": "+1.6"
+ },
+ {
+  "anchor": "MERGED_OLS",
+  "method": "MGWR + agreement blend",
+  "group": "nearest_train_km",
+  "level": "20_50",
+  "change": "+4.1"
+ },
+ {
+  "anchor": "MERGED_OLS",
+  "method": "MGWR + agreement blend",
+  "group": "nearest_train_km",
+  "level": "50_100",
+  "change": "+7.0"
+ }
+]

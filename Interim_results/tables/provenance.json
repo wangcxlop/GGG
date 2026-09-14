@@ -1,0 +1,18 @@
+[
+ {
+  "key": "run_directory",
+  "value": "interpolation_benchmark_full_joint_covariates_nested_mgwrintercept_only_satwetblend_blendagrenv_fusedanchor"
+ },
+ {
+  "key": "git_commit",
+  "value": "68932f4f85cce1d23b1aafa3f63e80a1bd8a708c"
+ },
+ {
+  "key": "git_branch",
+  "value": "feat/fusion-evidence"
+ },
+ {
+  "key": "git_dirty",
+  "value": "true"
+ }
+]
