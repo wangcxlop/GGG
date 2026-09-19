@@ -189,7 +189,7 @@ which git matches at any depth, so files there would be silently untracked.
    their own, so they must never be `include`d directly by anything else.
 
 2. **Standalone modules** — each defines its *own* `module X ... end` and is loaded through
-   `src/load_modules.jl`, never through the `MixedGWR` module. Twenty of them:
+   `src/load_modules.jl`, never through the `MixedGWR` module. Twenty-five of them:
    - `sources/`: `StudyArea.jl`, `FY4BPreprocessing.jl`, `ERA5LandStations.jl`,
      `ERA5LandProcessing.jl`, `ERA5LandCovariates.jl`, `MOD13A2NDVIProcessing.jl`,
      `AppEEARSNDVI.jl`, `TerrainFeatures.jl`, `LandformClassification.jl` (DEM relief regions for
@@ -210,6 +210,12 @@ which git matches at any depth, so files there would be silently untracked.
    - `benchmark/SatelliteTemporalEvaluation.jl`: hourly, event, diurnal and regional-series scores
      of the satellite products against the gauges, stratified by intensity class, season and
      landform region. Same standalone discipline as `BenchmarkDiagnostics`.
+   - `benchmark/HeavyRainEvents.jl`: selection and spatial scoring of heavy-rain days, plus
+     `align_to_reference` and the visualization-only `idw_surface`.
+   - `benchmark/GridSupportDiagnostics.jl`: what the products lost when their grids were reduced to
+     gauge points — cell multiplicity, the gauge-vs-gauge disagreement inside one cell, FY4B's real
+     off-nadir footprint, and nearest-versus-bilinear extraction. Driven by
+     `scripts/run_grid_support_diagnostics.jl`; it measures inputs and changes no benchmark output.
    - `benchmark/NoRainEvaluation.jl`: the gauge-dry station-hours on their own - occurrence scores
      under any stratifier, where a dry hour sits relative to rain, the neighbouring-gauge baseline, dry
      spells and days, and the silent-gauge screen. Driven by `scripts/run_no_rain_evaluation.jl`
