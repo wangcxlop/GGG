@@ -207,8 +207,8 @@ def write_table(name: str, rows: list[dict]) -> None:
 
 def fig1_anatomy(occurrence: list[dict]) -> None:
     sample, product = "gpm_gsmap_full", "GPM"
-    fig, axes = plt.subplots(1, 4, figsize=(10.0, 3.0), gridspec_kw={"width_ratios": [1.1, 1.5, 1.0, 1.0]})
-    fig.subplots_adjust(left=0.06, right=0.99, top=0.74, bottom=0.2, wspace=0.42)
+    fig, axes = plt.subplots(1, 4, figsize=(10.0, 3.0), gridspec_kw={"width_ratios": [1.1, 1.5, 0.9, 0.9]})
+    fig.subplots_adjust(left=0.06, right=0.99, top=0.74, bottom=0.2, wspace=0.62)
 
     months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
     share = [occ(occurrence, sample, product, "month", m, 0.1)["dry_share"] for m in months]
@@ -377,8 +377,11 @@ def fig5_maps(occurrence: list[dict], stations: list[dict]) -> None:
     fig.subplots_adjust(left=0.06, right=0.9, top=0.86, bottom=0.05, wspace=0.08, hspace=0.18)
     lon = {s["station_id"]: s["lon"] for s in stations}
     lat = {s["station_id"]: s["lat"] for s in stations}
-    rows_spec = [("POFD", 0.5, "False-alarm rate ≥ 0.5 mm/h (%)", [0, 1, 2, 3, 4, 5, 6, 8, 12], 100),
-                 ("spurious_mm_per_year", 0.1, "Rain on gauge-dry hours (mm per year)", [0, 25, 50, 75, 100, 150, 200, 300, 500], 1)]
+    # Eight bounds: seven bins plus the "max" extension use the ramp's eight colours.
+    # The volume share, not mm per year: the FY4B-hours sample is weighted to summer.
+    rows_spec = [("POFD", 0.5, "False-alarm rate ≥ 0.5 mm/h (%)", [0, 2.5, 3, 3.5, 4, 4.5, 5, 6], 100),
+                 ("dry_volume_share", 0.1, "Share of the product's rain on gauge-dry hours (%)",
+                  [0, 25, 30, 35, 40, 50, 60, 70], 100)]
     cmap = ListedColormap(SEQUENTIAL_BLUES)
     for i, (column, threshold, label, bounds, scale) in enumerate(rows_spec):
         norm = BoundaryNorm(bounds, cmap.N, extend="max")
@@ -398,15 +401,15 @@ def fig5_maps(occurrence: list[dict], stations: list[dict]) -> None:
             if j > 0:
                 ax.set_yticklabels([])
             med = np.median(values)
-            ax.text(0.02, 0.03, f"median {med:.1f}", transform=ax.transAxes, fontsize=6, color=INK_SECONDARY)
+            ax.text(0.02, 0.03, f"median {med:.1f}%", transform=ax.transAxes, fontsize=6, color=INK_SECONDARY)
         cax = fig.add_axes([0.915, 0.53 - 0.44 * i, 0.012, 0.3])
         bar = fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), cax=cax, extend="max")
         bar.outline.set_edgecolor(AXIS)
         bar.ax.tick_params(length=2, labelsize=5.8)
         bar.set_label(label, fontsize=6.3, color=INK_SECONDARY)
     title(fig, "Where each product rains on gauge-dry hours",
-          "Hours FY4B covers, all seasons; each dot is a gauge and the pixel over it. Spurious rain is the product's "
-          "total on the gauge's dry hours,\nper year of scored record.", left=0.06)
+          "Hours FY4B covers, all seasons; each dot is a gauge and the pixel over it. Bottom: the share of the "
+          "product's total at that pixel\nthat falls on hours the gauge is dry.", left=0.06)
     save(fig, "norain_fig5_station_maps")
 
 
@@ -462,13 +465,18 @@ def fig7_floor_and_air(occurrence: list[dict], baseline: list[dict]) -> None:
     x = np.arange(len(bins))
     dots(ax, x, [r["POFD"] for r in bins], INK, [r["POFD_lo"] for r in bins], [r["POFD_hi"] for r in bins],
          size=22, horizontal=False)
-    for product in SAMPLES[sample]:
-        value = occ(occurrence, sample, product, "all", "all", 0.5)["POFD"]
-        ax.axhline(value, color=PRODUCT_COLORS[product], linewidth=1.2, zorder=1)
-        ax.text(len(bins) - 0.5, value, f" {product}", color=INK_SECONDARY, fontsize=6, va="center")
+    # Reference lines stop short of their labels; labels that would overprint are pushed apart.
+    levels = sorted((occ(occurrence, sample, p, "all", "all", 0.5)["POFD"], p) for p in SAMPLES[sample])
+    label_y = [v for v, _ in levels]
+    for k in range(1, len(label_y)):
+        label_y[k] = max(label_y[k], label_y[k - 1] + 0.0017)
+    for (value, product), y_text in zip(levels, label_y):
+        ax.hlines(value, -0.5, len(bins) - 0.55, color=PRODUCT_COLORS[product], linewidth=1.2, zorder=1)
+        ax.text(len(bins) - 0.5, y_text, f"{product} {100 * value:.1f}%", color=PRODUCT_COLORS[product],
+                fontsize=6, va="center")
     ax.set_xticks(x)
     ax.set_xticklabels([r["level"] for r in bins], fontsize=6)
-    ax.set_xlim(-0.5, len(bins) + 0.2)
+    ax.set_xlim(-0.5, len(bins) + 0.7)
     ax.set_ylim(0, None)
     ax.set_xlabel("Separation of the two gauges")
     ax.yaxis.set_major_formatter(mpl.ticker.FuncFormatter(lambda v, _: f"{100 * v:g}%"))
@@ -489,7 +497,7 @@ def fig7_floor_and_air(occurrence: list[dict], baseline: list[dict]) -> None:
         ax.set_title(heading, loc="left")
         ax.yaxis.set_major_formatter(mpl.ticker.FuncFormatter(lambda v, _: f"{100 * v:g}%"))
         ax.set_ylim(0, None)
-    product_legend(axes[2], SAMPLES[sample], loc="upper right")
+    product_legend(axes[2], SAMPLES[sample], loc="upper left")
     title(fig, "Two physical baselines: gauges next to each other, and the air at the gauge",
           "Hours FY4B covers. Left: how often a gauge reports rain when a neighbour at the given separation is dry, "
           "against each product's rate at ≥ 0.5 mm/h (lines).\nMiddle and right: the products' false-alarm rate by "
@@ -608,7 +616,7 @@ def fig9_spells(hourly_hist: list[dict], daily: list[dict], daily_summary: list[
                       markeredgecolor=INK_SECONDARY, label="wet day ≥ 0.1 mm"),
                Line2D([], [], marker="o", linestyle="none", markersize=4.5, markerfacecolor=SURFACE,
                       markeredgecolor=INK_SECONDARY, label="wet day ≥ 1 mm")]
-    ax.legend(handles=handles, frameon=False, fontsize=6, loc="lower right")
+    ax.legend(handles=handles, frameon=False, fontsize=6, loc="upper right")
 
     ax = axes[2]
     clean_axis(ax, "both")
@@ -654,6 +662,8 @@ def fig10_calibration(occurrence: list[dict], exceedance: list[dict], lags: list
     ax.set_xscale("log")
     ax.set_yscale("log")
     ax.set_xlabel("Threshold t (mm/h)")
+    ax.set_xticks([0.01, 0.1, 0.5, 1, 4])
+    ax.set_xticklabels(["0.01", "0.1", "0.5", "1", "4"])
     ax.set_ylabel("P(estimate ≥ t | gauge dry)")
     ax.yaxis.set_major_formatter(mpl.ticker.FuncFormatter(lambda v, _: f"{100 * v:g}%"))
     ax.set_title("Exceedance on gauge-dry hours", loc="left")
@@ -663,17 +673,17 @@ def fig10_calibration(occurrence: list[dict], exceedance: list[dict], lags: list
     clean_axis(ax)
     x = np.arange(len(SEASONS) + 1)
     for k, product in enumerate(SAMPLES[sample]):
-        for threshold, marker_hollow, offset in ((0.1, False, -0.12), (0.5, True, 0.12)):
+        for threshold, offset in ((0.1, -0.18), (0.5, 0.18)):
             rows = [occ(occurrence, sample, product, "all", "all", threshold)] + \
                    [occ(occurrence, sample, product, "season", s, threshold) for s in SEASONS]
-            dots(ax, x + offset + (k - 0.5) * 0.3, [r["POFD"] for r in rows], PRODUCT_COLORS[product],
+            dots(ax, x + offset + (k - 0.5) * 0.14, [r["POFD"] for r in rows], PRODUCT_COLORS[product],
                  [r["POFD_lo"] for r in rows], [r["POFD_hi"] for r in rows],
-                 hollow=(product == "GPM_uncal") or marker_hollow, size=18, horizontal=False)
+                 hollow=product == "GPM_uncal", size=18, horizontal=False)
     ax.set_xticks(x)
     ax.set_xticklabels(["All"] + SEASONS)
     ax.set_ylim(0, None)
     ax.yaxis.set_major_formatter(mpl.ticker.FuncFormatter(lambda v, _: f"{100 * v:g}%"))
-    ax.set_title("False-alarm rate by season (left pair ≥ 0.1, right ≥ 0.5)", loc="left")
+    ax.set_title("False-alarm rate by season (left pair ≥ 0.1, right pair ≥ 0.5)", loc="left")
 
     ax = axes[2]
     clean_axis(ax)
@@ -724,7 +734,9 @@ def fig13_silent(silent: list[dict], occurrence: list[dict]) -> None:
             dots(ax_rate, [y[k] + offset], [r["POFD"]], PRODUCT_COLORS[product], [r["POFD_lo"]], [r["POFD_hi"]],
                  hollow=hollow, size=20)
     ax_rate.set_xscale("log")
+    # The span is under one decade, so the labelled ticks are log-minor ones.
     ax_rate.xaxis.set_major_formatter(mpl.ticker.FuncFormatter(lambda v, _: f"{100 * v:g}%"))
+    ax_rate.xaxis.set_minor_formatter(mpl.ticker.FuncFormatter(lambda v, _: f"{100 * v:g}%"))
     ax_rate.set_yticks(y)
     ax_rate.set_yticklabels([PRODUCT_LABELS[p] + (" · FY4B hours" if s == "all_products" else "") for s, p in entries],
                             fontsize=6.3)
@@ -734,7 +746,7 @@ def fig13_silent(silent: list[dict], occurrence: list[dict]) -> None:
                       markeredgecolor=INK_SECONDARY, label="gauge working"),
                Line2D([], [], marker="o", linestyle="none", markersize=4.5, markerfacecolor=SURFACE,
                       markeredgecolor=INK_SECONDARY, label="inside a silent-gauge spell")]
-    ax_rate.legend(handles=handles, frameon=False, fontsize=6, loc="lower right")
+    ax_rate.legend(handles=handles, frameon=False, fontsize=6, loc="upper left")
     title(fig, "Some gauge zeros are not dry hours: silent gauges",
           "A run of ≥ 7 days < 1 mm is flagged when the median of the gauge's 3 nearest neighbours reaches 5 mm on "
           "≥ 3 of its days (a working gauge stays < 1 mm on only a few percent\nof such days). Right: the products' "
@@ -749,7 +761,7 @@ def fig13_silent(silent: list[dict], occurrence: list[dict]) -> None:
 
 def fig11_fusion(summary: list[dict], paired: list[dict]) -> None:
     fig, axes = plt.subplots(1, 4, figsize=(10.0, 3.6), sharey=True)
-    fig.subplots_adjust(left=0.13, right=0.99, top=0.74, bottom=0.14, wspace=0.14)
+    fig.subplots_adjust(left=0.13, right=0.99, top=0.7, bottom=0.14, wspace=0.14)
     y = np.arange(len(METHODS))[::-1].astype(float)
     panels = [("spurious_mm_per_year", "Rain on dry hours (mm/yr)", None),
               ("POFD", "Dry hours predicted ≥ 0.1", 0.1),
@@ -779,16 +791,17 @@ def fig11_fusion(summary: list[dict], paired: list[dict]) -> None:
                       markeredgecolor=SURFACE, label=ANCHOR_LABELS[a]) for a in ANCHORS]
     handles.append(Line2D([], [], marker="o", linestyle="none", markersize=4.5, markerfacecolor=INK,
                           markeredgecolor=SURFACE, label="gauges only (no anchor)"))
-    fig.legend(handles=handles, loc="upper right", bbox_to_anchor=(0.99, 0.995), frameon=False, fontsize=6.2, ncol=6)
+    fig.legend(handles=handles, loc="upper left", bbox_to_anchor=(0.125, 0.855), frameon=False, fontsize=6.2, ncol=6)
     title(fig, "What the interpolation and fusion methods predict on gauge-dry hours",
           "Held-out gauges, balanced spatial CV, 13,471 common hours; each anchor on its own evaluation mask. "
-          "Gauge-only methods do not read a satellite and are drawn once, in ink.", left=0.13)
+          "Gauge-only methods do not read a satellite and are drawn once, in ink.\nRain per year of scored hours: the grid "
+          "follows FY4B's coverage and is weighted to summer, so compare methods, not with the full-record rates.", left=0.13)
     save(fig, "norain_fig11_fusion_dry")
 
 
 def fig12_fusion_where(paired: list[dict], strata: list[dict], zeroing: list[dict]) -> None:
     fig, axes = plt.subplots(1, 4, figsize=(10.0, 3.4), gridspec_kw={"width_ratios": [1.25, 1.0, 1.0, 1.0]})
-    fig.subplots_adjust(left=0.1, right=0.99, top=0.72, bottom=0.2, wspace=0.42)
+    fig.subplots_adjust(left=0.135, right=0.99, top=0.72, bottom=0.2, wspace=0.42)
     methods = ["mgwr", "auto", "blend_mgwr", "blend_agrenv_mgwr"]
     ax = axes[0]
     clean_axis(ax, "x")
@@ -801,7 +814,6 @@ def fig12_fusion_where(paired: list[dict], strata: list[dict], zeroing: list[dic
         total = sum(rows[q]["sse_gap"] for q in quadrants)
         left_pos, left_neg = 0.0, 0.0
         for q, color in zip(quadrants, q_colors):
-            gap = rows[q]["sse_gap"] / rows[q]["n"] if rows[q]["n"] else 0.0
             gap = rows[q]["sse_gap"] / 1e3
             start = left_pos if gap >= 0 else left_neg
             ax.barh(y[k], gap, left=start, color=color, height=0.6, zorder=2, edgecolor=SURFACE, linewidth=0.8)
@@ -832,7 +844,12 @@ def fig12_fusion_where(paired: list[dict], strata: list[dict], zeroing: list[dic
                     markersize=3, label=METHOD_LABELS[method], zorder=2)
         ax.set_xticks(x)
         ax.set_xticklabels(levels, fontsize=5.8, rotation=30, ha="right")
-        ax.set_yscale("log")
+        # Distance to rain spans more than a decade; distance to the training gauges does not.
+        if stratifier == "rain_proximity":
+            ax.set_yscale("log")
+            for axis_formatter in (ax.yaxis.set_major_formatter, ax.yaxis.set_minor_formatter):
+                axis_formatter(mpl.ticker.FuncFormatter(
+                    lambda v, _: f"{v:g}" if v > 0 and round(v / 10 ** np.floor(np.log10(v))) in (1, 2, 5) else ""))
         ax.set_ylabel("mm/h on gauge-dry hours")
         ax.set_title(heading, loc="left")
     axes[2].legend(frameon=False, fontsize=5.6, loc="upper right")
@@ -851,7 +868,7 @@ def fig12_fusion_where(paired: list[dict], strata: list[dict], zeroing: list[dic
     ax.set_title("Zeroing small values · GPM\n(descriptive, not tuned in-fold)", loc="left")
     title(fig, "Where the methods' dry-hour error sits, and what zeroing drizzle would do",
           "Balanced spatial CV on the GPM anchor. Left: each gauge × anchor quadrant's contribution to the method's total "
-          "squared error minus ADW's on the same cells.", left=0.1)
+          "squared error minus ADW's on the same cells.", left=0.135)
     save(fig, "norain_fig12_fusion_where")
 
 

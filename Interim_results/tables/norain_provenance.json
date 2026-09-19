@@ -1,0 +1,98 @@
+[
+ {
+  "key": "run_directory",
+  "value": "interpolation_benchmark_full_joint_covariates_nested_mgwrintercept_only_satwetblend_blendagrenv_fusedanchor"
+ },
+ {
+  "key": "git_commit",
+  "value": "68932f4f85cce1d23b1aafa3f63e80a1bd8a708c"
+ },
+ {
+  "key": "git_branch",
+  "value": "feat/fusion-evidence"
+ },
+ {
+  "key": "git_dirty",
+  "value": "true"
+ },
+ {
+  "key": "setting_analysis_start",
+  "value": "2022-01-01T09:00:00"
+ },
+ {
+  "key": "setting_analysis_end",
+  "value": "2025-01-01T08:00:00"
+ },
+ {
+  "key": "setting_samples",
+  "value": "all_products=FY4B+GPM+GSMaP; gpm_gsmap_full=GPM+GSMaP; gpm_cal_uncal=GPM+GPM_uncal"
+ },
+ {
+  "key": "setting_wet_threshold_mm_h",
+  "value": "0.1"
+ },
+ {
+  "key": "setting_estimate_thresholds_mm_h",
+  "value": "0.1,0.5"
+ },
+ {
+  "key": "setting_exceedance_thresholds_mm_h",
+  "value": "0.01,0.02,0.05,0.1,0.2,0.3,0.5,1.0,2.0,4.0,8.0"
+ },
+ {
+  "key": "setting_bootstrap_reps",
+  "value": "1000"
+ },
+ {
+  "key": "setting_bootstrap_block",
+  "value": "08-08 BJT met-day"
+ },
+ {
+  "key": "setting_seed",
+  "value": "20260919"
+ },
+ {
+  "key": "setting_neighbour_radius_km",
+  "value": "15.0"
+ },
+ {
+  "key": "setting_network_min_reporting",
+  "value": "0.9"
+ },
+ {
+  "key": "setting_rain_side_window_h",
+  "value": "3"
+ },
+ {
+  "key": "setting_proximity_edges_h",
+  "value": "1,3,6,24"
+ },
+ {
+  "key": "setting_dewpoint_depression_edges_c",
+  "value": "-Inf,1.0,3.0,6.0,10.0,Inf"
+ },
+ {
+  "key": "setting_t2m_edges_c",
+  "value": "-Inf,0.0,5.0,15.0,25.0,Inf"
+ },
+ {
+  "key": "setting_daily_thresholds_mm",
+  "value": "0.1,1.0"
+ },
+ {
+  "key": "setting_min_day_hours",
+  "value": "gpm_cal_uncal=24; all_products=20; gpm_gsmap_full=24"
+ },
+ {
+  "key": "setting_era5_offset_hours",
+  "value": "9"
+ },
+ {
+  "key": "setting_uncalibrated_imerg_offset_hours",
+  "value": "9"
+ },
+ {
+  "key": "setting_silent_gauge_rule",
+  "value": "dry_mm=1.0; wet_mm=5.0; min_days=7; min_wet_days=3; k=3"
+ }
+]

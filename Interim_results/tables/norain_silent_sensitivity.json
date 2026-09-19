@@ -1,0 +1,29 @@
+[
+ {
+  "min_wet_days": "2",
+  "n_spells": "149",
+  "n_stations": "78",
+  "station_days": "6,072",
+  "dry_hours": "145,538",
+  "dry_hour_share": "2.6",
+  "p_dry_given_wet": "3.9"
+ },
+ {
+  "min_wet_days": "3",
+  "n_spells": "97",
+  "n_stations": "60",
+  "station_days": "4,878",
+  "dry_hours": "116,944",
+  "dry_hour_share": "2.1",
+  "p_dry_given_wet": "3.9"
+ },
+ {
+  "min_wet_days": "5",
+  "n_spells": "49",
+  "n_stations": "39",
+  "station_days": "3,420",
+  "dry_hours": "81,996",
+  "dry_hour_share": "1.4",
+  "p_dry_given_wet": "3.9"
+ }
+]

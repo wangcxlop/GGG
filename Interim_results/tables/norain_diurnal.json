@@ -1,0 +1,352 @@
+[
+ {
+  "sample": "all_products",
+  "product": "FY4B",
+  "season": "all",
+  "peak_hour": "19",
+  "peak_POFD05": "5.7",
+  "low_hour": "02",
+  "low_POFD05": "2.2",
+  "ratio": "2.6"
+ },
+ {
+  "sample": "all_products",
+  "product": "FY4B",
+  "season": "MAM",
+  "peak_hour": "11",
+  "peak_POFD05": "5.9",
+  "low_hour": "02",
+  "low_POFD05": "0.9",
+  "ratio": "6.5"
+ },
+ {
+  "sample": "all_products",
+  "product": "FY4B",
+  "season": "JJA",
+  "peak_hour": "18",
+  "peak_POFD05": "7.4",
+  "low_hour": "06",
+  "low_POFD05": "2.2",
+  "ratio": "3.4"
+ },
+ {
+  "sample": "all_products",
+  "product": "FY4B",
+  "season": "SON",
+  "peak_hour": "17",
+  "peak_POFD05": "7.4",
+  "low_hour": "00",
+  "low_POFD05": "1.9",
+  "ratio": "4.0"
+ },
+ {
+  "sample": "all_products",
+  "product": "FY4B",
+  "season": "DJF",
+  "peak_hour": "17",
+  "peak_POFD05": "0.3",
+  "low_hour": "05",
+  "low_POFD05": "0.0",
+  "ratio": "–"
+ },
+ {
+  "sample": "all_products",
+  "product": "GPM",
+  "season": "all",
+  "peak_hour": "17",
+  "peak_POFD05": "5.3",
+  "low_hour": "03",
+  "low_POFD05": "1.7",
+  "ratio": "3.1"
+ },
+ {
+  "sample": "all_products",
+  "product": "GPM",
+  "season": "MAM",
+  "peak_hour": "16",
+  "peak_POFD05": "3.9",
+  "low_hour": "02",
+  "low_POFD05": "1.2",
+  "ratio": "3.2"
+ },
+ {
+  "sample": "all_products",
+  "product": "GPM",
+  "season": "JJA",
+  "peak_hour": "17",
+  "peak_POFD05": "7.8",
+  "low_hour": "03",
+  "low_POFD05": "2.3",
+  "ratio": "3.4"
+ },
+ {
+  "sample": "all_products",
+  "product": "GPM",
+  "season": "SON",
+  "peak_hour": "18",
+  "peak_POFD05": "3.8",
+  "low_hour": "00",
+  "low_POFD05": "1.1",
+  "ratio": "3.3"
+ },
+ {
+  "sample": "all_products",
+  "product": "GPM",
+  "season": "DJF",
+  "peak_hour": "18",
+  "peak_POFD05": "1.9",
+  "low_hour": "05",
+  "low_POFD05": "0.1",
+  "ratio": "13.0"
+ },
+ {
+  "sample": "all_products",
+  "product": "GSMaP",
+  "season": "all",
+  "peak_hour": "12",
+  "peak_POFD05": "4.6",
+  "low_hour": "06",
+  "low_POFD05": "1.7",
+  "ratio": "2.7"
+ },
+ {
+  "sample": "all_products",
+  "product": "GSMaP",
+  "season": "MAM",
+  "peak_hour": "11",
+  "peak_POFD05": "6.4",
+  "low_hour": "04",
+  "low_POFD05": "1.4",
+  "ratio": "4.6"
+ },
+ {
+  "sample": "all_products",
+  "product": "GSMaP",
+  "season": "JJA",
+  "peak_hour": "13",
+  "peak_POFD05": "5.3",
+  "low_hour": "05",
+  "low_POFD05": "1.6",
+  "ratio": "3.3"
+ },
+ {
+  "sample": "all_products",
+  "product": "GSMaP",
+  "season": "SON",
+  "peak_hour": "09",
+  "peak_POFD05": "4.8",
+  "low_hour": "00",
+  "low_POFD05": "1.4",
+  "ratio": "3.5"
+ },
+ {
+  "sample": "all_products",
+  "product": "GSMaP",
+  "season": "DJF",
+  "peak_hour": "22",
+  "peak_POFD05": "3.1",
+  "low_hour": "04",
+  "low_POFD05": "0.1",
+  "ratio": "41.6"
+ },
+ {
+  "sample": "gpm_gsmap_full",
+  "product": "GPM",
+  "season": "all",
+  "peak_hour": "17",
+  "peak_POFD05": "4.0",
+  "low_hour": "03",
+  "low_POFD05": "1.4",
+  "ratio": "2.9"
+ },
+ {
+  "sample": "gpm_gsmap_full",
+  "product": "GPM",
+  "season": "MAM",
+  "peak_hour": "16",
+  "peak_POFD05": "3.8",
+  "low_hour": "03",
+  "low_POFD05": "1.0",
+  "ratio": "3.9"
+ },
+ {
+  "sample": "gpm_gsmap_full",
+  "product": "GPM",
+  "season": "JJA",
+  "peak_hour": "17",
+  "peak_POFD05": "7.8",
+  "low_hour": "03",
+  "low_POFD05": "2.2",
+  "ratio": "3.6"
+ },
+ {
+  "sample": "gpm_gsmap_full",
+  "product": "GPM",
+  "season": "SON",
+  "peak_hour": "16",
+  "peak_POFD05": "3.7",
+  "low_hour": "22",
+  "low_POFD05": "1.4",
+  "ratio": "2.6"
+ },
+ {
+  "sample": "gpm_gsmap_full",
+  "product": "GPM",
+  "season": "DJF",
+  "peak_hour": "09",
+  "peak_POFD05": "1.1",
+  "low_hour": "12",
+  "low_POFD05": "0.5",
+  "ratio": "2.0"
+ },
+ {
+  "sample": "gpm_gsmap_full",
+  "product": "GSMaP",
+  "season": "all",
+  "peak_hour": "11",
+  "peak_POFD05": "4.0",
+  "low_hour": "06",
+  "low_POFD05": "1.6",
+  "ratio": "2.5"
+ },
+ {
+  "sample": "gpm_gsmap_full",
+  "product": "GSMaP",
+  "season": "MAM",
+  "peak_hour": "11",
+  "peak_POFD05": "5.8",
+  "low_hour": "04",
+  "low_POFD05": "1.4",
+  "ratio": "4.2"
+ },
+ {
+  "sample": "gpm_gsmap_full",
+  "product": "GSMaP",
+  "season": "JJA",
+  "peak_hour": "13",
+  "peak_POFD05": "5.2",
+  "low_hour": "05",
+  "low_POFD05": "1.6",
+  "ratio": "3.3"
+ },
+ {
+  "sample": "gpm_gsmap_full",
+  "product": "GSMaP",
+  "season": "SON",
+  "peak_hour": "11",
+  "peak_POFD05": "4.7",
+  "low_hour": "03",
+  "low_POFD05": "2.0",
+  "ratio": "2.4"
+ },
+ {
+  "sample": "gpm_gsmap_full",
+  "product": "GSMaP",
+  "season": "DJF",
+  "peak_hour": "22",
+  "peak_POFD05": "2.0",
+  "low_hour": "00",
+  "low_POFD05": "0.4",
+  "ratio": "4.8"
+ },
+ {
+  "sample": "gpm_cal_uncal",
+  "product": "GPM",
+  "season": "all",
+  "peak_hour": "17",
+  "peak_POFD05": "4.0",
+  "low_hour": "03",
+  "low_POFD05": "1.4",
+  "ratio": "2.9"
+ },
+ {
+  "sample": "gpm_cal_uncal",
+  "product": "GPM",
+  "season": "MAM",
+  "peak_hour": "16",
+  "peak_POFD05": "3.8",
+  "low_hour": "03",
+  "low_POFD05": "1.0",
+  "ratio": "3.9"
+ },
+ {
+  "sample": "gpm_cal_uncal",
+  "product": "GPM",
+  "season": "JJA",
+  "peak_hour": "17",
+  "peak_POFD05": "7.8",
+  "low_hour": "03",
+  "low_POFD05": "2.2",
+  "ratio": "3.6"
+ },
+ {
+  "sample": "gpm_cal_uncal",
+  "product": "GPM",
+  "season": "SON",
+  "peak_hour": "16",
+  "peak_POFD05": "3.7",
+  "low_hour": "22",
+  "low_POFD05": "1.4",
+  "ratio": "2.6"
+ },
+ {
+  "sample": "gpm_cal_uncal",
+  "product": "GPM",
+  "season": "DJF",
+  "peak_hour": "09",
+  "peak_POFD05": "1.1",
+  "low_hour": "12",
+  "low_POFD05": "0.5",
+  "ratio": "2.0"
+ },
+ {
+  "sample": "gpm_cal_uncal",
+  "product": "GPM_uncal",
+  "season": "all",
+  "peak_hour": "17",
+  "peak_POFD05": "3.4",
+  "low_hour": "03",
+  "low_POFD05": "1.1",
+  "ratio": "3.2"
+ },
+ {
+  "sample": "gpm_cal_uncal",
+  "product": "GPM_uncal",
+  "season": "MAM",
+  "peak_hour": "16",
+  "peak_POFD05": "3.0",
+  "low_hour": "03",
+  "low_POFD05": "0.7",
+  "ratio": "4.6"
+ },
+ {
+  "sample": "gpm_cal_uncal",
+  "product": "GPM_uncal",
+  "season": "JJA",
+  "peak_hour": "17",
+  "peak_POFD05": "7.0",
+  "low_hour": "03",
+  "low_POFD05": "1.9",
+  "ratio": "3.6"
+ },
+ {
+  "sample": "gpm_cal_uncal",
+  "product": "GPM_uncal",
+  "season": "SON",
+  "peak_hour": "16",
+  "peak_POFD05": "3.6",
+  "low_hour": "03",
+  "low_POFD05": "1.5",
+  "ratio": "2.3"
+ },
+ {
+  "sample": "gpm_cal_uncal",
+  "product": "GPM_uncal",
+  "season": "DJF",
+  "peak_hour": "09",
+  "peak_POFD05": "0.5",
+  "low_hour": "05",
+  "low_POFD05": "0.1",
+  "ratio": "4.7"
+ }
+]

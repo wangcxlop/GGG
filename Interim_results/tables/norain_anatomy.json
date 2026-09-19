@@ -1,0 +1,345 @@
+[
+ {
+  "stratifier": "all",
+  "level": "all",
+  "dry_share": "93.7",
+  "share_of_dry": "100.0",
+  "gauge_mm": "923"
+ },
+ {
+  "stratifier": "season",
+  "level": "MAM",
+  "dry_share": "93.0",
+  "share_of_dry": "25.0",
+  "gauge_mm": "907"
+ },
+ {
+  "stratifier": "season",
+  "level": "JJA",
+  "dry_share": "93.3",
+  "share_of_dry": "25.6",
+  "gauge_mm": "1472"
+ },
+ {
+  "stratifier": "season",
+  "level": "SON",
+  "dry_share": "91.6",
+  "share_of_dry": "24.5",
+  "gauge_mm": "1079"
+ },
+ {
+  "stratifier": "season",
+  "level": "DJF",
+  "dry_share": "97.0",
+  "share_of_dry": "24.9",
+  "gauge_mm": "186"
+ },
+ {
+  "stratifier": "month",
+  "level": "Jan",
+  "dry_share": "96.6",
+  "share_of_dry": "8.4",
+  "gauge_mm": "201"
+ },
+ {
+  "stratifier": "month",
+  "level": "Feb",
+  "dry_share": "96.0",
+  "share_of_dry": "7.7",
+  "gauge_mm": "252"
+ },
+ {
+  "stratifier": "month",
+  "level": "Mar",
+  "dry_share": "94.0",
+  "share_of_dry": "8.3",
+  "gauge_mm": "646"
+ },
+ {
+  "stratifier": "month",
+  "level": "Apr",
+  "dry_share": "92.1",
+  "share_of_dry": "8.1",
+  "gauge_mm": "1094"
+ },
+ {
+  "stratifier": "month",
+  "level": "May",
+  "dry_share": "92.9",
+  "share_of_dry": "8.6",
+  "gauge_mm": "977"
+ },
+ {
+  "stratifier": "month",
+  "level": "Jun",
+  "dry_share": "93.1",
+  "share_of_dry": "8.4",
+  "gauge_mm": "1395"
+ },
+ {
+  "stratifier": "month",
+  "level": "Jul",
+  "dry_share": "91.7",
+  "share_of_dry": "8.5",
+  "gauge_mm": "1877"
+ },
+ {
+  "stratifier": "month",
+  "level": "Aug",
+  "dry_share": "95.0",
+  "share_of_dry": "8.8",
+  "gauge_mm": "1140"
+ },
+ {
+  "stratifier": "month",
+  "level": "Sep",
+  "dry_share": "90.9",
+  "share_of_dry": "8.1",
+  "gauge_mm": "1397"
+ },
+ {
+  "stratifier": "month",
+  "level": "Oct",
+  "dry_share": "90.6",
+  "share_of_dry": "8.3",
+  "gauge_mm": "1260"
+ },
+ {
+  "stratifier": "month",
+  "level": "Nov",
+  "dry_share": "93.4",
+  "share_of_dry": "8.1",
+  "gauge_mm": "561"
+ },
+ {
+  "stratifier": "month",
+  "level": "Dec",
+  "dry_share": "98.4",
+  "share_of_dry": "8.7",
+  "gauge_mm": "112"
+ },
+ {
+  "stratifier": "region",
+  "level": "relief_lt500",
+  "dry_share": "94.0",
+  "share_of_dry": "55.3",
+  "gauge_mm": "873"
+ },
+ {
+  "stratifier": "region",
+  "level": "relief_500_1000",
+  "dry_share": "93.4",
+  "share_of_dry": "40.7",
+  "gauge_mm": "952"
+ },
+ {
+  "stratifier": "region",
+  "level": "relief_ge1000",
+  "dry_share": "91.8",
+  "share_of_dry": "4.0",
+  "gauge_mm": "1290"
+ },
+ {
+  "stratifier": "rain_proximity",
+  "level": "1 h",
+  "dry_share": "100.0",
+  "share_of_dry": "4.5",
+  "gauge_mm": "0"
+ },
+ {
+  "stratifier": "rain_proximity",
+  "level": "2-3 h",
+  "dry_share": "100.0",
+  "share_of_dry": "5.6",
+  "gauge_mm": "0"
+ },
+ {
+  "stratifier": "rain_proximity",
+  "level": "4-6 h",
+  "dry_share": "100.0",
+  "share_of_dry": "6.3",
+  "gauge_mm": "0"
+ },
+ {
+  "stratifier": "rain_proximity",
+  "level": "7-24 h",
+  "dry_share": "100.0",
+  "share_of_dry": "24.7",
+  "gauge_mm": "0"
+ },
+ {
+  "stratifier": "rain_proximity",
+  "level": "> 24 h",
+  "dry_share": "100.0",
+  "share_of_dry": "58.9",
+  "gauge_mm": "0"
+ },
+ {
+  "stratifier": "rain_side",
+  "level": "inside an event gap",
+  "dry_share": "100.0",
+  "share_of_dry": "2.0",
+  "gauge_mm": "0"
+ },
+ {
+  "stratifier": "rain_side",
+  "level": "before rain",
+  "dry_share": "100.0",
+  "share_of_dry": "3.9",
+  "gauge_mm": "0"
+ },
+ {
+  "stratifier": "rain_side",
+  "level": "after rain",
+  "dry_share": "100.0",
+  "share_of_dry": "3.9",
+  "gauge_mm": "0"
+ },
+ {
+  "stratifier": "rain_side",
+  "level": "away from rain",
+  "dry_share": "100.0",
+  "share_of_dry": "90.2",
+  "gauge_mm": "0"
+ },
+ {
+  "stratifier": "neighbours",
+  "level": "all neighbours dry",
+  "dry_share": "100.0",
+  "share_of_dry": "93.9",
+  "gauge_mm": "0"
+ },
+ {
+  "stratifier": "neighbours",
+  "level": "under half wet",
+  "dry_share": "100.0",
+  "share_of_dry": "4.7",
+  "gauge_mm": "0"
+ },
+ {
+  "stratifier": "neighbours",
+  "level": "half or more wet",
+  "dry_share": "100.0",
+  "share_of_dry": "1.5",
+  "gauge_mm": "0"
+ },
+ {
+  "stratifier": "network",
+  "level": "network dry",
+  "dry_share": "100.0",
+  "share_of_dry": "57.8",
+  "gauge_mm": "0"
+ },
+ {
+  "stratifier": "network",
+  "level": "isolated (<= 5% wet)",
+  "dry_share": "100.0",
+  "share_of_dry": "27.5",
+  "gauge_mm": "0"
+ },
+ {
+  "stratifier": "network",
+  "level": "scattered (5-25% wet)",
+  "dry_share": "100.0",
+  "share_of_dry": "10.4",
+  "gauge_mm": "0"
+ },
+ {
+  "stratifier": "network",
+  "level": "widespread (> 25% wet)",
+  "dry_share": "100.0",
+  "share_of_dry": "4.3",
+  "gauge_mm": "0"
+ },
+ {
+  "stratifier": "dewpoint_depression",
+  "level": "< 1",
+  "dry_share": "81.0",
+  "share_of_dry": "10.4",
+  "gauge_mm": "2877"
+ },
+ {
+  "stratifier": "dewpoint_depression",
+  "level": "1-3",
+  "dry_share": "90.4",
+  "share_of_dry": "26.5",
+  "gauge_mm": "1298"
+ },
+ {
+  "stratifier": "dewpoint_depression",
+  "level": "3-6",
+  "dry_share": "96.2",
+  "share_of_dry": "27.0",
+  "gauge_mm": "560"
+ },
+ {
+  "stratifier": "dewpoint_depression",
+  "level": "6-10",
+  "dry_share": "98.6",
+  "share_of_dry": "21.4",
+  "gauge_mm": "264"
+ },
+ {
+  "stratifier": "dewpoint_depression",
+  "level": ">= 10",
+  "dry_share": "99.5",
+  "share_of_dry": "14.5",
+  "gauge_mm": "120"
+ },
+ {
+  "stratifier": "t2m",
+  "level": "< 0",
+  "dry_share": "97.1",
+  "share_of_dry": "8.3",
+  "gauge_mm": "172"
+ },
+ {
+  "stratifier": "t2m",
+  "level": "0-5",
+  "dry_share": "93.3",
+  "share_of_dry": "13.1",
+  "gauge_mm": "566"
+ },
+ {
+  "stratifier": "t2m",
+  "level": "5-15",
+  "dry_share": "92.4",
+  "share_of_dry": "28.6",
+  "gauge_mm": "838"
+ },
+ {
+  "stratifier": "t2m",
+  "level": "15-25",
+  "dry_share": "92.3",
+  "share_of_dry": "34.1",
+  "gauge_mm": "1374"
+ },
+ {
+  "stratifier": "t2m",
+  "level": ">= 25",
+  "dry_share": "97.8",
+  "share_of_dry": "16.0",
+  "gauge_mm": "759"
+ },
+ {
+  "stratifier": "hour_extremes",
+  "level": "driest",
+  "dry_share": "95.1",
+  "share_of_dry": "05",
+  "gauge_mm": ""
+ },
+ {
+  "stratifier": "hour_extremes",
+  "level": "wettest",
+  "dry_share": "92.4",
+  "share_of_dry": "16",
+  "gauge_mm": ""
+ },
+ {
+  "stratifier": "network_hours",
+  "level": "network dry",
+  "dry_share": "54.2",
+  "share_of_dry": "14,036",
+  "gauge_mm": "25,904"
+ }
+]

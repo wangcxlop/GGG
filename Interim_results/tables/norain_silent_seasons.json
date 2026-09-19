@@ -1,0 +1,22 @@
+[
+ {
+  "season": "MAM",
+  "station_days": "939",
+  "share": "19"
+ },
+ {
+  "season": "JJA",
+  "station_days": "1,170",
+  "share": "24"
+ },
+ {
+  "season": "SON",
+  "station_days": "1,871",
+  "share": "38"
+ },
+ {
+  "season": "DJF",
+  "station_days": "898",
+  "share": "18"
+ }
+]

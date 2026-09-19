@@ -1,0 +1,48 @@
+[
+ {
+  "kind": "lag",
+  "lag": "-3",
+  "r": "0.280"
+ },
+ {
+  "kind": "lag",
+  "lag": "-2",
+  "r": "0.403"
+ },
+ {
+  "kind": "lag",
+  "lag": "-1",
+  "r": "0.629"
+ },
+ {
+  "kind": "lag",
+  "lag": "0",
+  "r": "0.913"
+ },
+ {
+  "kind": "lag",
+  "lag": "1",
+  "r": "0.636"
+ },
+ {
+  "kind": "lag",
+  "lag": "2",
+  "r": "0.407"
+ },
+ {
+  "kind": "lag",
+  "lag": "3",
+  "r": "0.283"
+ },
+ {
+  "kind": "pattern",
+  "n": "6,039,199",
+  "both_zero": "85.8",
+  "zero_in_calibrated_only": "0.7",
+  "zero_in_uncalibrated_only": "0.8",
+  "both_wet": "7.9",
+  "wet_in_calibrated_only": "1.1",
+  "wet_in_uncalibrated_only": "0.6",
+  "volume_ratio_calibrated_to_uncalibrated": "1.20"
+ }
+]

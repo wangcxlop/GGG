@@ -1,0 +1,72 @@
+[
+ {
+  "sample": "all_products",
+  "product": "FY4B",
+  "n_hours": "6,773",
+  "mean_wet_share": "3.1",
+  "any": "17",
+  "gt5": "10",
+  "gt25": "4",
+  "gt50": "2.0"
+ },
+ {
+  "sample": "all_products",
+  "product": "GPM",
+  "n_hours": "6,773",
+  "mean_wet_share": "2.0",
+  "any": "30",
+  "gt5": "10",
+  "gt25": "2",
+  "gt50": "0.4"
+ },
+ {
+  "sample": "all_products",
+  "product": "GSMaP",
+  "n_hours": "6,773",
+  "mean_wet_share": "2.2",
+  "any": "19",
+  "gt5": "9",
+  "gt25": "3",
+  "gt50": "1.0"
+ },
+ {
+  "sample": "gpm_gsmap_full",
+  "product": "GPM",
+  "n_hours": "14,036",
+  "mean_wet_share": "1.7",
+  "any": "28",
+  "gt5": "8",
+  "gt25": "2",
+  "gt50": "0.3"
+ },
+ {
+  "sample": "gpm_gsmap_full",
+  "product": "GSMaP",
+  "n_hours": "14,036",
+  "mean_wet_share": "2.1",
+  "any": "18",
+  "gt5": "8",
+  "gt25": "3",
+  "gt50": "0.9"
+ },
+ {
+  "sample": "gpm_cal_uncal",
+  "product": "GPM",
+  "n_hours": "14,036",
+  "mean_wet_share": "1.7",
+  "any": "28",
+  "gt5": "8",
+  "gt25": "2",
+  "gt50": "0.3"
+ },
+ {
+  "sample": "gpm_cal_uncal",
+  "product": "GPM_uncal",
+  "n_hours": "14,036",
+  "mean_wet_share": "1.5",
+  "any": "26",
+  "gt5": "8",
+  "gt25": "1",
+  "gt50": "0.3"
+ }
+]
