@@ -210,6 +210,10 @@ which git matches at any depth, so files there would be silently untracked.
    - `benchmark/SatelliteTemporalEvaluation.jl`: hourly, event, diurnal and regional-series scores
      of the satellite products against the gauges, stratified by intensity class, season and
      landform region. Same standalone discipline as `BenchmarkDiagnostics`.
+   - `benchmark/NoRainEvaluation.jl`: the gauge-dry station-hours on their own - occurrence scores
+     under any stratifier, where a dry hour sits relative to rain, the neighbouring-gauge baseline, dry
+     spells and days, and the silent-gauge screen. Driven by `scripts/run_no_rain_evaluation.jl`
+     (products) and `scripts/run_no_rain_fusion_evaluation.jl` (the benchmark's saved predictions).
    - `mger/MGERDataPrep.jl`, beside the pipeline it serves.
 
 3. **`MGERPipeline.jl` and `InterpolationBenchmark.jl` are *not* modules** — they are top-level
