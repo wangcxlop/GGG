@@ -39,6 +39,8 @@ function standalone_module_dependencies(name::AbstractString)
     name == "LandformClassification" && return ["TerrainFeatures"]
     name == "SatelliteTemporalEvaluation" && return ["HeavyRainEvents"]
     name == "NoRainEvaluation" && return ["TraditionalInterpolation", "SatelliteTemporalEvaluation"]
+    name == "GridSupportDiagnostics" && return ["FY4BPreprocessing", "TraditionalInterpolation",
+        "TerrainFeatures", "LandformClassification"]
     return String[]
 end
 
