@@ -248,7 +248,7 @@ def fig1_anatomy(occurrence: list[dict]) -> None:
         ax.set_xticks([])
         ax.set_title(heading, loc="left")
     title(fig, "The no-rain record: when and where the gauges are dry",
-          "Full 2022–2024 record, 237 gauges; a dry hour is gauge < 0.1 mm/h (a 0.0 reading for 0.5 mm buckets). "
+          "Full 2022–2024 record, 237 gauges; a dry hour is gauge < 0.1 mm/h (in practice a reading of 0.0)."
           "Distances to rain are to the same gauge's nearest wet hour;\nhours next to a missing gauge value are left out. "
           "Network state: share of reporting gauges that are wet in that hour (hours with < 90% reporting left out).",
           left=0.06)
@@ -276,7 +276,7 @@ def fig2_exceedance(exceedance: list[dict], baseline: list[dict]) -> None:
         ax.axhline(near["POFD"], color=MUTED, linewidth=0.9, linestyle=":", zorder=1)
         ax.text(0.011, near["POFD"] * 1.12, f"a gauge 0–5 km away: {100 * near['POFD']:.1f}%", fontsize=6, color=INK_SECONDARY)
         ax.axvline(0.5, color=AXIS, linewidth=0.8, zorder=1)
-        ax.text(0.52, 0.2, "gauge\nresolution", fontsize=5.8, color=MUTED, va="top")
+        ax.text(0.52, 0.2, "stricter\nthreshold", fontsize=5.8, color=MUTED, va="top")
         ax.set_xscale("log")
         ax.set_yscale("log")
         ax.set_xlabel("Estimate threshold t (mm/h)")
@@ -328,7 +328,7 @@ def fig3_contingency(occurrence: list[dict]) -> None:
                       markeredgecolor=INK_SECONDARY, label="estimate ≥ 0.5 mm/h")]
     fig.legend(handles=handles, loc="upper right", bbox_to_anchor=(0.99, 0.99), frameon=False, fontsize=6.3, ncol=2)
     title(fig, "Occurrence scores: the dry side of the contingency table",
-          "Gauge wet at ≥ 0.1 mm/h (every wet reading is ≥ 0.5). Whiskers: 95% day-block bootstrap. "
+          "Gauge wet at ≥ 0.1 mm/h. Whiskers: 95% day-block bootstrap. "
           "Grey line: a perfect score.", left=0.1)
     save(fig, "norain_fig3_contingency")
 
@@ -689,6 +689,7 @@ def fig10_calibration(occurrence: list[dict], exceedance: list[dict], lags: list
     clean_axis(ax)
     ax.bar([r["lag"] for r in lags], [r["r"] for r in lags], color=ORDINAL_BLUES[1], width=0.7, zorder=2)
     ax.set_xlabel("Lag of uncalibrated series (h)")
+    ax.set_ylabel("Pooled correlation r (unitless)")
     ax.set_title("Clock check: pooled r", loc="left")
     title(fig, "Does IMERG's gauge calibration remove the dry-hour rain?",
           "Full record, cells where both IMERG series and the gauge report. The calibrated series is the Final run's "
@@ -784,7 +785,10 @@ def fig11_fusion(summary: list[dict], paired: list[dict]) -> None:
         if column != "spurious_mm_per_year":
             ax.xaxis.set_major_formatter(mpl.ticker.FuncFormatter(lambda v, _: f"{100 * v:g}%"))
     gauge_rate = one(summary, scheme=SCHEME, anchor="GPM", method="raw", stratifier="all", threshold=0.1)["gauge_mm_per_year"]
-    axes[0].set_xlabel(f"gauge total: {gauge_rate:.0f} mm/yr", fontsize=6)
+    axes[0].set_xlabel(f"mm per year (gauge total: {gauge_rate:.0f})", fontsize=6)
+    axes[1].set_xlabel("% of dry hours", fontsize=6)
+    axes[2].set_xlabel("% of dry hours", fontsize=6)
+    axes[3].set_xlabel("% of total squared error", fontsize=6)
     axes[0].set_yticks(y)
     axes[0].set_yticklabels([METHOD_LABELS[m] for m in METHODS], fontsize=6.3)
     handles = [Line2D([], [], marker="o", linestyle="none", markersize=4.5, markerfacecolor=ANCHOR_COLORS[a],

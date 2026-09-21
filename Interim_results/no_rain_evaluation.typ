@@ -111,6 +111,15 @@
 #let note(body) = block(width: 100%, inset: (x: 10pt, y: 8pt), radius: 3pt, fill: luma(246),
   stroke: (left: 2.5pt + rgb("#2a78d6")), body)
 
+/// The four-part reading guide printed under every figure: both axes with their units, how to read the
+/// figure, and what it shows. Panels with different axes give one line per panel inside `x` and `y`.
+#let explain(x: [], y: [], read: [], shows: []) = block(width: 100%, inset: (x: 9pt, y: 7pt), radius: 3pt,
+  fill: luma(248), stroke: 0.4pt + luma(200), breakable: true, {
+  set text(size: 9pt)
+  set par(justify: false, leading: 0.55em, spacing: 0.7em)
+  [*x-axis.* #x] + parbreak() + [*y-axis.* #y] + parbreak() + [*How to read it.* #read] + parbreak() + [*What it shows.* #shows]
+})
+
 #let P = (FY4B: "FY4B", GPM: "GPM", GSMaP: "GSMaP", GPM_uncal: "GPM uncalibrated")
 #let S = (all_products: "FY4B hours", gpm_gsmap_full: "full record", gpm_cal_uncal: "full record")
 #let M = (
@@ -139,7 +148,7 @@
 
 = Key findings
 
-- *The products rain on 6–7% of dry hours, mostly as drizzle.* Over 2022–2024 GPM reports ≥ 0.1 mm/h on #ov("POFD", "gpm_gsmap_full", "GPM", "0.1")% of gauge-dry hours and GSMaP on #ov("POFD", "gpm_gsmap_full", "GSMaP", "0.1")%, with too many wet hours at 0.1 mm/h (frequency bias #ov("freq_bias", "gpm_gsmap_full", "GPM", "0.1"), #ov("freq_bias", "gpm_gsmap_full", "GSMaP", "0.1")) but too few at the gauge's 0.5 mm resolution (#ov("freq_bias", "gpm_gsmap_full", "GPM", "0.5"), #ov("freq_bias", "gpm_gsmap_full", "GSMaP", "0.5")). A third of their rain volume falls on gauge-dry hours; for FY4B it is #ov("dry_volume_share", "all_products", "FY4B", "0.1")%.
+- *The products rain on 6–7% of dry hours, mostly as drizzle.* Over 2022–2024 GPM reports ≥ 0.1 mm/h on #ov("POFD", "gpm_gsmap_full", "GPM", "0.1")% of gauge-dry hours and GSMaP on #ov("POFD", "gpm_gsmap_full", "GSMaP", "0.1")%, with too many wet hours at 0.1 mm/h (frequency bias #ov("freq_bias", "gpm_gsmap_full", "GPM", "0.1"), #ov("freq_bias", "gpm_gsmap_full", "GSMaP", "0.1")) but too few at the stricter 0.5 mm/h threshold (#ov("freq_bias", "gpm_gsmap_full", "GPM", "0.5"), #ov("freq_bias", "gpm_gsmap_full", "GSMaP", "0.5")). A third of their rain volume falls on gauge-dry hours; for FY4B it is #ov("dry_volume_share", "all_products", "FY4B", "0.1")%.
 - *Most of that rain is displaced, not invented.* GPM's false-alarm rate at ≥ 0.5 mm/h is #st("POFD05", "gpm_gsmap_full", "GPM", "rain_proximity", "1 h")% within an hour of the gauge's own rain and #st("POFD05", "gpm_gsmap_full", "GPM", "rain_proximity", "> 24 h")% more than a day from it; #fa-share("gpm_gsmap_full", "GPM", "rain_proximity", ("1 h", "2-3 h", "4-6 h")) of its false alarms are within 6 h of rain. At 0.5 mm/h GPM and GSMaP false-alarm about as often as a neighbouring gauge 15–30 km away does. FY4B is the exception: its false alarms are the least tied to real rain, and it produces whole phantom rain areas.
 - *The products share their false alarms,* so merging them cannot remove them; they rain early, before the gauges' onset; and in dry air most of their wet hours are false (false-alarm ratio #st("FAR01", "gpm_gsmap_full", "GPM", "dewpoint_depression", ">= 10")% at a dew-point depression ≥ 10 °C), the signature of rain evaporating below the cloud.
 - *IMERG's gauge calibration adds dry-hour rain rather than removing it* (spurious rain #ov("spurious_mm", "gpm_cal_uncal", "GPM_uncal", "0.1") → #ov("spurious_mm", "gpm_cal_uncal", "GPM", "0.1") mm per year): it rescales amounts and leaves the occurrence pattern as it was.
@@ -151,13 +160,13 @@
 The three earlier interim reports looked at rain: its intensity and timing (temporal evaluation), its spatial pattern on heavy-rain days (heavy-rain events), and what gauges and satellites gain from each other (fusion). Yet #val(anatomy, "dry_share", stratifier: "all", level: "all")% of gauge station-hours record no rain at all, and the fusion report found that dry hours decide how the methods rank: unblended fusion loses to gauge-only interpolation mainly on hours when the gauge is dry but the satellite is not, and the blending rule wins overall mainly by repairing those hours. This report looks at the no-rain hours on their own, as widely as the data allow:
 
 + How often, how much and when do the products report rain when the gauge reports none (@sec-how-often, @sec-when-where)?
-+ Is that rain really false — or is it rain next to the gauge in time or space, rain below the gauge's resolution, or rain the gauge failed to record (@sec-false, @sec-silent)?
++ Is that rain really false — or is it rain next to the gauge in time or space, very light rain the gauge values do not resolve, or rain the gauge failed to record (@sec-false, @sec-silent)?
 + Do the products reproduce dry spells and dry days (@sec-spells)? Does IMERG's gauge calibration change any of this (@sec-calibration)?
 + What do the interpolation and fusion methods predict on dry hours, and where does their dry-hour error come from (@sec-fusion)?
 
 = Data and samples
 
-- *Gauges.* 237 hourly tipping-bucket gauges (0.5 mm resolution) in the Shiyan study area, hour-ending Beijing time (BJT), 08–08 BJT days from 1 January 2022 to 31 December 2024.
+- *Gauges.* 237 hourly rain gauges in the Shiyan study area (instrument type and model not specified), hourly totals in mm, hour-ending Beijing time (BJT), 08–08 BJT days from 1 January 2022 to 31 December 2024. One property of the data, not of the instrument: 99.9% of the non-zero hourly gauge values in 2022–2024 are multiples of 0.5 mm.
 - *Products*, at the gauge pixel and on the gauge clock: FY4B (strict hourly aggregation, navigation-corrected), GPM IMERG V07 Final `precipitation` (gauge-calibrated) and GSMaP V8 operational (no gauge correction), as in the earlier reports. New here: IMERG V07 `precipitationUncal`, the same multi-satellite estimate *before* its monthly gauge calibration, downloaded half-hourly from NASA GES DISC and placed on the gauge clock (@sec-calibration).
 - *ERA5-Land* 2 m temperature and dew point at every gauge, hourly, on the same clock the benchmark's covariates use.
 - *Three samples*, as in the temporal report (every product in a sample is scored on identical station-hours):
@@ -170,7 +179,7 @@ The three earlier interim reports looked at rain: its intensity and timing (temp
 
 == What counts as no rain
 
-A station-hour is *gauge-dry* when the gauge reads below 0.1 mm — for a 0.5 mm bucket, a reading of 0.0.#footnote[A handful of gauge readings are non-zero but below 0.1 mm; they are counted as dry, exactly as the benchmark counts them.] A product is *wet* at a threshold $t$ when it reaches $t$; two thresholds are used throughout, 0.1 mm/h (the wet threshold) and 0.5 mm/h (the gauge resolution), because a product value between them may be drizzle the bucket had not yet tipped for. With the 2×2 table of gauge and product occurrence (@tab-scores), the dry side is described by:
+A station-hour is *gauge-dry* when the gauge reads below 0.1 mm (in practice a reading of 0.0).#footnote[A handful of gauge readings are non-zero but below 0.1 mm; they are counted as dry, exactly as the benchmark counts them.] A product is *wet* at a threshold $t$ when it reaches $t$; two thresholds are used throughout, 0.1 mm/h (the wet threshold) and 0.5 mm/h (a stricter threshold chosen for this analysis, not a property of the gauges), so that light drizzle and clearer rain can be told apart. With the 2×2 table of gauge and product occurrence (@tab-scores), the dry side is described by:
 
 #block(breakable: false)[
 #figure(
@@ -213,7 +222,7 @@ Hours whose class depends on a missing gauge value are left out of that stratifi
 
 == The silent-gauge screen <sec-silent-method>
 
-A dry hour is only as good as the gauge. A gauge that reads 0.0 while it is not measuring — a blocked funnel, a stopped logger — produces dry hours on which any rain at all counts as a satellite false alarm. The screen works on 08–08 daily totals: a run of at least 7 complete days below 1 mm at a gauge is flagged when the median daily total of its three nearest reporting gauges reaches 5 mm on at least 3 of those days. The rule rests on one measured rate: over all station-days, a gauge stays below 1 mm on only #val(silent-sensitivity, "p_dry_given_wet", min_wet_days: "3")% of the days its neighbours' median reaches 5 mm, so three such days inside one dry run are very unlikely to be weather. The sensitivity to that "3" is reported (@tab-silent-rule). The screen is a description, not a correction: no gauge value is changed, and every result elsewhere is on the unscreened data unless stated.
+A dry hour is only as good as the gauge. A gauge that reads 0.0 while it is not measuring (for instance a blockage or a stopped logger) produces dry hours on which any rain at all counts as a satellite false alarm. The screen works on 08–08 daily totals: a run of at least 7 complete days below 1 mm at a gauge is flagged when the median daily total of its three nearest reporting gauges reaches 5 mm on at least 3 of those days. The rule rests on one measured rate: over all station-days, a gauge stays below 1 mm on only #val(silent-sensitivity, "p_dry_given_wet", min_wet_days: "3")% of the days its neighbours' median reaches 5 mm, so three such days inside one dry run are very unlikely to be weather. The sensitivity to that "3" is reported (@tab-silent-rule). The screen is a description, not a correction: no gauge value is changed, and every result elsewhere is on the unscreened data unless stated.
 
 == Dry spells and dry days
 
@@ -236,9 +245,16 @@ Most dry hours are far from any rain. #val(anatomy, "share_of_dry", stratifier: 
   caption: [The no-rain record at 237 gauges, full 2022–2024 record: dry share by month and by hour and season, and how the dry hours split by distance to the gauge's own rain and by the state of the whole network.],
 ) <fig-anatomy>
 
+#explain(
+  x: [Four panels, left to right. Panel 1: calendar month (J = January … D = December). Panel 2: hour of day, hour-ending Beijing time (BJT), 0–23 h, one line per season. Panels 3 and 4: share of all gauge-dry station-hours (%, printed at the end of each bar).],
+  y: [Panels 1 and 2: the dry share, i.e. the fraction of all station-hours at which the gauge reads below 0.1 mm (a unitless fraction; the axis runs from 0.8 to 1.0, i.e. 80–100%, and does not start at zero). Panels 3 and 4: categories of dry hours, namely the distance in hours to the same gauge's nearest wet hour (panel 3) and the share of reporting gauges that are wet in that hour (panel 4).],
+  read: [In panels 1–2 a higher point or bar means that more of the station-hours are dry. In panels 3–4 the bar length is the share of the dry hours falling in that category, and the bars of one panel add up to 100%.],
+  shows: [Dry hours are the large majority in every month, season and hour (#val(anatomy, "dry_share", stratifier: "all", level: "all")% overall), with only a weak seasonal and diurnal cycle. Most of them are far from any rain: #val(anatomy, "share_of_dry", stratifier: "rain_proximity", level: "> 24 h")% are more than 24 h from the gauge's own nearest wet hour, and #val(anatomy, "share_of_dry", stratifier: "network", level: "network dry")% occur when no reporting gauge in the network is wet. A satellite's dry-hour record is therefore dominated by clear weather.],
+)
+
 == How often the products rain on dry hours <sec-how-often>
 
-@tab-overview lists the scores and @fig-exceedance the rate at every threshold. Over the full record GPM reports ≥ 0.1 mm/h on #ov("POFD", "gpm_gsmap_full", "GPM", "0.1")% of gauge-dry hours and GSMaP on #ov("POFD", "gpm_gsmap_full", "GSMaP", "0.1")%; at the gauge's own resolution, ≥ 0.5 mm/h, the rates fall to #ov("POFD", "gpm_gsmap_full", "GPM", "0.5")% and #ov("POFD", "gpm_gsmap_full", "GSMaP", "0.5")%. The frequency bias shows what kind of rain this is: at 0.1 mm/h both products have too many wet hours (#ov("freq_bias", "gpm_gsmap_full", "GPM", "0.1") and #ov("freq_bias", "gpm_gsmap_full", "GSMaP", "0.1")), at 0.5 mm/h too few (#ov("freq_bias", "gpm_gsmap_full", "GPM", "0.5") and #ov("freq_bias", "gpm_gsmap_full", "GSMaP", "0.5")). The surplus of wet hours is drizzle between 0.1 and 0.5 mm/h, which a 0.5 mm bucket cannot record in one hour. More than half of the products' wet hours at 0.1 mm/h are gauge-dry (FAR #ov("FAR", "gpm_gsmap_full", "GPM", "0.1")% and #ov("FAR", "gpm_gsmap_full", "GSMaP", "0.1")%).
+@tab-overview lists the scores and @fig-exceedance the rate at every threshold. Over the full record GPM reports ≥ 0.1 mm/h on #ov("POFD", "gpm_gsmap_full", "GPM", "0.1")% of gauge-dry hours and GSMaP on #ov("POFD", "gpm_gsmap_full", "GSMaP", "0.1")%; at the stricter threshold, ≥ 0.5 mm/h, the rates fall to #ov("POFD", "gpm_gsmap_full", "GPM", "0.5")% and #ov("POFD", "gpm_gsmap_full", "GSMaP", "0.5")%. The frequency bias shows what kind of rain this is: at 0.1 mm/h both products have too many wet hours (#ov("freq_bias", "gpm_gsmap_full", "GPM", "0.1") and #ov("freq_bias", "gpm_gsmap_full", "GSMaP", "0.1")), at 0.5 mm/h too few (#ov("freq_bias", "gpm_gsmap_full", "GPM", "0.5") and #ov("freq_bias", "gpm_gsmap_full", "GSMaP", "0.5")). The surplus of wet hours is drizzle between 0.1 and 0.5 mm/h. More than half of the products' wet hours at 0.1 mm/h are gauge-dry (FAR #ov("FAR", "gpm_gsmap_full", "GPM", "0.1")% and #ov("FAR", "gpm_gsmap_full", "GSMaP", "0.1")%).
 
 The rain is small per hour but large in total. On gauge-dry hours GPM and GSMaP are exactly zero #ov("zero_share", "gpm_gsmap_full", "GPM", "0.1")% and #ov("zero_share", "gpm_gsmap_full", "GSMaP", "0.1")% of the time, yet #ov("dry_volume_share", "gpm_gsmap_full", "GPM", "0.1")% of GPM's and #ov("dry_volume_share", "gpm_gsmap_full", "GSMaP", "0.1")% of GSMaP's rain falls on those hours: #ov("spurious_mm", "gpm_gsmap_full", "GPM", "0.1") and #ov("spurious_mm", "gpm_gsmap_full", "GSMaP", "0.1") mm per year, against a gauge total of #ov("gauge_mm", "gpm_gsmap_full", "GPM", "0.1") mm per year.
 
@@ -248,6 +264,13 @@ FY4B behaves differently. On the hours it covers it reports ≥ 0.1 mm/h on fewe
   image("figures/norain_fig2_exceedance.png", width: 100%),
   caption: [Share of gauge-dry station-hours on which each product reaches the threshold $t$. Dotted: a neighbouring gauge 0–5 km away used as the estimate.],
 ) <fig-exceedance>
+
+#explain(
+  x: [The estimate threshold $t$ in mm/h, on a logarithmic scale (ticks at 0.01, 0.1, 0.5, 1 and 4 mm/h). The vertical line marks 0.5 mm/h, the stricter of the two thresholds used in this report.],
+  y: [The share of gauge-dry station-hours (gauge below 0.1 mm) on which the product's hourly estimate is at least $t$, in % on a logarithmic scale. This is the false-alarm rate at threshold $t$. Left panel: the hours FY4B covers; right panel: the full record (GPM, GSMaP and uncalibrated GPM).],
+  read: [Each curve starts at the left with the share of dry hours on which the product reports any light rain and falls as the threshold rises. A curve that stays low is a product that rarely rains on dry hours. The dotted line is the same rate when a neighbouring gauge 0–5 km away is used as the "estimate": rain that a perfect point-to-area comparison would still produce.],
+  shows: [GPM and GSMaP rain on #ov("POFD", "gpm_gsmap_full", "GPM", "0.1")% and #ov("POFD", "gpm_gsmap_full", "GSMaP", "0.1")% of dry hours at 0.1 mm/h, falling to #ov("POFD", "gpm_gsmap_full", "GPM", "0.5")% and #ov("POFD", "gpm_gsmap_full", "GSMaP", "0.5")% at 0.5 mm/h, so most of their dry-hour rain is drizzle. FY4B is nearly flat below 0.1 mm/h: it has almost no light values, so when it is wet on a dry hour it is wet with a real amount.],
+)
 
 #block(breakable: false)[
 #figure(
@@ -269,7 +292,7 @@ FY4B behaves differently. On the hours it covers it reports ≥ 0.1 mm/h on fewe
 ) <tab-overview>
 ]
 
-The gauges' own spread sets the scale for these numbers (@fig-floor). Scored against one another, a gauge 0–5 km away reports rain on #val(baseline, "POFD", sample: "gpm_gsmap_full", level: "0-5 km")% of the hours its neighbour is dry, and one 20–30 km away on #val(baseline, "POFD", sample: "gpm_gsmap_full", level: "20-30 km")%. At ≥ 0.5 mm/h GPM and GSMaP (#ov("POFD", "gpm_gsmap_full", "GPM", "0.5")% and #ov("POFD", "gpm_gsmap_full", "GSMaP", "0.5")%) sit inside that range: at the gauge resolution they false-alarm about as often as a gauge 15–30 km away would. At 0.1 mm/h they do so two to four times as often. FY4B (#ov("POFD", "all_products", "FY4B", "0.5")% on its hours) is above every gauge baseline.
+The gauges' own spread sets the scale for these numbers (@fig-floor). Scored against one another, a gauge 0–5 km away reports rain on #val(baseline, "POFD", sample: "gpm_gsmap_full", level: "0-5 km")% of the hours its neighbour is dry, and one 20–30 km away on #val(baseline, "POFD", sample: "gpm_gsmap_full", level: "20-30 km")%. At ≥ 0.5 mm/h GPM and GSMaP (#ov("POFD", "gpm_gsmap_full", "GPM", "0.5")% and #ov("POFD", "gpm_gsmap_full", "GSMaP", "0.5")%) sit inside that range: at this threshold they false-alarm about as often as a gauge 15–30 km away would. At 0.1 mm/h they do so two to four times as often. FY4B (#ov("POFD", "all_products", "FY4B", "0.5")% on its hours) is above every gauge baseline.
 
 Across gauges the rates are uniform. At ≥ 0.5 mm/h, 80% of the gauges lie between #val(stations, "POFD_p10", sample: "gpm_gsmap_full", product: "GPM", threshold: "0.5")% and #val(stations, "POFD_p90", sample: "gpm_gsmap_full", product: "GPM", threshold: "0.5")% for GPM and between #val(stations, "POFD_p10", sample: "all_products", product: "FY4B", threshold: "0.5")% and #val(stations, "POFD_p90", sample: "all_products", product: "FY4B", threshold: "0.5")% for FY4B (@fig-maps), and the three relief regions are within a few tenths of a point of each other. The false alarms are not the problem of a few pixels or of the mountains.
 
@@ -278,14 +301,28 @@ Across gauges the rates are uniform. At ≥ 0.5 mm/h, 80% of the gauges lie betw
   caption: [The dry side of the occurrence table for every product and sample, at 0.1 and 0.5 mm/h, with 95% day-block bootstrap intervals.],
 ) <fig-contingency>
 
+#explain(
+  x: [Five panels, one per score, each with its own scale. False-alarm rate, false-alarm ratio and dry reliability are fractions between 0 and 1 (not percentages); frequency bias is a ratio of wet-hour counts (product / gauge, no unit); the Heidke skill score is unitless with 1 for a perfect forecast. The grey vertical line in each panel is the perfect value (0 for false-alarm rate and ratio, 1 for the others).],
+  y: [The product and the sample it was scored on (rows are shared by all panels). "FY4B hours" rows are scored on the hours where all three products report; the other rows use the full record.],
+  read: [Filled dots use the 0.1 mm/h threshold on the product's estimate, hollow dots the 0.5 mm/h threshold. Whiskers are 95% day-block bootstrap intervals. The closer a dot is to the grey line, the better; a dot beyond the line in the frequency-bias panel means the product rains too often (above 1) or too rarely (below 1).],
+  shows: [At 0.1 mm/h GPM and GSMaP have frequency biases of #ov("freq_bias", "gpm_gsmap_full", "GPM", "0.1") and #ov("freq_bias", "gpm_gsmap_full", "GSMaP", "0.1") (too many wet hours), and at 0.5 mm/h #ov("freq_bias", "gpm_gsmap_full", "GPM", "0.5") and #ov("freq_bias", "gpm_gsmap_full", "GSMaP", "0.5") (too few). The false-alarm ratio at 0.1 mm/h shows that more than half of their wet hours are gauge-dry (#ov("FAR", "gpm_gsmap_full", "GPM", "0.1")% and #ov("FAR", "gpm_gsmap_full", "GSMaP", "0.1")%). Calibrated and uncalibrated GPM are close on every score.],
+)
+
 #figure(
   image("figures/norain_fig5_station_maps.png", width: 88%),
   caption: [False-alarm rate at ≥ 0.5 mm/h (top) and the share of the product's rain that falls on gauge-dry hours (bottom), at each gauge, on the hours FY4B covers.],
 ) <fig-maps>
 
+#explain(
+  x: [Longitude of the gauge, in degrees east (° E), ticks at 110, 110.5 and 111° E. One column per product: FY4B, GPM, GSMaP.],
+  y: [Latitude of the gauge, in degrees north (° N), ticks from 31.5 to 33° N. The vertical scale is stretched by 1/cos(latitude) so that distances look right. The colour of each dot is the plotted quantity: top row, the false-alarm rate at ≥ 0.5 mm/h in % of that gauge's dry hours; bottom row, the share (%) of the product's total rain at that gauge's pixel that falls on hours when the gauge is dry.],
+  read: [Each dot is one gauge, coloured by the value read from the colour bar to the right (different scale in each row; the last colour means "above the top bound"). The number in the corner of each map is the median over gauges, in %.],
+  shows: [The false-alarm rates are close to uniform across the study area: 80% of the gauges lie between #val(stations, "POFD_p10", sample: "gpm_gsmap_full", product: "GPM", threshold: "0.5")% and #val(stations, "POFD_p90", sample: "gpm_gsmap_full", product: "GPM", threshold: "0.5")% for GPM (full record) and between #val(stations, "POFD_p10", sample: "all_products", product: "FY4B", threshold: "0.5")% and #val(stations, "POFD_p90", sample: "all_products", product: "FY4B", threshold: "0.5")% for FY4B. The false alarms are not the problem of a few pixels or of one part of the area.],
+)
+
 == When and where <sec-when-where>
 
-*Season.* The false alarms follow the rain season. GPM's rate at ≥ 0.5 mm/h is #st("POFD05", "gpm_gsmap_full", "GPM", "season", "JJA")% in summer and #st("POFD05", "gpm_gsmap_full", "GPM", "season", "DJF")% in winter. In winter the few wet hours the products do report are mostly gauge-dry: at 0.1 mm/h the false-alarm ratio is #st("FAR01", "gpm_gsmap_full", "GPM", "season", "DJF")% for GPM and #st("FAR01", "gpm_gsmap_full", "GSMaP", "season", "DJF")% for GSMaP, against #st("FAR01", "gpm_gsmap_full", "GPM", "season", "JJA")% and #st("FAR01", "gpm_gsmap_full", "GSMaP", "season", "JJA")% in summer. Part of this is the gauge rather than the satellite: a tipping bucket records snow only when it melts and nothing while frozen, and winter is where the silent-gauge screen finds many of its spells (@sec-silent). FY4B hardly rains in winter at all — #st("POFD01", "all_products", "FY4B", "season", "DJF")% of dry hours at 0.1 mm/h, with a winter frequency bias of #st("freq_bias01", "all_products", "FY4B", "season", "DJF") — and below 0 °C essentially never (#st("POFD01", "all_products", "FY4B", "t2m", "< 0")%): it has few false alarms in the cold season because it misses the cold-season rain as well.
+*Season.* The false alarms follow the rain season. GPM's rate at ≥ 0.5 mm/h is #st("POFD05", "gpm_gsmap_full", "GPM", "season", "JJA")% in summer and #st("POFD05", "gpm_gsmap_full", "GPM", "season", "DJF")% in winter. In winter the few wet hours the products do report are mostly gauge-dry: at 0.1 mm/h the false-alarm ratio is #st("FAR01", "gpm_gsmap_full", "GPM", "season", "DJF")% for GPM and #st("FAR01", "gpm_gsmap_full", "GSMaP", "season", "DJF")% for GSMaP, against #st("FAR01", "gpm_gsmap_full", "GPM", "season", "JJA")% and #st("FAR01", "gpm_gsmap_full", "GSMaP", "season", "JJA")% in summer. Part of this may be the gauge rather than the satellite: snow or frozen precipitation may go unrecorded (instrument not verified), and winter is where the silent-gauge screen finds many of its spells (@sec-silent). FY4B hardly rains in winter at all — #st("POFD01", "all_products", "FY4B", "season", "DJF")% of dry hours at 0.1 mm/h, with a winter frequency bias of #st("freq_bias01", "all_products", "FY4B", "season", "DJF") — and below 0 °C essentially never (#st("POFD01", "all_products", "FY4B", "t2m", "< 0")%): it has few false alarms in the cold season because it misses the cold-season rain as well.
 
 *Hour of day* (@fig-diurnal). GPM's false alarms peak at #val(diurnal, "peak_hour", sample: "gpm_gsmap_full", product: "GPM", season: "all") BJT (#val(diurnal, "peak_POFD05", sample: "gpm_gsmap_full", product: "GPM", season: "all")% at ≥ 0.5 mm/h; #val(diurnal, "peak_POFD05", sample: "gpm_gsmap_full", product: "GPM", season: "JJA")% in summer), with the afternoon convection the gauges record, and are lowest at #val(diurnal, "low_hour", sample: "gpm_gsmap_full", product: "GPM", season: "all") BJT. GSMaP's peak at #val(diurnal, "peak_hour", sample: "gpm_gsmap_full", product: "GSMaP", season: "all") BJT (#val(diurnal, "peak_hour", sample: "gpm_gsmap_full", product: "GSMaP", season: "MAM") BJT in spring, #val(diurnal, "peak_hour", sample: "gpm_gsmap_full", product: "GSMaP", season: "JJA") in summer) has no counterpart in the gauges; it is the same spurious late-morning maximum the temporal report found in GSMaP's rain. FY4B's false alarms peak in the evening (#val(diurnal, "peak_hour", sample: "all_products", product: "FY4B", season: "all") BJT on its hours).
 
@@ -294,9 +331,16 @@ Across gauges the rates are uniform. At ≥ 0.5 mm/h, 80% of the gauges lie betw
   caption: [False-alarm rate at ≥ 0.5 mm/h by hour of day: all seasons on the hours FY4B covers (left), and by season over the full record.],
 ) <fig-diurnal>
 
+#explain(
+  x: [Hour of day, hour-ending Beijing time (BJT), 0–23 h (ticks every 6 h). The five panels share the same y-axis: all seasons on the hours FY4B covers (left), then winter (DJF), spring (MAM), summer (JJA) and autumn (SON) over the full record. FY4B has no 23:00 value.],
+  y: [False-alarm rate at ≥ 0.5 mm/h: the share of gauge-dry station-hours, in %, on which the product's estimate reaches 0.5 mm/h.],
+  read: [One line per product. A peak marks the hours of the day at which the product most often rains while the gauge is dry; a flat line means no daily pattern.],
+  shows: [GPM's false alarms peak at #val(diurnal, "peak_hour", sample: "gpm_gsmap_full", product: "GPM", season: "all") BJT, in the afternoon, when the gauges also record convection, and are lowest at #val(diurnal, "low_hour", sample: "gpm_gsmap_full", product: "GPM", season: "all") BJT. GSMaP peaks at #val(diurnal, "peak_hour", sample: "gpm_gsmap_full", product: "GSMaP", season: "all") BJT, a time with no counterpart in the gauge rain. FY4B's peak is in the evening (#val(diurnal, "peak_hour", sample: "all_products", product: "FY4B", season: "all") BJT). Rates are highest in summer.],
+)
+
 == Is the rain really false? <sec-false>
 
-A gauge-dry hour is a statement about one 200 cm² funnel in one hour. @fig-context sorts the dry hours by what the gauges show around them, and the false-alarm rate changes by more than an order of magnitude between the groups (full record, GPM, ≥ 0.5 mm/h):
+A gauge-dry hour is a statement about one point in one hour. @fig-context sorts the dry hours by what the gauges show around them, and the false-alarm rate changes by more than an order of magnitude between the groups (full record, GPM, ≥ 0.5 mm/h):
 
 - *In time.* #st("POFD05", "gpm_gsmap_full", "GPM", "rain_proximity", "1 h")% within an hour of the gauge's own rain, #st("POFD05", "gpm_gsmap_full", "GPM", "rain_proximity", "> 24 h")% more than a day from it. Weighted by how many dry hours each group holds, #fa-share("gpm_gsmap_full", "GPM", "rain_proximity", ("1 h", "2-3 h", "4-6 h")) of GPM's false alarms fall within 6 h of rain at the same gauge (GSMaP #fa-share("gpm_gsmap_full", "GSMaP", "rain_proximity", ("1 h", "2-3 h", "4-6 h")), FY4B on its hours #fa-share("all_products", "FY4B", "rain_proximity", ("1 h", "2-3 h", "4-6 h"))), although those hours are only #share-sum("rain_proximity", ("1 h", "2-3 h", "4-6 h"))% of the dry record.
 - *Before or after.* #st("POFD05", "gpm_gsmap_full", "GPM", "rain_side", "before rain")% in the three hours before the rain starts against #st("POFD05", "gpm_gsmap_full", "GPM", "rain_side", "after rain")% in the three hours after it ends (GSMaP #st("POFD05", "gpm_gsmap_full", "GSMaP", "rain_side", "before rain")% and #st("POFD05", "gpm_gsmap_full", "GSMaP", "rain_side", "after rain")%): the satellites start the rain early, as the temporal report found for its onset. Dry gaps inside an event are called wet #st("POFD05", "gpm_gsmap_full", "GPM", "rain_side", "inside an event gap")% of the time.
@@ -309,6 +353,13 @@ Most of GPM's and GSMaP's "false" rain is therefore real rain in the wrong place
   caption: [False-alarm rate at ≥ 0.5 mm/h on gauge-dry hours grouped by the gauges around them, on the hours FY4B covers. In brackets: each group's share of the dry hours.],
 ) <fig-context>
 
+#explain(
+  x: [False-alarm rate at ≥ 0.5 mm/h, in % of the gauge-dry hours in the group, on a logarithmic scale (shared by all four panels).],
+  y: [Groups of gauge-dry hours, defined by what the gauges show around them; the number in brackets is the group's share of all dry hours (%). Panel 1: hours to the same gauge's nearest wet hour. Panel 2: position relative to the gauge's own rain within ± 3 h. Panel 3: the state of the gauges within 15 km. Panel 4: the share of the whole network that is wet in that hour.],
+  read: [One dot per product and group, with a 95% day-block bootstrap whisker. Compare dots within a panel: the further right, the more often the product rains in that kind of dry hour. Because the axis is logarithmic, equal distances mean equal ratios, not equal differences.],
+  shows: [The false-alarm rate changes by more than an order of magnitude between groups: it is highest within an hour of the gauge's own rain and next to wet neighbours, and lowest when the whole network is dry. Most of GPM's and GSMaP's "false" rain is therefore rain displaced by a few kilometres or hours. FY4B's rate falls least on network-dry hours, i.e. its false alarms are the least tied to real rain.],
+)
+
 *FY4B's false alarms are the least tied to real rain.* On the hours it covers FY4B is wet on #st("POFD05", "all_products", "FY4B", "network", "network dry")% of network-dry hours, against #st("POFD05", "all_products", "GPM", "network", "network dry")% for GPM and #st("POFD05", "all_products", "GSMaP", "network", "network dry")% for GSMaP, and #fa-share("all_products", "FY4B", "network", ("network dry",)) of its false alarms fall on such hours (GPM #fa-share("all_products", "GPM", "network", ("network dry",))). On network-dry hours FY4B covers more than half of the gauge pixels on #val(extent, "gt50", sample: "all_products", product: "FY4B")% of the hours, GPM on #val(extent, "gt50", sample: "all_products", product: "GPM")% (@fig-agreement, right): FY4B produces whole phantom rain areas, the passive-microwave products scattered pixels. GPM reports rain at one gauge pixel or more on #val(extent, "any", sample: "all_products", product: "GPM")% of network-dry hours but at more than 5% of them on only #val(extent, "gt5", sample: "all_products", product: "GPM")%.
 
 *The products' false alarms are shared* (@fig-agreement). When neither of the other two products is wet, a product is wet at ≥ 0.5 mm/h on under 2% of gauge-dry hours (GPM #st("POFD05", "all_products", "GPM", "other_products", "0 others wet")%); when both others are wet, GPM is wet on #st("POFD05", "all_products", "GPM", "other_products", "2 others wet")% and GSMaP on #st("POFD05", "all_products", "GSMaP", "other_products", "2 others wet")%. Three products built from different sensors agreeing on rain the gauge did not record is further evidence that much of it is rain near the gauge rather than retrieval noise — and it means that averaging the products cannot remove it.
@@ -318,6 +369,13 @@ Most of GPM's and GSMaP's "false" rain is therefore real rain in the wrong place
   caption: [Product agreement on gauge-dry hours (left, middle), and how widely each product rains on hours when every reporting gauge is dry (right). Hours FY4B covers.],
 ) <fig-agreement>
 
+#explain(
+  x: [Left: the number of products (of FY4B, GPM, GSMaP) that report ≥ 0.1 mm/h on the hour. Middle: how many of the other two products are wet (none, one, both). Right: the share of network-dry hours (%), i.e. hours when every reporting gauge is dry.],
+  y: [Left: the share of gauge-dry station-hours (%, logarithmic scale). Middle: the probability that the product is wet at ≥ 0.1 mm/h given that the gauge is dry, in %. Right: the coverage class, i.e. how many of the gauge pixels the product reports rain on in that hour (any pixel, more than 5%, 25% or 50% of pixels).],
+  read: [Left: bars are the shares of dry hours with 0, 1, 2 or 3 wet products. Middle: a line that rises to the right means the product is more likely to false-alarm when the other products do. Right: longer bars mean that the product rains more widely on hours when no gauge sees rain.],
+  shows: [The products' false alarms are shared: with neither other product wet, a product is wet on under 2% of dry hours (GPM #st("POFD05", "all_products", "GPM", "other_products", "0 others wet")% at ≥ 0.5 mm/h), and with both wet, GPM is wet on #st("POFD05", "all_products", "GPM", "other_products", "2 others wet")% and GSMaP on #st("POFD05", "all_products", "GSMaP", "other_products", "2 others wet")%. Averaging the products cannot remove them. On network-dry hours FY4B covers more than half of the pixels on #val(extent, "gt50", sample: "all_products", product: "FY4B")% of hours, GPM on #val(extent, "gt50", sample: "all_products", product: "GPM")%: FY4B produces whole rain areas, GPM scattered pixels.],
+)
+
 *The air at the gauge* (@fig-floor, middle and right). The false-alarm rate falls as the near-surface air gets drier: GPM's rate at ≥ 0.5 mm/h is #st("POFD05", "gpm_gsmap_full", "GPM", "dewpoint_depression", "< 1")% at a dew-point depression below 1 °C and #st("POFD05", "gpm_gsmap_full", "GPM", "dewpoint_depression", ">= 10")% at 10 °C or more. The gauge's rain falls much faster, so in dry air the few wet hours the products report are mostly false: at a depression of 10 °C or more the false-alarm ratio at 0.1 mm/h is #st("FAR01", "gpm_gsmap_full", "GPM", "dewpoint_depression", ">= 10")% for GPM and #st("FAR01", "gpm_gsmap_full", "GSMaP", "dewpoint_depression", ">= 10")% for GSMaP, with frequency biases of #st("freq_bias01", "gpm_gsmap_full", "GPM", "dewpoint_depression", ">= 10") and #st("freq_bias01", "gpm_gsmap_full", "GSMaP", "dewpoint_depression", ">= 10")\; near saturation the bias is #st("freq_bias01", "gpm_gsmap_full", "GPM", "dewpoint_depression", "< 1"). This is the signature of rain that evaporates below the cloud base: the satellite sees precipitation aloft that never reaches the ground. Warm air shows the same (above 25 °C: false-alarm ratio #st("FAR01", "gpm_gsmap_full", "GPM", "t2m", ">= 25")%, bias #st("freq_bias01", "gpm_gsmap_full", "GPM", "t2m", ">= 25")).
 
 #figure(
@@ -325,9 +383,16 @@ Most of GPM's and GSMaP's "false" rain is therefore real rain in the wrong place
   caption: [Left: how often a gauge reports rain when a neighbour at the given separation is dry, against each product's rate at ≥ 0.5 mm/h. Middle, right: the products' false-alarm rate by ERA5-Land dew-point depression and 2 m temperature at the gauge. Hours FY4B covers.],
 ) <fig-floor>
 
+#explain(
+  x: [Left: the separation of the two gauges, in km, in distance classes. Middle: the 2 m dew-point depression from ERA5-Land, in °C (air temperature minus dew point; small means near saturation). Right: the 2 m air temperature from ERA5-Land, in °C, in classes.],
+  y: [The false-alarm rate, in % of the gauge-dry hours in each class (left: at ≥ 0.1 mm for the neighbour gauge; middle and right: at ≥ 0.5 mm/h for the products). The axis starts at zero.],
+  read: [Left: black dots are one gauge used as the estimate for another at the given separation, with 95% whiskers; the horizontal coloured lines are each product's overall false-alarm rate at ≥ 0.5 mm/h. A product line inside the range of the dots is no worse than a nearby gauge. Middle and right: one line per product; a falling line means fewer false alarms in that kind of air.],
+  shows: [A gauge 0–5 km away reports rain on #val(baseline, "POFD", sample: "gpm_gsmap_full", level: "0-5 km")% of the hours its neighbour is dry, and one 20–30 km away on #val(baseline, "POFD", sample: "gpm_gsmap_full", level: "20-30 km")%, so part of any satellite "false alarm" is unavoidable point-to-pixel error. The products' rates fall as the air gets drier (GPM #st("POFD05", "gpm_gsmap_full", "GPM", "dewpoint_depression", "< 1")% below 1 °C against #st("POFD05", "gpm_gsmap_full", "GPM", "dewpoint_depression", ">= 10")% at 10 °C or more), consistent with rain evaporating below the cloud.],
+)
+
 == Silent gauges <sec-silent>
 
-Some gauges read 0.0 for weeks or months while the gauges around them record rain. The screen of @sec-silent-method flags #val(silent-sensitivity, "n_spells", min_wet_days: "3") such spells at #val(silent-sensitivity, "n_stations", min_wet_days: "3") of the 237 gauges: #val(silent-sensitivity, "station_days", min_wet_days: "3") station-days, holding #val(silent-sensitivity, "dry_hours", min_wet_days: "3") gauge-dry hours (#val(silent-sensitivity, "dry_hour_share", min_wet_days: "3")% of all of them). The longest (@tab-silent-spells) are unmistakable: gauge #silent-spells.at(0).station_id logged #silent-spells.at(0).gauge_total mm over #silent-spells.at(0).n_days days from #silent-spells.at(0).first_date to #silent-spells.at(0).last_date, while the median of its three nearest gauges summed to #silent-spells.at(0).neighbour_total mm and GPM to #silent-spells.at(0).GPM_total mm. Such a spell is also the gauge record's longest hourly dry spell, #val(spells, "max_length", sample: "gpm_gsmap_full", source: "Gauge", threshold: "0.1") h, and the gauges at the far right of @fig-spells (right). The flagged days fall in every season (spring #val(silent-seasons, "share", season: "MAM")%, summer #val(silent-seasons, "share", season: "JJA")%, autumn #val(silent-seasons, "share", season: "SON")%, winter #val(silent-seasons, "share", season: "DJF")%), so frozen buckets explain only part of them.
+Some gauges read 0.0 for weeks or months while the gauges around them record rain. The screen of @sec-silent-method flags #val(silent-sensitivity, "n_spells", min_wet_days: "3") such spells at #val(silent-sensitivity, "n_stations", min_wet_days: "3") of the 237 gauges: #val(silent-sensitivity, "station_days", min_wet_days: "3") station-days, holding #val(silent-sensitivity, "dry_hours", min_wet_days: "3") gauge-dry hours (#val(silent-sensitivity, "dry_hour_share", min_wet_days: "3")% of all of them). The longest (@tab-silent-spells) are unmistakable: gauge #silent-spells.at(0).station_id logged #silent-spells.at(0).gauge_total mm over #silent-spells.at(0).n_days days from #silent-spells.at(0).first_date to #silent-spells.at(0).last_date, while the median of its three nearest gauges summed to #silent-spells.at(0).neighbour_total mm and GPM to #silent-spells.at(0).GPM_total mm. Such a spell is also the gauge record's longest hourly dry spell, #val(spells, "max_length", sample: "gpm_gsmap_full", source: "Gauge", threshold: "0.1") h, and the gauges at the far right of @fig-spells (right). The flagged days fall in every season (spring #val(silent-seasons, "share", season: "MAM")%, summer #val(silent-seasons, "share", season: "JJA")%, autumn #val(silent-seasons, "share", season: "SON")%, winter #val(silent-seasons, "share", season: "DJF")%), so freezing alone cannot explain them.
 
 #block(breakable: false)[
 #figure(
@@ -368,6 +433,13 @@ Inside the flagged spells every product "false-alarms" far more often (@fig-sile
   caption: [Left: the flagged silent-gauge spells in time, one row per gauge. Right: the products' false-alarm rate at ≥ 0.5 mm/h on dry hours at working gauges and inside the flagged spells.],
 ) <fig-silent>
 
+#explain(
+  x: [Left: calendar date, 2022–2024 (08–08 BJT days; ticks at the middle of each year, thin lines at year starts). Right: false-alarm rate at ≥ 0.5 mm/h, in % of gauge-dry hours, on a logarithmic scale.],
+  y: [Left: one row per gauge that has a flagged silent spell (no unit; the rows are ordered by the start of the first spell). Right: the product and sample.],
+  read: [Left: each bar is one flagged spell, at least 7 days long, during which the gauge read below 1 mm per day while its neighbours were wet. Right: filled dots are dry hours at working gauges, hollow dots dry hours inside the flagged spells, with 95% whiskers.],
+  shows: [Flagged spells occur in every year and season. Inside them every product false-alarms far more often than at working gauges (GPM #sc("POFD_silent", "gpm_gsmap_full", "GPM", "0.5")% against #sc("POFD_working", "gpm_gsmap_full", "GPM", "0.5")%), as expected if the gauge, not the satellite, is wrong. But the spells carry only #sc("silent_false_alarm_share", "gpm_gsmap_full", "GPM", "0.5")% of GPM's false alarms, so they do not explain the satellites' dry-hour rain.],
+)
+
 == Dry spells and dry days <sec-spells>
 
 *Hourly spells* (full record, @fig-spells left). At 0.1 mm/h the products break the gauges' long dry spells with drizzle: the mean complete dry spell is #val(spells, "mean_length", sample: "gpm_gsmap_full", source: "Gauge", threshold: "0.1") h at the gauges, #val(spells, "mean_length", sample: "gpm_gsmap_full", source: "GPM", threshold: "0.1") h for GPM and #val(spells, "mean_length", sample: "gpm_gsmap_full", source: "GSMaP", threshold: "0.1") h for GSMaP, and the share of dry hours inside spells of three days or more is #val(spells, "share_in_ge72", sample: "gpm_gsmap_full", source: "Gauge", threshold: "0.1")% against #val(spells, "share_in_ge72", sample: "gpm_gsmap_full", source: "GPM", threshold: "0.1")% and #val(spells, "share_in_ge72", sample: "gpm_gsmap_full", source: "GSMaP", threshold: "0.1")%. At 0.5 mm/h the products' spells are as long as the gauges' or longer (#val(spells, "mean_length", sample: "gpm_gsmap_full", source: "GPM", threshold: "0.5") and #val(spells, "mean_length", sample: "gpm_gsmap_full", source: "GSMaP", threshold: "0.5") h; #val(spells, "share_in_ge72", sample: "gpm_gsmap_full", source: "GPM", threshold: "0.5")% in spells of three days or more) — the same drizzle story as the frequency bias.
@@ -381,6 +453,13 @@ Inside the flagged spells every product "false-alarms" far more often (@fig-sile
   caption: [Left: the share of dry hours in complete dry spells of at least $L$ hours, full record. Middle: wet-day frequency bias at 0.1 and 1 mm/day. Right: the longest run of days below 1 mm at each gauge, gauge against product.],
 ) <fig-spells>
 
+#explain(
+  x: [Left: the length $L$ of a complete dry spell, in hours, on a logarithmic scale (spells are runs of consecutive hours below 0.1 mm/h). Middle: the wet-day frequency bias, product wet days divided by gauge wet days (a ratio, no unit; 1 = same frequency). Right: the longest run of days below 1 mm at each gauge according to the gauge, in days.],
+  y: [Left: the share of dry hours (%, as a fraction of 1) lying inside spells of length at least $L$. Middle: the product and sample. Right: the longest run of days below 1 mm at the same gauge according to the product, in days.],
+  read: [Left: a curve that lies below the black gauge curve has fewer long dry spells than the gauges. Middle: filled dots use wet days of at least 0.1 mm, hollow dots at least 1 mm (08–08 BJT daily totals); the grey line at 1 marks equal frequency and whiskers are 95% intervals. Right: each dot is one gauge; dots on the grey diagonal mean the product reproduces the gauge's longest dry spell, dots below it mean the product breaks it up.],
+  shows: [At 0.1 mm/h the products break the gauges' long dry spells (mean complete spell #val(spells, "mean_length", sample: "gpm_gsmap_full", source: "Gauge", threshold: "0.1") h at the gauges against #val(spells, "mean_length", sample: "gpm_gsmap_full", source: "GPM", threshold: "0.1") h for GPM), and have too few dry days. At 1 mm per day the typical longest dry spell is reproduced (median #dd("median_station_max", "gpm_gsmap_full", "GPM", "Gauge", "1") days at the gauges, #dd("median_station_max", "gpm_gsmap_full", "GPM", "GPM", "1") for GPM); the gauge with a much longer spell than any product is a silent gauge.],
+)
+
 == Calibrated and uncalibrated IMERG <sec-calibration>
 
 IMERG Final's gauge calibration is a monthly adjustment of the multi-satellite field toward the GPCC gauge analysis. It does not remove dry-hour rain; it adds to it (@fig-calibration). The uncalibrated field reports ≥ 0.1 mm/h on #ov("POFD", "gpm_cal_uncal", "GPM_uncal", "0.1")% of gauge-dry hours and the calibrated one on #ov("POFD", "gpm_cal_uncal", "GPM", "0.1")% (#ov("POFD", "gpm_cal_uncal", "GPM_uncal", "0.5")% and #ov("POFD", "gpm_cal_uncal", "GPM", "0.5")% at 0.5 mm/h); the spurious rain grows from #ov("spurious_mm", "gpm_cal_uncal", "GPM_uncal", "0.1") to #ov("spurious_mm", "gpm_cal_uncal", "GPM", "0.1") mm per year while the share of the volume on dry hours stays at #ov("dry_volume_share", "gpm_cal_uncal", "GPM", "0.1")%. The calibration scales the amounts (calibrated/uncalibrated volume #val(calibration, "volume_ratio_calibrated_to_uncalibrated", kind: "pattern")) and so lifts some drizzle over the thresholds, but it leaves the occurrence pattern alone: both series are zero on #val(calibration, "both_zero", kind: "pattern")% of cells and disagree about zero on only #val(calibration, "zero_in_calibrated_only", kind: "pattern") + #val(calibration, "zero_in_uncalibrated_only", kind: "pattern")%. In winter the calibration helps: it doubles GPM's wet days at 1 mm (wet-day bias #val(days, "freq_bias", sample: "gpm_cal_uncal", product: "GPM_uncal", stratifier: "season", level: "DJF", threshold: "1") uncalibrated, #val(days, "freq_bias", sample: "gpm_cal_uncal", product: "GPM", stratifier: "season", level: "DJF", threshold: "1") calibrated), where the multi-satellite field misses rain. The two series share their clock: the pooled correlation peaks at lag 0 (r = #val(calibration, "r", kind: "lag", lag: "0"), against #val(calibration, "r", kind: "lag", lag: "-1") and #val(calibration, "r", kind: "lag", lag: "1") at −1 h and +1 h).
@@ -391,6 +470,13 @@ The dry-hour rain is therefore made upstream, in the multi-satellite occurrence 
   image("figures/norain_fig10_calibration.png", width: 100%),
   caption: [Calibrated (filled) and uncalibrated (hollow, dashed) IMERG on gauge-dry hours, full record: exceedance, false-alarm rate by season, and the clock check.],
 ) <fig-calibration>
+
+#explain(
+  x: [Left: the estimate threshold $t$ in mm/h, on a logarithmic scale. Middle: the season (All, DJF, MAM, JJA, SON); within each season the left pair of dots uses the 0.1 mm/h threshold and the right pair the 0.5 mm/h threshold. Right: the lag of the uncalibrated series against the calibrated one, in hours.],
+  y: [Left: the share of gauge-dry hours (%, log scale) on which the estimate reaches $t$. Middle: the false-alarm rate in %. Right: the pooled correlation coefficient $r$ between the two IMERG series (unitless, at most 1).],
+  read: [Filled marks are calibrated IMERG, hollow marks (dashed line) the uncalibrated series; whiskers are 95% day-block bootstrap intervals. Right: the tallest bar shows the lag at which the two series match best; a peak at 0 h means they share the same clock.],
+  shows: [Calibration does not reduce dry-hour rain: the false-alarm rate at 0.1 mm/h is #ov("POFD", "gpm_cal_uncal", "GPM_uncal", "0.1")% uncalibrated and #ov("POFD", "gpm_cal_uncal", "GPM", "0.1")% calibrated. It rescales amounts but leaves the occurrence pattern. The correlation peaks at lag 0 (r = #val(calibration, "r", kind: "lag", lag: "0")), so the two series are aligned in time.],
+)
 
 == Interpolation and fusion on dry hours <sec-fusion>
 
@@ -434,15 +520,29 @@ The benchmark's held-out predictions, scored on the #fu("n_dry", "GPM", "adw") g
   caption: [What each method predicts on held-out gauges' dry hours, by anchor, balanced spatial CV; gauge-only methods in ink.],
 ) <fig-fusion>
 
+#explain(
+  x: [Four panels. Panel 1: rain the method predicts on gauge-dry hours, in mm per year of scored hours (the gauge total is printed under the axis). Panel 2: share of dry hours predicted at ≥ 0.1 mm/h, in %. Panel 3: share of dry hours predicted exactly 0, in %. Panel 4: the dry hours' share of the method's total squared error, in %.],
+  y: [The method (raw anchor, gauge-only interpolators, residual, mixed and multiscale GWR, and the blends), listed once and shared by the panels. Colour marks the anchor (FY4B, GPM, GSMaP, merged); gauge-only methods are drawn once, in black.],
+  read: [Each dot is one method on one anchor, evaluated at the held-out gauges under balanced spatial cross-validation. Less rain, a lower share above 0.1 mm/h, a higher share of exact zeros and a lower share of the error are all closer to a good dry-hour behaviour. "Per year" refers to the scored hours, which follow FY4B's coverage and lean toward summer, so compare methods with each other, not with the full-record values.],
+  shows: [Gauge-only interpolation is not dry either (ADW predicts ≥ 0.1 mm/h on #fu("POFD01", "GPM", "adw")% of dry hours, more than raw GPM at #fu("POFD01", "GPM", "raw")%). Unblended fusion imports the anchor's false rain, and the blends toward ADW remove most of it. The OLS-merged anchor is almost never exactly zero.],
+)
+
 #figure(
   image("figures/norain_fig12_fusion_where.png", width: 100%),
   caption: [GPM anchor, balanced spatial CV. Left: each gauge × anchor quadrant's contribution to the gap between the method's squared error and ADW's. Middle: dry-hour mean by distance to the nearest training gauge and to the gauge's own rain. Right: overall RMSE change when predictions below τ are set to zero.],
 ) <fig-fusion-where>
 
+#explain(
+  x: [Panel 1: the method's squared error minus ADW's, summed over the held-out cells, in 10³ mm² (positive = worse than ADW). Panels 2 and 3: classes of distance, panel 2 to the nearest training gauge in km, panel 3 to the gauge's own nearest rain in hours. Panel 4: the value τ below which predictions are set to zero, in mm/h.],
+  y: [Panel 1: the method (MGWR, the in-fold GWR choice, and the two blends). Panels 2 and 3: the method's mean prediction on gauge-dry hours, in mm/h (log scale in panel 3). Panel 4: the change in overall RMSE, in % (positive = better).],
+  read: [Panel 1: each bar is split into four coloured parts, the contribution of hours where the gauge is dry or wet and the GPM anchor is dry or wet; parts to the right add to the loss, parts to the left reduce it, and the black tick is the net gap. Panels 2–3: lines are raw GPM (dotted), ADW (dashed) and two fusion methods; a lower line predicts less rain on dry hours. Panel 4: the descriptive effect of zeroing small values; a line below zero means a worse RMSE.],
+  shows: [Almost all of unblended MGWR's loss against ADW comes from hours when the gauge is dry and the anchor wet (dry hours make up #fu("gap_dry_total", "GPM", "mgwr")% of its gap). ADW predicts more dry-hour rain the farther it is from the training gauges. Zeroing values below 0.3 mm/h lowers the false-alarm rate but makes overall RMSE slightly worse for every method, because the same cut removes light rain on wet hours.],
+)
+
 = Answers
 
 + *How often, how much, when?* On #ov("POFD", "gpm_gsmap_full", "GPM", "0.1")–#ov("POFD", "gpm_gsmap_full", "GSMaP", "0.1")% of gauge-dry hours at 0.1 mm/h (GPM, GSMaP; FY4B #ov("POFD", "all_products", "FY4B", "0.1")% on its hours), #ov("POFD", "gpm_gsmap_full", "GPM", "0.5")–#ov("POFD", "gpm_gsmap_full", "GSMaP", "0.5")% at 0.5 mm/h, mostly drizzle; a third of GPM's and GSMaP's volume and #ov("dry_volume_share", "all_products", "FY4B", "0.1")% of FY4B's. Most in summer and in the afternoon (GPM) or late morning (GSMaP, spuriously), uniformly across gauges and relief.
-+ *Is it really false?* Mostly not in the sense of "rain from nothing". The rate rises twenty-fold next to the gauge's own rain and next to wet neighbours, falls to #st("POFD05", "gpm_gsmap_full", "GPM", "network", "network dry")% on hours when the whole network is dry, and at 0.5 mm/h sits inside the range of a neighbouring gauge. What remains is drizzle below the bucket's resolution, rain evaporating below the cloud, and — for FY4B — genuine phantom rain. Silent gauges explain a few percent of the false alarms.
++ *Is it really false?* Mostly not in the sense of "rain from nothing". The rate rises twenty-fold next to the gauge's own rain and next to wet neighbours, falls to #st("POFD05", "gpm_gsmap_full", "GPM", "network", "network dry")% on hours when the whole network is dry, and at 0.5 mm/h sits inside the range of a neighbouring gauge. What remains is light drizzle, rain evaporating below the cloud, and — for FY4B — genuine phantom rain. Silent gauges explain a few percent of the false alarms.
 + *Dry spells and dry days?* Drizzle breaks the long hourly dry spells at 0.1 mm/h, and the products have too few dry days (#dd("dry_share", "gpm_gsmap_full", "GPM", "GPM", "0.1")% for GPM against #dd("dry_share", "gpm_gsmap_full", "GPM", "Gauge", "0.1")% at the gauges). At 0.5 mm/h and 1 mm/day the dry-spell structure and the typical longest dry spell are reproduced. IMERG's calibration does not change any of it.
 + *The fusion methods?* All of them rain on held-out dry hours, gauge-only interpolation as often as the satellite. Unblended residual correction inherits the anchor's false rain, which is why it loses to ADW; blending toward ADW where the satellite is wet removes that loss. RMSE rewards thin drizzle over sharp zeros, which the OLS merge exploits.
 
@@ -456,11 +556,11 @@ The benchmark's held-out predictions, scored on the #fu("n_dry", "GPM", "adw") g
 
 = Limitations
 
-- *Point against pixel.* Every "false alarm" is a comparison of a 200 cm² funnel with a 10 km (GPM, GSMaP) or 4 km (FY4B) pixel. The gauge-to-gauge baseline bounds this but cannot remove it.
-- *The gauges' resolution.* With a 0.5 mm bucket, an hour with 0.1–0.4 mm of rain can read 0.0; some of the drizzle counted as false is real. The 0.5 mm/h results are the fairer ones.
+- *Point against pixel.* Every "false alarm" is a comparison of a single gauge point with a pixel of nominally 10 km (GPM, GSMaP) or 4 km (FY4B). The gauge-to-gauge baseline bounds this but cannot remove it.
+- *Coarse gauge values and unknown instrument.* Non-zero gauge values in the data come in steps of 0.5 mm, so an hour with very light rain may read 0.0, and some of the drizzle counted as false may be real. The instrument type and model have not been verified, and the 0.5 mm/h threshold is an analysis choice, not a gauge specification.
 - *Spurious mm per year* is only meaningful on the full record. The FY4B-hours sample and the benchmark grid are weighted to summer, so there the share of the volume on dry hours is used instead, and rain per year compares methods only.
 - *Partial days and censored spells.* Hourly dry spells exist only on the full record: FY4B never has 23:00, so every spell is cut at under a day. Daily results on the FY4B hours and the benchmark grid use days with at least 20 of 24 hours scored, summed over the same hours for gauge and product.
-- *Winter.* Tipping buckets do not record snow as it falls, so some winter "false alarms" are real snowfall; the silent-gauge screen catches the longest of these spells but not single days.
+- *Winter.* Some winter "false alarms" may be snow or frozen precipitation that the gauge did not record (instrument not verified); the silent-gauge screen catches the longest of these spells but not single days.
 - *The silent-gauge screen is a description,* tuned on one rate (#val(silent-sensitivity, "p_dry_given_wet", min_wet_days: "3")% of neighbour-wet days dry at a working gauge) and not validated against station logs. No gauge value was changed.
 - *The zero-threshold sensitivity is descriptive.* The threshold was not tuned inside the folds, so it shows what a dry gate could do, not what it would do.
 
