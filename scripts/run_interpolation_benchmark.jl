@@ -27,6 +27,7 @@ function benchmark_config(
     mgwr_grouping::Symbol=:intercept_only, residual_shrinkage::Bool=true,
     unsupported_local_target::Symbol=:missing, satellite_wet_blend::Bool=false,
     blend_axes::Vector{Symbol}=[:constant], fused_anchor::Bool=false,
+    fused_anchor_lagnbr::Bool=false,
 )
     mode in (:smoke, :full) || throw(ArgumentError("mode must be :smoke or :full"))
     nested_covariates && legacy_dem && throw(ArgumentError(
@@ -68,6 +69,7 @@ function benchmark_config(
             (satellite_wet_blend ? "_satwetblend" : "") *
             (blend_axes == [:constant] ? "" : "_blendagrenv") *
             (fused_anchor ? "_fusedanchor" : "") *
+            (fused_anchor_lagnbr ? "_fusedlagnbr" : "") *
             (repeats > 1 ? "_repeats$(repeats)" : ""),
     )
     mkpath(outdir)
@@ -222,7 +224,10 @@ function benchmark_config(
         joint_selection=joint_selection,
         satellite_wet_blend=satellite_wet_blend,
         blend_axes=blend_axes,
-        fused_anchor_variants=fused_anchor ? collect(Symbol, FUSION_VARIANTS) : Symbol[],
+        fused_anchor_variants=vcat(
+            fused_anchor ? collect(Symbol, FUSION_VARIANTS) : Symbol[],
+            fused_anchor_lagnbr ? [:ols_lagnbr] : Symbol[],
+        ),
         # The joint path without nested selection reads a full-data spec, which the config
         # validator refuses unless the run admits it is exploratory. --no-nested-covariates is
         # exactly that admission, so it is the only way this turns on.
@@ -353,10 +358,14 @@ function main(args=ARGS)
     # Add MERGED_OLS and MERGED_MEAN: products whose anchor is a fusion of the three real ones,
     # fitted per fold on training stations only. See `SatelliteFusion` for why both variants exist.
     fused_anchor = "--fused-anchor" in args
+    # Add MERGED_OLS_LAGNBR: the least-squares fusion widened with each product's t-1/t+1 values and
+    # its mean over the nearest stations, fitted per agreement-envelope band. Separate from
+    # --fused-anchor so that flag keeps meaning exactly MERGED_OLS and MERGED_MEAN.
+    fused_anchor_lagnbr = "--fused-anchor-lagnbr" in args
     cfg = benchmark_config(mode; with_random, legacy_dem, repeats, nested_covariates,
         local_grid, stratified_tuning_weights, legacy_tuning_geometry, mgwr_grouping,
         residual_shrinkage, unsupported_local_target, satellite_wet_blend, blend_axes,
-        fused_anchor)
+        fused_anchor, fused_anchor_lagnbr)
     !legacy_dem && Threads.nthreads() == 1 && @warn(
         "Joint dynamic models are compute intensive; use julia -t auto for parallel hourly fits",
     )
@@ -375,6 +384,7 @@ function main(args=ARGS)
         "satellite_wet_blend=$satellite_wet_blend, " *
         "blend_axes=$(join(blend_axes, "+")), " *
         "fused_anchor=$fused_anchor, " *
+        "fused_anchor_lagnbr=$fused_anchor_lagnbr, " *
         "output=$(cfg.mger.outdir)")
     result = run_interpolation_benchmark(cfg)
     println("Finished: $(nrow(result.metrics)) metric rows, $(nrow(result.scans)) scan rows")

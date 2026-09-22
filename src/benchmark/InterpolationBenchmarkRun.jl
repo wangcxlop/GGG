@@ -365,6 +365,19 @@ function _write_benchmark_outputs(
             ],
         ))
     end
+    grouped = [v for v in sort(cfg.fused_anchor_variants) if v in GROUPED_FUSION_VARIANTS]
+    if !isempty(grouped)
+        append!(scope, DataFrame(
+            key=["fused_anchor_grouped"],
+            value=[
+                "$(join([_fused_product_name(v) for v in grouped], ", ")): regressed on every " *
+                "source product at t, t-1 and t+1 and on each product's mean over the 8 nearest " *
+                "other stations, one coefficient set per agreement-envelope band; features read " *
+                "satellite values only. Coefficients per fold and band in " *
+                "fused_anchor_grouped_coefficients.csv, not fused_anchor_selection.csv",
+            ],
+        ))
+    end
     append!(scope, _git_provenance())
     CSV.write(joinpath(cfg.mger.outdir, "benchmark_scope.csv"), scope)
     return (; metrics, scans, bootstrap, status, claim, repeat_summary, fold_summary,
@@ -902,6 +915,7 @@ gauge out of the anchor its own prediction is built on.
 """
 function _build_fused_products!(
     cfg::InterpolationBenchmarkConfig, products::Vector{String}, product_data::Dict{String,Any},
+    lonlat::AbstractMatrix,
 )
     isempty(cfg.fused_anchor_variants) && return String[], Dict{String,Any}()
     source_names = copy(products)
@@ -917,7 +931,21 @@ function _build_fused_products!(
             template.times, template.ids, template.Y_obs,
             Y_sat=fill(NaN, size(template.Y_obs)),
         )
-        specifications[name] = (; variant, source_names, sources)
+        # A grouped variant's design and bands depend only on the source products, so they are
+        # built once here; only the coefficients are refitted per fold.
+        design = if variant in GROUPED_FUSION_VARIANTS
+            distance = haversine_distance_matrix(lonlat, lonlat)
+            neighbours = [filter(!=(station), sortperm(distance[station, :]))
+                          for station in axes(distance, 1)]
+            groups = blend_band_matrix(
+                :agreement_envelope, first(sources), sources, cfg.mger.rain_threshold,
+            ) .+ 1
+            (; features=fusion_features(sources, template.times, neighbours), groups,
+                n_group=blend_band_count(:agreement_envelope) + 1)
+        else
+            nothing
+        end
+        specifications[name] = (; variant, source_names, sources, design)
         push!(derived, name)
     end
     return derived, specifications
@@ -934,7 +962,7 @@ function run_interpolation_benchmark(cfg::InterpolationBenchmarkConfig)
     # source products only: `load_joint_benchmark_inputs` reads a fixed specification keyed by
     # product, which a product with no file cannot appear in, and which the config validation has
     # already ruled out alongside a fused anchor.
-    _, fused_specifications = _build_fused_products!(cfg, source_products, product_data)
+    _, fused_specifications = _build_fused_products!(cfg, source_products, product_data, lonlat)
     products = benchmark_products(cfg, source_products)
     terrain = _dem_enabled(cfg) ? load_aligned_terrain(something(cfg.terrain_path), ids) : nothing
     dem_store = _empty_dem_store()
@@ -969,6 +997,7 @@ function run_interpolation_benchmark(cfg::InterpolationBenchmarkConfig)
     auto_selection_rows = NamedTuple[]
     blend_selection_rows = NamedTuple[]
     fused_anchor_rows = NamedTuple[]
+    fused_grouped_rows = NamedTuple[]
     hurdle_rows = NamedTuple[]
     # Cells where the fold was too small for an inner selection split and fell back to
     # leave-one-out. Reported in `benchmark_scope.csv` so the fallback is never silent.
@@ -1012,7 +1041,33 @@ function run_interpolation_benchmark(cfg::InterpolationBenchmarkConfig)
 
                 for fold in 1:cfg.k
                     fold_sat = y_sat
-                    if fusion !== nothing
+                    if fusion !== nothing && fusion.design !== nothing
+                        _, _, fusion_train_idx, fusion_val_idx =
+                            _fold_station_indices(folds, id_map, cfg.k, fold)
+                        design = fusion.design
+                        coefficients, used, fell_back = fit_grouped_fusion(
+                            y_obs, fusion.sources, design.features, design.groups,
+                            design.n_group, fusion_train_idx,
+                        )
+                        coefficients === nothing && error(
+                            "$product fold $fold: the pooled fusion fit is singular",
+                        )
+                        fold_sat = apply_grouped_fusion(
+                            fusion.sources, design.features, coefficients, design.groups,
+                        )
+                        predictions["raw"][fusion_val_idx, :] = fold_sat[fusion_val_idx, :]
+                        lower = lowercase.(fusion.source_names)
+                        terms = vcat("intercept", lower, lower .* "_lag1",
+                            lower .* "_lead1", lower .* "_nbr8")
+                        for group in 1:design.n_group, (row, term) in enumerate(terms)
+                            push!(fused_grouped_rows, (;
+                                scheme, product, fold, repeat=repeat_index, seed=repeat_seed,
+                                variant=String(fusion.variant), group=group - 1,
+                                n_cell=used[group], fell_back=fell_back[group], term,
+                                coefficient=coefficients[row, group],
+                            ))
+                        end
+                    elseif fusion !== nothing
                         _, _, fusion_train_idx, fusion_val_idx =
                             _fold_station_indices(folds, id_map, cfg.k, fold)
                         coefficients, used, fell_back = fusion_coefficients(
@@ -1081,6 +1136,12 @@ function run_interpolation_benchmark(cfg::InterpolationBenchmarkConfig)
             end
         end
     end # repeat loop
+
+    # One row per fold x band x term; `group` is the agreement-envelope band (0 = no product
+    # wet). `fell_back` marks a band too sparse or singular to fit alone, which took the pooled fit.
+    isempty(fused_grouped_rows) ||
+        CSV.write(joinpath(cfg.mger.outdir, "fused_anchor_grouped_coefficients.csv"),
+            DataFrame(fused_grouped_rows))
 
     return _write_benchmark_outputs(
         cfg, products, seeds, nested_joint, joint_inputs,

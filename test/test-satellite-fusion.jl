@@ -99,6 +99,75 @@ end
     end
 end
 
+@testset "Grouped satellite fusion" begin
+    n_station, n_time = 5, 6
+    times = [DateTime(2022, 6, 1) + Hour(h) for h in (0, 1, 2, 5, 6, 7)]  # a gap after hour 2
+    source = [10.0 * station + time for station in 1:n_station, time in 1:n_time]
+    neighbours = [filter(!=(station), [3, 1, 2, 5, 4]) for station in 1:n_station]
+
+    @testset "lags respect grid gaps and neighbour means skip NaN" begin
+        holed = copy(source)
+        holed[3, 2] = NaN
+        features = fusion_features([holed], times, neighbours; k=2)
+        @test length(features) == 4
+        base, lag, lead, neighbour = features
+        @test isequal(base, holed)
+        @test lag[1, 2] == holed[1, 1]
+        @test lag[1, 4] == holed[1, 4]       # 05:00 has no 04:00: falls back to its own value
+        @test lead[1, 3] == holed[1, 3]      # 02:00 has no 03:00
+        @test lead[1, 4] == holed[1, 5]
+        @test lag[3, 3] == holed[3, 3]       # the lagged hour is NaN: own value
+        @test neighbour[1, 1] == (holed[3, 1] + holed[2, 1]) / 2
+        @test neighbour[1, 2] == holed[2, 2]  # station 3 is NaN at hour 2 and is skipped
+        @test isnan(neighbour[3, 2]) == false
+    end
+
+    n_station, n_time = 40, 200
+    lookup = [
+        [mod(7 * station + 3 * time, 11) / 3 for station in 1:n_station, time in 1:n_time],
+        [mod(5 * station + 2 * time, 13) / 4 for station in 1:n_station, time in 1:n_time],
+    ]
+    groups = [station <= 20 ? 1 : 2 for station in 1:n_station, time in 1:n_time]
+    truth = [0.5 1.0; 2.0 0.5; -0.3 1.5]
+    y_obs = [truth[1, groups[s, t]] + truth[2, groups[s, t]] * lookup[1][s, t] +
+             truth[3, groups[s, t]] * lookup[2][s, t] for s in 1:n_station, t in 1:n_time]
+
+    @testset "recovers each group's coefficients" begin
+        coefficients, used, fell_back = fit_grouped_fusion(
+            y_obs, lookup, lookup, groups, 2, collect(1:n_station); min_cells=10)
+        @test coefficients ≈ truth
+        @test used == [20 * n_time, 20 * n_time]
+        @test !any(fell_back)
+        @test apply_grouped_fusion(lookup, lookup, coefficients, groups) ≈ max.(y_obs, 0.0)
+    end
+
+    @testset "a sparse group takes the pooled fit" begin
+        coefficients, _, fell_back = fit_grouped_fusion(
+            y_obs, lookup, lookup, groups, 3, collect(1:n_station); min_cells=10)
+        @test fell_back == [false, false, true]
+        pooled, _, _ = fit_grouped_fusion(
+            y_obs, lookup, lookup, ones(Int, n_station, n_time), 1, collect(1:n_station))
+        @test coefficients[:, 3] ≈ pooled[:, 1]
+    end
+
+    @testset "the fit never reads a station outside station_rows" begin
+        train_rows = collect(1:30)
+        clean, _, _ = fit_grouped_fusion(y_obs, lookup, lookup, groups, 2, train_rows)
+        corrupted = copy(y_obs)
+        corrupted[31:end, :] .+= 37.0
+        @test fit_grouped_fusion(corrupted, lookup, lookup, groups, 2, train_rows)[1] == clean
+    end
+
+    @testset "a NaN source drops the cell from the fit and the anchor" begin
+        holed = [copy(matrix) for matrix in lookup]
+        holed[2][4, 7] = NaN
+        _, used, _ = fit_grouped_fusion(y_obs, holed, lookup, groups, 2, collect(1:n_station))
+        @test sum(used) == n_station * n_time - 1
+        fused = apply_grouped_fusion(holed, lookup, truth, groups)
+        @test isnan(fused[4, 7]) && count(isnan, fused) == 1
+    end
+end
+
 @testset "Banded blending weights" begin
     threshold = 0.1
     y_sat = [0.0 0.5 3.0; 9.0 0.0 0.2]
@@ -232,14 +301,15 @@ end
             k=k, seed=seed, cv_schemes=[:balanced_spatial],
             idw_powers=[2.0], neighbor_candidates=Union{Nothing,Int}[8],
             tps_smooth_candidates=[1e-2], bootstrap_reps=0,
-            fused_anchor_variants=[:ols, :mean],
+            fused_anchor_variants=[:ols, :mean, :ols_lagnbr],
         )
         result = run_interpolation_benchmark(cfg)
 
-        @testset "both derived products are scored" begin
+        @testset "every derived product is scored" begin
             products = unique(result.metrics.product)
             @test "MERGED_OLS" in products
             @test "MERGED_MEAN" in products
+            @test "MERGED_OLS_LAGNBR" in products
             @test issubset(["FY4B", "GPM", "GSMaP"], products)
             @test isdir(joinpath(outdir, "balanced_spatial", "merged_ols"))
         end
@@ -280,6 +350,33 @@ end
                     @test stored[time, Symbol(ids[station])] ≈ expected[station, time]
                 end
             end
+        end
+
+        @testset "the grouped anchor is refitted per fold from training stations" begin
+            split = CSV.read(joinpath(outdir, "balanced_spatial", "split_common.csv"),
+                DataFrame; types=Dict(:station_id => String))
+            position = Dict(id => index for (index, id) in enumerate(ids))
+            fold_of = Dict(row.station_id => Int(row.fold) for row in eachrow(split))
+            sources = [satellites[product] for product in sort(collect(keys(sat_paths)))]
+            lonlat = hcat(lon, lat)
+            distance = haversine_distance_matrix(lonlat, lonlat)
+            neighbours = [filter(!=(s), sortperm(distance[s, :])) for s in 1:n_station]
+            features = fusion_features(sources, times, neighbours)
+            groups = blend_band_matrix(:agreement_envelope, first(sources), sources, 0.1) .+ 1
+            stored = CSV.read(
+                joinpath(outdir, "balanced_spatial", "merged_ols_lagnbr", "oof_raw.csv"), DataFrame)
+            for fold in 1:k
+                validation = [position[id] for id in ids if fold_of[id] == fold]
+                training = setdiff(1:n_station, validation)
+                coefficients, _, _ = fit_grouped_fusion(obs, sources, features, groups, 10, training)
+                expected = apply_grouped_fusion(sources, features, coefficients, groups)
+                for station in validation, time in eachindex(times)
+                    @test stored[time, Symbol(ids[station])] ≈ expected[station, time]
+                end
+            end
+            table = CSV.read(joinpath(outdir, "fused_anchor_grouped_coefficients.csv"), DataFrame)
+            @test nrow(table) == k * 10 * 13
+            @test sort(unique(table.group)) == collect(0:9)
         end
     end
 end

@@ -371,8 +371,10 @@ function _validate_benchmark_config(cfg::InterpolationBenchmarkConfig, n_station
         throw(ArgumentError("blend_axes must be drawn from $BLEND_AXES"))
     length(unique(cfg.blend_axes)) == length(cfg.blend_axes) ||
         throw(ArgumentError("blend_axes must be unique"))
-    all(variant -> variant in FUSION_VARIANTS, cfg.fused_anchor_variants) ||
-        throw(ArgumentError("fused_anchor_variants must be drawn from $FUSION_VARIANTS"))
+    all(variant -> variant in FUSION_VARIANTS || variant in GROUPED_FUSION_VARIANTS,
+        cfg.fused_anchor_variants) || throw(ArgumentError(
+        "fused_anchor_variants must be drawn from $FUSION_VARIANTS or $GROUPED_FUSION_VARIANTS",
+    ))
     length(unique(cfg.fused_anchor_variants)) == length(cfg.fused_anchor_variants) ||
         throw(ArgumentError("fused_anchor_variants must be unique"))
     # A derived product has no file, so a fixed full-data specification has no role map for it and

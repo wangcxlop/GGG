@@ -236,7 +236,7 @@ an earlier one; include order only has to put shared consts and structs first.
 `InterpolationBenchmarkHurdle.jl` holds the deliberately-disabled `hurdle_gwr` model, which is
 absent from `BENCHMARK_RUNS` and unreachable in a normal run.
 
-Three opt-in flags widen what a run reports without moving any pre-existing number (the end-to-end
+Four opt-in flags widen what a run reports without moving any pre-existing number (the end-to-end
 test asserts every incumbent metric row is identical with them on):
 
 - `--satellite-wet-blend` adds `blend_residual_gwr`, `blend_mixed_gwr` and `blend_mgwr`: where the
@@ -249,6 +249,10 @@ test asserts every incumbent metric row is identical with them on):
   training stations only (`fused_anchor_selection.csv`), so a held-out gauge never reaches its own
   anchor; it needs nested covariate selection. `run_claim_reassessment.jl` assesses every product
   the run scored, derived ones included.
+- `--fused-anchor-lagnbr` adds `MERGED_OLS_LAGNBR`: the OLS fusion widened with each product at
+  t±1 h and its mean over the 8 nearest stations, one coefficient set per agreement-envelope band
+  (`fused_anchor_grouped_coefficients.csv`). Kept off `--fused-anchor` so that flag's products are
+  unchanged.
 
 Blended methods are scored on the shared mask but never join `MASK_METHODS`, so they cannot move
 another method's denominator.
