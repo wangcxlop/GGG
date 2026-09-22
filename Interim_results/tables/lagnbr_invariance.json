@@ -1,0 +1,20 @@
+[
+ {
+  "file": "metrics_pooled.csv",
+  "baseline_rows": "5220",
+  "identical": "5220",
+  "changed": "0"
+ },
+ {
+  "file": "paired_comparisons.csv",
+  "baseline_rows": "45",
+  "identical": "45",
+  "changed": "0"
+ },
+ {
+  "file": "claim_assessment.csv",
+  "baseline_rows": "5",
+  "identical": "0",
+  "changed": "5"
+ }
+]

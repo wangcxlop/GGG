@@ -1,0 +1,80 @@
+[
+ {
+  "product": "FY4B",
+  "RMSE_residual_gwr": "1.0070",
+  "overall_gain": "-15.20",
+  "paired_significant": "no",
+  "heavy_gain": "+3.01",
+  "heavy_ci_low": "+1.15",
+  "moderate_degradation": "+14.98",
+  "coverage": "0.946",
+  "coverage_ok": "no",
+  "events_ok": "no",
+  "supported": "no"
+ },
+ {
+  "product": "GPM",
+  "RMSE_residual_gwr": "0.9332",
+  "overall_gain": "-7.15",
+  "paired_significant": "no",
+  "heavy_gain": "+2.99",
+  "heavy_ci_low": "+1.18",
+  "moderate_degradation": "+20.45",
+  "coverage": "0.962",
+  "coverage_ok": "yes",
+  "events_ok": "no",
+  "supported": "no"
+ },
+ {
+  "product": "GSMaP",
+  "RMSE_residual_gwr": "1.0065",
+  "overall_gain": "-15.58",
+  "paired_significant": "no",
+  "heavy_gain": "+5.05",
+  "heavy_ci_low": "+3.13",
+  "moderate_degradation": "+44.85",
+  "coverage": "0.962",
+  "coverage_ok": "yes",
+  "events_ok": "no",
+  "supported": "no"
+ },
+ {
+  "product": "MERGED_MEAN",
+  "RMSE_residual_gwr": "0.8933",
+  "overall_gain": "-2.19",
+  "paired_significant": "no",
+  "heavy_gain": "+4.91",
+  "heavy_ci_low": "+2.84",
+  "moderate_degradation": "+10.07",
+  "coverage": "0.946",
+  "coverage_ok": "no",
+  "events_ok": "no",
+  "supported": "no"
+ },
+ {
+  "product": "MERGED_OLS",
+  "RMSE_residual_gwr": "0.8584",
+  "overall_gain": "+2.03",
+  "paired_significant": "yes",
+  "heavy_gain": "+0.53",
+  "heavy_ci_low": "-1.13",
+  "moderate_degradation": "+2.66",
+  "coverage": "0.965",
+  "coverage_ok": "yes",
+  "events_ok": "no",
+  "supported": "no"
+ },
+ {
+  "product": "MERGED_OLS_LAGNBR",
+  "RMSE_residual_gwr": "0.8492",
+  "overall_gain": "+2.85",
+  "paired_significant": "yes",
+  "heavy_gain": "+0.50",
+  "heavy_ci_low": "-1.13",
+  "moderate_degradation": "-1.28",
+  "coverage": "0.946",
+  "coverage_ok": "no",
+  "events_ok": "no",
+  "supported": "no"
+ }
+]

@@ -1,0 +1,122 @@
+[
+ {
+  "scheme": "balanced_spatial",
+  "product": "GPM",
+  "fold": "1",
+  "status": "success",
+  "coverage": "1.000",
+  "covariates": "u10"
+ },
+ {
+  "scheme": "balanced_spatial",
+  "product": "GPM",
+  "fold": "2",
+  "status": "success",
+  "coverage": "1.000",
+  "covariates": "elevation,sp_hpa"
+ },
+ {
+  "scheme": "balanced_spatial",
+  "product": "GPM",
+  "fold": "3",
+  "status": "success",
+  "coverage": "1.000",
+  "covariates": "elevation,t2m_c,u10"
+ },
+ {
+  "scheme": "balanced_spatial",
+  "product": "GPM",
+  "fold": "4",
+  "status": "partial",
+  "coverage": "0.903",
+  "covariates": "elevation,v10,sp_hpa,ndvi"
+ },
+ {
+  "scheme": "balanced_spatial",
+  "product": "GPM",
+  "fold": "5",
+  "status": "success",
+  "coverage": "1.000",
+  "covariates": "elevation,u10,v10,sp_hpa"
+ },
+ {
+  "scheme": "balanced_spatial",
+  "product": "MERGED_OLS",
+  "fold": "1",
+  "status": "success",
+  "coverage": "1.000",
+  "covariates": "d2m_c,u10"
+ },
+ {
+  "scheme": "balanced_spatial",
+  "product": "MERGED_OLS",
+  "fold": "2",
+  "status": "success",
+  "coverage": "1.000",
+  "covariates": "u10,sp_hpa"
+ },
+ {
+  "scheme": "balanced_spatial",
+  "product": "MERGED_OLS",
+  "fold": "3",
+  "status": "success",
+  "coverage": "1.000",
+  "covariates": "u10,sp_hpa"
+ },
+ {
+  "scheme": "balanced_spatial",
+  "product": "MERGED_OLS",
+  "fold": "4",
+  "status": "success",
+  "coverage": "1.000",
+  "covariates": "elevation,sp_hpa"
+ },
+ {
+  "scheme": "balanced_spatial",
+  "product": "MERGED_OLS",
+  "fold": "5",
+  "status": "success",
+  "coverage": "1.000",
+  "covariates": "elevation,u10,sp_hpa"
+ },
+ {
+  "scheme": "balanced_spatial",
+  "product": "MERGED_OLS_LAGNBR",
+  "fold": "1",
+  "status": "success",
+  "coverage": "1.000",
+  "covariates": "u10"
+ },
+ {
+  "scheme": "balanced_spatial",
+  "product": "MERGED_OLS_LAGNBR",
+  "fold": "2",
+  "status": "success",
+  "coverage": "1.000",
+  "covariates": "elevation,sp_hpa"
+ },
+ {
+  "scheme": "balanced_spatial",
+  "product": "MERGED_OLS_LAGNBR",
+  "fold": "3",
+  "status": "success",
+  "coverage": "1.000",
+  "covariates": "elevation,t2m_c,u10"
+ },
+ {
+  "scheme": "balanced_spatial",
+  "product": "MERGED_OLS_LAGNBR",
+  "fold": "4",
+  "status": "partial",
+  "coverage": "0.903",
+  "covariates": "elevation,sp_hpa,ndvi"
+ },
+ {
+  "scheme": "balanced_spatial",
+  "product": "MERGED_OLS_LAGNBR",
+  "fold": "5",
+  "status": "success",
+  "coverage": "1.000",
+  "covariates": "elevation,u10,sp_hpa"
+ }
+]

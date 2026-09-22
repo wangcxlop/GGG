@@ -1,0 +1,22 @@
+[
+ {
+  "scheme": "balanced_spatial",
+  "comparison": "lagnbr_vs_ols",
+  "cells": "3,020,232"
+ },
+ {
+  "scheme": "balanced_spatial",
+  "comparison": "all_anchors",
+  "cells": "3,020,184"
+ },
+ {
+  "scheme": "random",
+  "comparison": "lagnbr_vs_ols",
+  "cells": "3,050,356"
+ },
+ {
+  "scheme": "random",
+  "comparison": "all_anchors",
+  "cells": "3,039,344"
+ }
+]

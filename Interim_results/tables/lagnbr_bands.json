@@ -1,0 +1,112 @@
+[
+ {
+  "band": "0",
+  "label": "No product wet",
+  "cells": "2,023,618",
+  "fell_back": "5/5",
+  "intercept": "0.030",
+  "sum_t": "0.285",
+  "sum_lag": "0.034",
+  "sum_lead": "0.131",
+  "sum_nbr": "0.236"
+ },
+ {
+  "band": "1",
+  "label": "1 wet · max 0.1–2.5",
+  "cells": "209,729",
+  "fell_back": "0/5",
+  "intercept": "0.072",
+  "sum_t": "0.117",
+  "sum_lag": "0.081",
+  "sum_lead": "0.076",
+  "sum_nbr": "0.504"
+ },
+ {
+  "band": "2",
+  "label": "1 wet · max 2.5–8",
+  "cells": "8,802",
+  "fell_back": "0/5",
+  "intercept": "0.219",
+  "sum_t": "0.116",
+  "sum_lag": "0.090",
+  "sum_lead": "0.018",
+  "sum_nbr": "0.264"
+ },
+ {
+  "band": "3",
+  "label": "1 wet · max ≥ 8",
+  "cells": "1,408",
+  "fell_back": "5/5",
+  "intercept": "0.030",
+  "sum_t": "0.285",
+  "sum_lag": "0.034",
+  "sum_lead": "0.131",
+  "sum_nbr": "0.236"
+ },
+ {
+  "band": "4",
+  "label": "2 wet · max 0.1–2.5",
+  "cells": "109,545",
+  "fell_back": "0/5",
+  "intercept": "0.138",
+  "sum_t": "0.184",
+  "sum_lag": "0.077",
+  "sum_lead": "0.125",
+  "sum_nbr": "0.293"
+ },
+ {
+  "band": "5",
+  "label": "2 wet · max 2.5–8",
+  "cells": "21,301",
+  "fell_back": "0/5",
+  "intercept": "0.205",
+  "sum_t": "0.333",
+  "sum_lag": "0.019",
+  "sum_lead": "0.095",
+  "sum_nbr": "0.226"
+ },
+ {
+  "band": "6",
+  "label": "2 wet · max ≥ 8",
+  "cells": "3,434",
+  "fell_back": "0/5",
+  "intercept": "-0.420",
+  "sum_t": "0.505",
+  "sum_lag": "0.026",
+  "sum_lead": "0.169",
+  "sum_nbr": "-0.039"
+ },
+ {
+  "band": "7",
+  "label": "3 wet · max 0.1–2.5",
+  "cells": "35,750",
+  "fell_back": "0/5",
+  "intercept": "0.133",
+  "sum_t": "0.094",
+  "sum_lag": "0.026",
+  "sum_lead": "0.104",
+  "sum_nbr": "0.393"
+ },
+ {
+  "band": "8",
+  "label": "3 wet · max 2.5–8",
+  "cells": "35,119",
+  "fell_back": "0/5",
+  "intercept": "0.033",
+  "sum_t": "0.502",
+  "sum_lag": "0.006",
+  "sum_lead": "0.114",
+  "sum_nbr": "0.091"
+ },
+ {
+  "band": "9",
+  "label": "3 wet · max ≥ 8",
+  "cells": "15,501",
+  "fell_back": "0/5",
+  "intercept": "-0.198",
+  "sum_t": "0.406",
+  "sum_lag": "-0.044",
+  "sum_lead": "0.165",
+  "sum_nbr": "0.134"
+ }
+]
