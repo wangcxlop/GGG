@@ -4,6 +4,9 @@ Reads the CSVs written by `scripts/run_heavy_rain_event_evaluation.jl` and write
 and PDF figures to `output/heavy_rain_events/figures/`:
 
     py -3.13 scripts/plot_heavy_rain_events.py
+    py -3.13 scripts/plot_heavy_rain_events.py --gpm-gsmap
+
+`--gpm-gsmap` draws the FY4B-free run instead, from and to `output/heavy_rain_events_gpm_gsmap/`.
 
 The gauge-point maps (fig1) and station error maps (fig2) are the primary spatial comparison.
 The IDW maps (fig3) are an auxiliary view of satellite values sampled at the gauge locations, not
@@ -19,6 +22,7 @@ validate all-pairs for colour-vision deficiency, for the three products.
 from __future__ import annotations
 
 import csv
+import sys
 from collections import defaultdict
 from pathlib import Path
 
@@ -32,9 +36,10 @@ from matplotlib.colors import BoundaryNorm, ListedColormap
 from matplotlib.lines import Line2D
 
 ROOT = Path(__file__).resolve().parents[1]
-RUN_DIR = ROOT / "output" / "heavy_rain_events"
+GPM_GSMAP_ONLY = "--gpm-gsmap" in sys.argv[1:]
+RUN_DIR = ROOT / "output" / ("heavy_rain_events_gpm_gsmap" if GPM_GSMAP_ONLY else "heavy_rain_events")
 FIG_DIR = RUN_DIR / "figures"
-PRODUCTS = ["FY4B", "GPM", "GSMaP"]
+PRODUCTS = ["GPM", "GSMaP"] if GPM_GSMAP_ONLY else ["FY4B", "GPM", "GSMaP"]
 WINDOW = "common_hours"
 
 SURFACE = "#fcfcfb"
@@ -45,6 +50,12 @@ GRID = "#e1e0d9"
 AXIS = "#c3c2b7"
 PRODUCT_COLORS = {"FY4B": "#2a78d6", "GPM": "#eb6834", "GSMaP": "#1baf7a"}
 EVENT_MARKERS = ["o", "s", "^", "D", "v", "P"]
+
+
+def grid_layout(n_columns: int, column_in: float, label_in: float) -> tuple[float, float]:
+    """Figure width for `n_columns` panels plus a fixed-width row-label margin, and that margin as a fraction."""
+    width = label_in + n_columns * column_in
+    return width, label_in / width
 
 # CMA 24-h rain classes. No accumulation in these events reaches 250 mm, so 100-250 is the top class.
 RAIN_BOUNDS = [0, 10, 25, 50, 100, 250]
@@ -193,8 +204,9 @@ def points(ax, lon, lat, values, cmap, norm, size=9.0):
 
 def fig1_point_maps(events, stations, metrics, bounds) -> None:
     columns = ["Gauge"] + PRODUCTS
-    fig, axes = plt.subplots(len(events), 4, figsize=(7.0, 11.6))
-    fig.subplots_adjust(left=0.13, right=0.985, top=0.935, bottom=0.075, wspace=0.06, hspace=0.08)
+    width, left = grid_layout(len(columns), 1.52, 0.91)
+    fig, axes = plt.subplots(len(events), len(columns), figsize=(width, 11.6))
+    fig.subplots_adjust(left=left, right=0.985, top=0.935, bottom=0.075, wspace=0.06, hspace=0.08)
     for i, event in enumerate(events):
         gauge = stations[(event["day"], "GPM")]
         for j, source in enumerate(columns):
@@ -222,8 +234,9 @@ def fig1_point_maps(events, stations, metrics, bounds) -> None:
 
 
 def fig2_error_maps(events, stations, metrics, bounds) -> None:
-    fig, axes = plt.subplots(len(events), 3, figsize=(5.5, 11.6))
-    fig.subplots_adjust(left=0.165, right=0.98, top=0.935, bottom=0.085, wspace=0.06, hspace=0.08)
+    width, left = grid_layout(len(PRODUCTS), 1.53, 0.91)
+    fig, axes = plt.subplots(len(events), len(PRODUCTS), figsize=(width, 11.6))
+    fig.subplots_adjust(left=left, right=0.98, top=0.935, bottom=0.085, wspace=0.06, hspace=0.08)
     for i, event in enumerate(events):
         for j, product in enumerate(PRODUCTS):
             ax = axes[i, j]
@@ -281,8 +294,9 @@ def fig3_idw_maps(events, stations, bounds) -> None:
     settings = read_rows("idw_settings.csv")[0]
     surfaces = load_surfaces()
     columns = ["Gauge"] + PRODUCTS
-    fig, axes = plt.subplots(len(events), 4, figsize=(7.0, 11.6))
-    fig.subplots_adjust(left=0.13, right=0.985, top=0.905, bottom=0.075, wspace=0.06, hspace=0.08)
+    width, left = grid_layout(len(columns), 1.52, 0.91)
+    fig, axes = plt.subplots(len(events), len(columns), figsize=(width, 11.6))
+    fig.subplots_adjust(left=left, right=0.985, top=0.905, bottom=0.075, wspace=0.06, hspace=0.08)
     for i, event in enumerate(events):
         gauge = stations[(event["day"], "GPM")]
         lons, lats, _ = surfaces[(event["day"], "Gauge")]
@@ -314,8 +328,9 @@ def fig3_idw_maps(events, stations, bounds) -> None:
 
 
 def fig4_scatter(events, stations, metrics) -> None:
-    fig, axes = plt.subplots(len(events), 3, figsize=(5.6, 11.6))
-    fig.subplots_adjust(left=0.2, right=0.98, top=0.925, bottom=0.05, wspace=0.18, hspace=0.34)
+    width, left = grid_layout(len(PRODUCTS), 1.49, 1.12)
+    fig, axes = plt.subplots(len(events), len(PRODUCTS), figsize=(width, 11.6))
+    fig.subplots_adjust(left=left, right=0.98, top=0.925, bottom=0.05, wspace=0.18, hspace=0.34)
     for i, event in enumerate(events):
         row = [stations[(event["day"], product)] for product in PRODUCTS]
         limit = 1.05 * max(max(d["obs_mm"].max(), d["sat_mm"].max()) for d in row)
@@ -364,7 +379,7 @@ def fig5_metric_summary(events, metrics) -> None:
     fig, axes = plt.subplots(2, 4, figsize=(10.0, 5.4))
     fig.subplots_adjust(left=0.055, right=0.99, top=0.84, bottom=0.14, wspace=0.28, hspace=0.42)
     x = np.arange(len(events))
-    offsets = {"FY4B": -0.2, "GPM": 0.0, "GSMaP": 0.2}
+    offsets = {p: 0.2 * (k - (len(PRODUCTS) - 1) / 2) for k, p in enumerate(PRODUCTS)}
     n_widespread = sum(event["type"] == "widespread" for event in events)
     tick_labels = [f"{event['day'][5:]}\n{event['day'][:4]}" for event in events]
     for ax, (key, title, ideal) in zip(axes.flat, METRIC_PANELS):
@@ -388,7 +403,7 @@ def fig5_metric_summary(events, metrics) -> None:
                 transform=ax.get_xaxis_transform(), ha="center", va="bottom", fontsize=5.8, color=MUTED)
     handles = [Line2D([], [], linestyle="none", marker="o", markersize=5.5, markerfacecolor=PRODUCT_COLORS[p],
                       markeredgecolor=SURFACE, label=p) for p in PRODUCTS]
-    fig.legend(handles=handles, loc="upper right", ncol=3, frameon=False, fontsize=7, bbox_to_anchor=(0.99, 0.975))
+    fig.legend(handles=handles, loc="upper right", ncol=len(PRODUCTS), frameon=False, fontsize=7, bbox_to_anchor=(0.99, 0.975))
     fig.suptitle("Event-scale spatial metrics by product", x=0.055, ha="left", fontsize=9, y=0.965)
     fig.text(0.055, 0.915, "Gauge-pixel pairs over each event's common hours. The solid grey line marks "
              "the perfect score.", ha="left", fontsize=6.5, color=INK_SECONDARY)

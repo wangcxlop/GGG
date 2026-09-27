@@ -4,6 +4,10 @@
 # gauge-observed rain on representative heavy-rain days?
 #
 #   julia --project=. scripts/run_heavy_rain_event_evaluation.jl
+#   julia --project=. scripts/run_heavy_rain_event_evaluation.jl --gpm-gsmap
+#
+# `--gpm-gsmap` leaves FY4B out: events are then selected on the hours GPM and GSMaP cover, and the
+# results go to output/heavy_rain_events_gpm_gsmap/ instead.
 #
 # Screens 2022-2024 for days with more than three gauges above 50 mm (08-08 BJT), selects four
 # widespread and two localized events, and scores each product against the gauges over a common
@@ -23,15 +27,17 @@ using Main.StudyArea: STUDY_BOUNDS
 using Main.HeavyRainEvents
 
 const STUDY_DATA = joinpath(ROOT, "data", "processed", "study_area")
-const OUTDIR = joinpath(ROOT, "output", "heavy_rain_events")
+const GPM_GSMAP_ONLY = "--gpm-gsmap" in ARGS
+const OUTDIR = joinpath(ROOT, "output", GPM_GSMAP_ONLY ? "heavy_rain_events_gpm_gsmap" : "heavy_rain_events")
 # The full benchmark window: the first and last hour-ending labels of the 08-08 BJT days.
 const ANALYSIS_START = DateTime(2022, 1, 1, 9)
 const ANALYSIS_END = DateTime(2025, 1, 1, 8)
-const PRODUCT_FILES = [
+const ALL_PRODUCT_FILES = [
     "FY4B" => "hubei_fy4b_hourly_2022_2024_full_strict_navcorrected.csv",
     "GPM" => "hubei_gpm_hourly_2022_2024_full_aligned.csv",
     "GSMaP" => "hubei_gsmap_hourly_2022_2024_full_aligned.csv",
 ]
+const PRODUCT_FILES = GPM_GSMAP_ONLY ? filter(p -> first(p) != "FY4B", ALL_PRODUCT_FILES) : ALL_PRODUCT_FILES
 const PRODUCTS = first.(PRODUCT_FILES)
 # Products with a complete 24 h on the selected days, scored a second time over the full day to
 # check that the common window FY4B's gaps impose does not drive the conclusions.
