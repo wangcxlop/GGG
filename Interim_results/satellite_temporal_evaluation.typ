@@ -126,7 +126,7 @@
   [JJA], [6.5], [8.4], [7.6], [8.3], [7.5],
   [SON], [7.8], [6.9], [7.5], [6.3], [7.3],
   [DJF], [0.3], [1.5], [5.3], [1.9], [3.6],
-  table.cell(colspan: 6, fill: luma(235))[*Satellite ≥ 0.5 mm (the gauge resolution) on gauge-dry hours (%)*],
+  table.cell(colspan: 6, fill: luma(235))[*Satellite ≥ 0.5 mm (the gauge data step) on gauge-dry hours (%)*],
   [All seasons], [3.9], [3.1], [3.1], [2.4], [2.6],
   [MAM], [3.8], [2.8], [3.0], [2.4], [3.1],
   [JJA], [4.1], [4.0], [3.3], [3.9], [3.3],
@@ -341,7 +341,7 @@ The question has four parts: whether the products reproduce the temporal evoluti
 
 = Data
 
-- *Gauges.* 237 stations in the study area (109.58–111.47° E, 31.25–33.20° N), hourly, labelled hour-ending Beijing time (BJT). They are *tipping buckets with 0.5 mm resolution*: 99.9% of rainy values in 2022–2024 are multiples of 0.5 mm.
+- *Gauges.* 237 stations in the study area (109.58–111.47° E, 31.25–33.20° N), hourly, labelled hour-ending Beijing time (BJT). The instrument type has not been verified; what the data show is that 99.9% of rainy values in 2022–2024 are multiples of 0.5 mm, so the gauge values come in *0.5 mm steps*.
 - *Satellite products*, sampled at the gauge pixels and aligned to the gauge clock: FY4B precipitation (strict hourly aggregation, navigation-corrected); GPM IMERG V07 (Google Earth Engine collection `NASA/GPM_L3/IMERG_V07`); GSMaP V8 operational `hourlyPrecipRate`, which carries no gauge correction.
 - *Period.* The 08–08 BJT days from 1 January 2022 to 31 December 2024: 26,304 hours, contiguous.
 - *Two evaluation samples* (@tab-coverage). FY4B never provides the 23:00 label and misses whole months (2022-01 to 05, 2022-10 to 2023-03, 2024-02). A fair three-product comparison is therefore restricted to the hours FY4B covers; GPM and GSMaP are also scored over the full record, which is the basis for the seasonal analysis. Within each sample every product is scored on identical station-hours.
@@ -413,7 +413,7 @@ The requested scheme is a plain–hills–mountains regionalization. No geomorph
 
 - *Hourly, by gauge class* (gauge-wet hours): relative bias of the amount, detection as rain (satellite ≥ 0.1 mm), share of hours in the same class and in a lower class, and the full gauge-class × satellite-class confusion matrix.
 - *False alarms* (gauge-dry hours): how often the satellite reports ≥ 0.1 mm and ≥ 0.5 mm, the false-alarm ratio, and the share of satellite rain volume falling on those hours.
-- *Station rain events.* At each gauge an event is a run of wet hours ending after ≥ 3 dry hours (3 h because a 0.5 mm bucket tips only every few hours in drizzle; a 1 h gap was run as a sensitivity). The event class is its peak hourly intensity. Each product is scored over the event ± 3 h, cut back so the window never reaches another event, and only where gauge and products are complete over that window. Scores: detection, peak and rain-centre timing error, onset and end error, best lag within ± 3 h, duration ratio, volume bias and peak ratio.
+- *Station rain events.* At each gauge an event is a run of wet hours ending after ≥ 3 dry hours (3 h because with values in 0.5 mm steps, drizzle can leave several zero hours between non-zero readings; a 1 h gap was run as a sensitivity). The event class is its peak hourly intensity. Each product is scored over the event ± 3 h, cut back so the window never reaches another event, and only where gauge and products are complete over that window. Scores: detection, peak and rain-centre timing error, onset and end error, best lag within ± 3 h, duration ratio, volume bias and peak ratio.
 - *Diurnal cycle*: mean amount and wet-hour frequency per hour of day; correlation of the curves and first-harmonic phase difference.
 - *Hourly correlation at each gauge*, over the hours where the gauge *or* the satellite is wet, so that the shared dry hours do not inflate it (the all-hours value is kept as a reference).
 - *Regional-mean series*: hourly means over each region's gauges (kept when ≥ 90% report), accumulated to 3 h and 24 h; correlation, KGE, bias and best lag.
@@ -463,7 +463,7 @@ Every product underestimates more as the rain gets heavier (@tab-intensity, @fig
 
 == False alarms <sec-false-alarms>
 
-On 5.6–7.2% of gauge-dry hours the satellites report rain, and about 60% of all satellite-wet hours are gauge-dry (70% for FY4B). Much of this is light: raising the satellite threshold to the gauge resolution of 0.5 mm cuts the rate by more than half for GPM and GSMaP, and by about a third for FY4B (@tab-false-alarms, @fig-false-alarms). The share of satellite rain *volume* falling on gauge-dry hours is about a third for GPM and GSMaP but 60% for FY4B, so FY4B's rain is largely displaced in time or space. Some of the 0.1–0.5 mm false alarms may be real drizzle that the bucket had not yet tipped for.
+On 5.6–7.2% of gauge-dry hours the satellites report rain, and about 60% of all satellite-wet hours are gauge-dry (70% for FY4B). Much of this is light: raising the satellite threshold to the gauge data's 0.5 mm step cuts the rate by more than half for GPM and GSMaP, and by about a third for FY4B (@tab-false-alarms, @fig-false-alarms). The share of satellite rain *volume* falling on gauge-dry hours is about a third for GPM and GSMaP but 60% for FY4B, so FY4B's rain is largely displaced in time or space. Some of the 0.1–0.5 mm false alarms may be real drizzle too light to register as a 0.5 mm gauge value.
 
 #figure(
   split-table("Season", false_alarm_rows, first-width: 18%),
@@ -479,7 +479,7 @@ On 5.6–7.2% of gauge-dry hours the satellites report rain, and about 60% of al
 
 Across 86,508 complete gauge events (full record), detection rises from 54–62% for light events to 96% for severe ones, and the share of peaks within ± 1 h rises from 54% to 71–72% (@tab-events, @fig-events). At hourly resolution the median peak-hour error is 0 h almost everywhere, so the sub-hour structure is read from the rain-weighted centre of each event. It shows a consistent drift with intensity for all three products: satellite rain is centred about 0.4–0.8 h *early* in light events and 0.3–0.5 h *late* in severe ones, and the best-lag balance moves from early to late in step. Satellite events last longer than gauge events (median ratio 1.1–2.0), light events carry far too much rain (+36% GPM, +83% GSMaP) and severe events far too little (−56%, −51%).
 
-Two caveats bear on light events: the 0.5 mm bucket delays the recorded onset of drizzle, which contributes to the apparent early satellite onset, and FY4B's gaps leave the three-product sample only 28% of all gauge events, biased toward short events that avoid 23:00.
+Two caveats bear on light events: with gauge values in 0.5 mm steps, the recorded onset of drizzle may come late, which may contribute to the apparent early satellite onset, and FY4B's gaps leave the three-product sample only 28% of all gauge events, biased toward short events that avoid 23:00.
 
 #figure(
   split-table("Event class", event_rows, first-width: 20%),
@@ -563,7 +563,7 @@ The two interpretable relief regions are statistically indistinguishable (@tab-r
 
 = Limitations and open issues
 
-- *Gauge resolution.* 0.5 mm tipping buckets cannot resolve 0.1–0.5 mm/h and delay drizzle onsets; light-rain detection, false alarms and early satellite onsets are affected.
+- *Coarse gauge values.* Non-zero gauge values come in 0.5 mm steps (a property of the data; the instrument has not been verified), so 0.1–0.5 mm/h cannot be resolved and drizzle onsets may be recorded late; light-rain detection, false alarms and early satellite onsets are affected.
 - *Winter gauge record.* The midday winter gauge peak suggests delayed snowmelt tips; winter timing metrics should not be read as satellite errors without a snow screen.
 - *FY4B coverage.* The three-product sample covers 13,243 hours, 28% of gauge events, and winter only in January and December 2024; FY4B seasonal values rest on uneven months.
 - *Landform.* No plains; region labels depend on the relief window (ranking is stable); terrain is confounded with latitude; the change-point sequence definition awaits verification against its original source, which could not be retrieved for this report.

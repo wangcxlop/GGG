@@ -122,7 +122,7 @@ The supervisor asked three things, and they structure this report:
 
 = Data and design
 
-- *Gauges.* 237 hourly tipping-bucket gauges in the Shiyan study area (0.5 mm resolution).
+- *Gauges.* 237 hourly rain gauges in the Shiyan study area (instrument type not verified; non-zero values come in 0.5 mm steps).
 - *Products.* FY4B precipitation (strict hourly aggregation, navigation-corrected), GPM IMERG V07 and GSMaP V8 operational, each sampled at the gauge pixel and aligned to the gauge clock.
 - *Period.* January 2022 – December 2024, restricted to the *13,471 hours* on which all three products are available. FY4B's strict completeness sets this grid, so the comparison is between products on identical hours.
 - *Validation.* Five-fold cross-validation by *station*. The primary scheme holds out spatially compact groups of gauges (balanced spatial folds), so a held-out gauge is typically ~24 km from the nearest training gauge — the situation of an ungauged area. A random station split, where a held-out gauge keeps its neighbours, is reported as a secondary check (@sec-robustness).
@@ -406,7 +406,7 @@ Under random CV (@fig-robustness, @tab-robustness) a held-out gauge keeps its ne
 - *The agreement blend already reads all three products*, so on a single-product anchor it is not a single-product method.
 - *Covariates.* An earlier exploratory run without ERA5/NDVI/DEM covariates scored the GWR family 0.6–2.2% better. It predates the current code and was not repeated here.
 - *FY4B sets the grid.* Only hours with a strict-complete FY4B field are scored (13,471 of 26,304); winter is thinly represented.
-- *Gauge resolution.* 0.5 mm tipping buckets cannot resolve 0.1–0.5 mm/h, which affects the 0.1 mm/h detection scores.
+- *Coarse gauge values.* Non-zero gauge values come in 0.5 mm steps, so 0.1–0.5 mm/h cannot be resolved, which affects the 0.1 mm/h detection scores.
 
 = Next steps
 
