@@ -58,43 +58,20 @@ the satellite gain, and does it fix the moderate and heavy rain that flood forec
 Two methodological answers follow: which interpolation and fusion methods are best, and which
 product (or a merge of both) should be the anchor.
 
-#figure(
-  table(
-    columns: (auto, 1fr, auto, auto),
-    align: (left, left, left, left),
-    stroke: none,
-    rule,
-    table.header([*Source*], [*Description*], [*Resolution*], [*Period*]),
-    thin,
-    [Gauges], [237 hourly stations, Shiyan study area; data quantised to 0.5 mm], [point, 1 h], [2022–2024],
-    [GPM IMERG], [satellite product, sampled at the gauge pixels], [0.1°, 1 h], [2022–2024],
-    [GSMaP], [satellite product, sampled at the gauge pixels], [0.1°, 1 h], [2022–2024],
-    [Copernicus GLO-30], [DEM, local relief used for the landform regions], [30 m], [static],
-    rule,
-  ),
-  caption: [Data (planned Table 1). Days run 08–08 Beijing time.],
-)
+*Data.* 237 hourly gauges in the Shiyan study area (data quantised to 0.5 mm), and GPM IMERG and
+GSMaP hourly at 0.1°, sampled at the gauge pixels, for 2022–2024. Days run 08–08 Beijing time. Local
+relief from the Copernicus GLO-30 DEM defines the landform regions.
 
-#figure(
-  table(
-    columns: (auto, 1fr, auto, auto),
-    align: (center, left, left, left),
-    stroke: none,
-    rule,
-    table.header([*Fig.*], [*Content*], [*Answers*], [*Draft here*]),
-    thin,
-    [1], [Study area, gauges and landform regions], [setting], [—],
-    [2], [Six heavy-rain events: gauge vs GPM vs GSMaP maps], [Q1], [shown],
-    [3], [Event-scale spatial scores (r, RMSE, bias, KGE, CSI)], [Q1], [shown],
-    [4], [Hourly skill by intensity class, by season and region], [Q2], [shown (season)],
-    [5], [Rain events: detection, timing and volume by class], [Q2], [text],
-    [6], [Interpolation methods; fusion method × anchor], [Q3, M1], [shown (fusion)],
-    [7], [Where fusion helps: intensity, distance to gauges, detection], [Q3], [shown],
-    [8], [Which product, and does merging help], [M2], [table],
-    rule,
-  ),
-  caption: [Figure plan. M1 = best interpolation and fusion method; M2 = best product or merge.],
-)
+*Figures.* Eight are planned. Five are shown below as drafts (Figs. 2, 3, 4, 6, 7); the other three
+are summarised in the text.
++ Study area, gauges and landform regions.
++ Six heavy-rain events: gauge, GPM and GSMaP maps (Q1).
++ Event-scale spatial scores (Q1).
++ Hourly skill by intensity class, by season and region (Q2).
++ Rain events: detection, timing and volume by class (Q2).
++ Gauge-only interpolators; fusion method × anchor (Q3, best method).
++ Where fusion helps: intensity, distance to gauges, detection (Q3).
++ Which product, and does merging help (best product).
 
 *Study area (Fig. 1).* The 237 gauges sit in hills and mountains; none is on a plain. By local relief,
 129 gauges are below 500 m, 97 are at 500–1000 m and 11 are at 1000 m or more (too few to interpret
@@ -191,7 +168,7 @@ satellite reports rain.
     [Merged (OLS)], [MGWR + agreement blend], [0.844], [0.532], [0.308], [+5.0%], [+3.6%],
     rule,
   ),
-  caption: [Draft headline table (planned Table 3). Held-out gauges, balanced spatial CV; RMSE in
+  caption: [Draft headline table. Held-out gauges, balanced spatial CV; RMSE in
   mm h⁻¹; improvements are RMSE reductions. Gauge-only rows are on GPM's evaluation mask.],
 )
 
