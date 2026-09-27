@@ -493,3 +493,172 @@ function select_blend_lambda(
             eachindex(shared)),
     )
 end
+
+"""
+`matrix` moved one hour along `times`: `shift = -1` gives each cell its value at t-1, `+1` at t+1.
+
+A cell whose neighbouring column is not exactly `shift` hours away (a gap in the common grid), or is
+NaN there, keeps its own value, so a lagged stack feature degrades to the member it lags.
+"""
+function stack_hour_shift(matrix::AbstractMatrix{Float64}, times::AbstractVector, shift::Int)
+    length(times) == size(matrix, 2) ||
+        throw(DimensionMismatch("times must match the matrix's columns"))
+    out = Matrix{Float64}(matrix)
+    @inbounds for time in axes(matrix, 2)
+        other = time + shift
+        (1 <= other <= size(matrix, 2) && times[other] - times[time] == Hour(shift)) || continue
+        for station in axes(matrix, 1)
+            value = matrix[station, other]
+            isnan(value) || (out[station, time] = value)
+        end
+    end
+    return out
+end
+
+"""The stack's design, one matrix per entry of `STACK_FEATURES` and in that order."""
+function stack_feature_matrices(
+    mgwr::Matrix{Float64}, adw::Matrix{Float64}, raw::Matrix{Float64}, tps::Matrix{Float64},
+    times::AbstractVector,
+)
+    size(mgwr) == size(adw) == size(raw) == size(tps) ||
+        throw(DimensionMismatch("every stack member must have the same shape"))
+    return [mgwr, adw, raw, tps,
+        stack_hour_shift(mgwr, times, -1), stack_hour_shift(mgwr, times, 1),
+        stack_hour_shift(adw, times, -1), stack_hour_shift(adw, times, 1)]
+end
+
+"""
+Stack band per cell: `agreement + 1 + n_agreement * (distance_band - 1)`, in `1:stack_band_count()`.
+
+`agreement` is `blend_band_matrix(:agreement_envelope, ...)` for these stations, whose band 0 (no
+product wet) the stack fits like any other. `distance_km` is each station's distance to the nearest
+station the predicting model was trained on, which is knowable at prediction time.
+"""
+function stack_band_matrix(agreement::AbstractMatrix{Int}, distance_km::AbstractVector{<:Real})
+    length(distance_km) == size(agreement, 1) ||
+        throw(DimensionMismatch("need one distance per station row"))
+    n_agreement = blend_band_count(:agreement_envelope) + 1
+    distance_band = [1 + count(edge -> distance >= edge, STACK_DISTANCE_EDGES)
+                     for distance in distance_km]
+    return agreement .+ 1 .+ n_agreement .* (distance_band .- 1)
+end
+
+"""
+Non-negative least squares from normal equations, by enumerating the support.
+
+Exact for the eight or so features the stack has (255 subsets of 8×8 solves). A singular subset is
+skipped; if every subset is singular the zero vector comes back, which the caller never uses as
+the fitted answer because the pooled system over every band is not singular in practice.
+"""
+function _nnls_normal(gram::Matrix{Float64}, rhs::Vector{Float64}, yy::Float64)
+    p = length(rhs)
+    best_sse, best = Inf, zeros(Float64, p)
+    for support in 1:(2^p - 1)
+        active = [j for j in 1:p if (support >> (j - 1)) & 1 == 1]
+        solution = try
+            cholesky(Symmetric(gram[active, active])) \ rhs[active]
+        catch
+            continue
+        end
+        all(>=(0), solution) || continue
+        weights = zeros(Float64, p)
+        weights[active] = solution
+        sse = yy - 2 * dot(weights, rhs) + dot(weights, gram * weights)
+        sse < best_sse && ((best_sse, best) = (sse, weights))
+    end
+    return best
+end
+
+"""
+Fit one non-negative weight vector per stack band on the inner selection split.
+
+Scores the cells where the gauge and every feature are finite, so no member's gaps decide which
+cells a weight is fitted on. A band with fewer than `min_cells` such cells takes the pooled fit
+over every band and is flagged in `fell_back`.
+
+Returns `nothing` when no cell is usable, which the caller reports as a skipped fold. Otherwise
+`weights` is `length(features) x n_bands`, beside the inner RMSE of the stack and of `features[1]`
+alone on the same cells.
+"""
+function select_stack_weights(
+    y_obs::Matrix{Float64}, features::Vector{Matrix{Float64}}, band::Matrix{Int}, n_bands::Int;
+    min_cells::Int=STACK_MIN_BAND_CELLS,
+)
+    for feature in features
+        size(feature) == size(y_obs) == size(band) || throw(DimensionMismatch(
+            "every feature and the band matrix must have the observation's shape",
+        ))
+    end
+    p = length(features)
+    gram = zeros(Float64, p, p, n_bands)
+    rhs = zeros(Float64, p, n_bands)
+    yy = zeros(Float64, n_bands)
+    used = zeros(Int, n_bands)
+    row = zeros(Float64, p)
+    @inbounds for index in eachindex(y_obs)
+        observed = y_obs[index]
+        isnan(observed) && continue
+        usable = true
+        for (j, feature) in enumerate(features)
+            value = feature[index]
+            isnan(value) && (usable = false; break)
+            row[j] = value
+        end
+        usable || continue
+        target = band[index]
+        1 <= target <= n_bands || throw(ArgumentError("band $target is outside 1:$n_bands"))
+        used[target] += 1
+        yy[target] += observed * observed
+        for i in 1:p
+            rhs[i, target] += row[i] * observed
+            for j in i:p
+                gram[i, j, target] += row[i] * row[j]
+            end
+        end
+    end
+    sum(used) == 0 && return nothing
+    for target in 1:n_bands, i in 1:p, j in 1:(i - 1)
+        gram[i, j, target] = gram[j, i, target]
+    end
+    pooled = _nnls_normal(dropdims(sum(gram; dims=3); dims=3), vec(sum(rhs; dims=2)), sum(yy))
+    weights = zeros(Float64, p, n_bands)
+    fell_back = falses(n_bands)
+    sse_stack, sse_source = 0.0, 0.0
+    for target in 1:n_bands
+        fell_back[target] = used[target] < min_cells
+        weights[:, target] = fell_back[target] ? pooled :
+            _nnls_normal(gram[:, :, target], rhs[:, target], yy[target])
+        used[target] == 0 && continue
+        w = weights[:, target]
+        sse_stack += yy[target] - 2 * dot(w, rhs[:, target]) + dot(w, gram[:, :, target] * w)
+        sse_source += yy[target] - 2 * rhs[1, target] + gram[1, 1, target]
+    end
+    n = sum(used)
+    return (; weights, used, fell_back, n,
+        inner_RMSE=sqrt(max(sse_stack, 0.0) / n), source_RMSE=sqrt(max(sse_source, 0.0) / n))
+end
+
+"""
+Apply per-band stack weights. A cell with any feature missing keeps `features[1]`'s value - the
+source prediction, NaN if the source itself is - so a gap in a secondary member can neither shrink
+the stack's coverage below its source's nor poison a cell, the rule the blends follow too.
+"""
+function stacked_prediction(
+    features::Vector{Matrix{Float64}}, band::Matrix{Int}, weights::Matrix{Float64},
+)
+    size(weights, 1) == length(features) ||
+        throw(DimensionMismatch("need one weight per feature"))
+    source = first(features)
+    out = similar(source)
+    @inbounds for index in eachindex(source)
+        total = 0.0
+        complete = true
+        for (j, feature) in enumerate(features)
+            value = feature[index]
+            isnan(value) && (complete = false; break)
+            total += weights[j, band[index]] * value
+        end
+        out[index] = complete ? total : source[index]
+    end
+    return out
+end

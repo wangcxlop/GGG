@@ -236,7 +236,7 @@ an earlier one; include order only has to put shared consts and structs first.
 `InterpolationBenchmarkHurdle.jl` holds the deliberately-disabled `hurdle_gwr` model, which is
 absent from `BENCHMARK_RUNS` and unreachable in a normal run.
 
-Four opt-in flags widen what a run reports without moving any pre-existing number (the end-to-end
+Five opt-in flags widen what a run reports without moving any pre-existing number (the end-to-end
 test asserts every incumbent metric row is identical with them on):
 
 - `--satellite-wet-blend` adds `blend_residual_gwr`, `blend_mixed_gwr` and `blend_mgwr`: where the
@@ -253,6 +253,13 @@ test asserts every incumbent metric row is identical with them on):
   t±1 h and its mean over the 8 nearest stations, one coefficient set per agreement-envelope band
   (`fused_anchor_grouped_coefficients.csv`). Kept off `--fused-anchor` so that flag's products are
   unchanged.
+- `--stacked-blend` adds `stack_mgwr`: a non-negative combination of mgwr, adw, the raw anchor,
+  tps and mgwr's/adw's own predictions at t±1 h, one weight vector per band of
+  (agreement-envelope band, including no-product-wet) x (distance to the nearest training gauge).
+  Weights are fitted per fold on the inner split over the full training record
+  (`stack_selection.csv`), which costs one more full-record inner prediction per member per fold.
+  Found by `scripts/screen_blend_mgwr_improvements.jl`, which screens combiners over a finished
+  run's saved predictions without refitting anything.
 
 Blended methods are scored on the shared mask but never join `MASK_METHODS`, so they cannot move
 another method's denominator.
