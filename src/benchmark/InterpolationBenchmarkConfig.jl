@@ -85,6 +85,35 @@ blend_axis_tag(axis::Symbol) = axis === :constant ? "" : "agrenv_"
 _blend_method(method::AbstractString, axis::Symbol=:constant) =
     "blend_$(blend_axis_tag(axis))$(method)"
 
+# `stacked_blend`: a non-negative combination of mgwr, adw, the raw anchor, tps, and mgwr's and
+# adw's own predictions at t-1 and t+1, with one weight vector per band of
+# (agreement-envelope band, including the no-product-wet band) x (distance to the nearest training
+# gauge). The generalisation of the two-member blend above, found by
+# `scripts/screen_blend_mgwr_improvements.jl`: the lagged members carry the gauge/satellite timing
+# mismatch that also drove MERGED_OLS_LAGNBR's gain, the dry band lets the weights sum below one
+# where the residual field leaks rain into satellite-dry cells, and the distance bands let adw's
+# weight fall off away from the gauges, where it stops helping.
+#
+# Weights are fitted on the inner selection split over the full training record, not the tuning
+# hours: the lags need each hour's neighbours, and the tuning sample is deliberately wet-heavy,
+# which would bias the dry band's weights.
+const STACK_METHOD = "stack_mgwr"
+# The fitted members, as `(mode, method)` pairs; `raw` is the anchor itself and needs no fit.
+const STACK_MEMBER_RUNS = [("residual", "mgwr"), ("direct", "adw"), ("direct", "tps")]
+# Feature order of every weight vector. The first entry is also what a cell falls back to when any
+# other feature is missing there.
+const STACK_FEATURES = [
+    "mgwr", "adw", "raw", "tps", "mgwr_lag", "mgwr_lead", "adw_lag", "adw_lead",
+]
+"""Edges (km) of the nearest-training-gauge distance bands."""
+const STACK_DISTANCE_EDGES = [20.0, 50.0]
+"""Inner-split cells a band needs to be fitted on its own rather than taking the pooled fit."""
+const STACK_MIN_BAND_CELLS = 500
+
+"""Agreement-envelope bands including band 0, times the distance bands."""
+stack_band_count() = (blend_band_count(:agreement_envelope) + 1) *
+    (length(STACK_DISTANCE_EDGES) + 1)
+
 # Products derived by fusing the real ones, rather than read from a file. See `SatelliteFusion`
 # for why both variants exist and why neither is a tuned parameter.
 _fused_product_name(variant::Symbol) = "MERGED_$(uppercase(String(variant)))"
@@ -101,6 +130,8 @@ function benchmark_methods(cfg)
     methods = copy(BENCHMARK_METHODS)
     cfg.satellite_wet_blend && append!(methods, [_blend_method(method, axis)
         for axis in cfg.blend_axes for method in BLEND_SOURCE_METHODS])
+    # `hasproperty` so a caller describing the options as a partial NamedTuple need not name it.
+    hasproperty(cfg, :stacked_blend) && cfg.stacked_blend && push!(methods, STACK_METHOD)
     return methods
 end
 
@@ -158,6 +189,11 @@ Base.@kwdef struct InterpolationBenchmarkConfig
     # prediction, computed once, and everything after it is arithmetic over matrices already in
     # hand. Ignored unless `satellite_wet_blend` is set.
     blend_axes::Vector{Symbol} = [:constant]
+    # Report `STACK_METHOD`, the banded non-negative stack over mgwr, adw, the anchor, tps and the
+    # lagged members (see `STACK_FEATURES`). Independent of `satellite_wet_blend`. Costs one more
+    # full-record inner-split prediction per member per fold. Off by default; output directory
+    # suffix `_stackblend`.
+    stacked_blend::Bool = false
     # Fusion variants to add as derived products, each fitted inside every fold on that fold's
     # training stations alone (see `SatelliteFusion`). Empty means the run scores only the
     # products that have files. Output directory suffix `_fusedanchor`.
@@ -365,6 +401,10 @@ function _validate_benchmark_config(cfg::InterpolationBenchmarkConfig, n_station
     cfg.satellite_wet_blend && cfg.dem !== nothing && throw(ArgumentError(
         "satellite_wet_blend needs an inner selection split to choose its weight on, which the " *
         "legacy DEM path does not provide",
+    ))
+    cfg.stacked_blend && cfg.dem !== nothing && throw(ArgumentError(
+        "stacked_blend fits its weights on the inner selection split, which the legacy DEM " *
+        "path does not provide",
     ))
     isempty(cfg.blend_axes) && throw(ArgumentError("blend_axes must not be empty"))
     all(axis -> axis in BLEND_AXES, cfg.blend_axes) ||

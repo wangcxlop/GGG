@@ -347,6 +347,19 @@ function _write_benchmark_outputs(
             ],
         ))
     end
+    if cfg.stacked_blend
+        append!(scope, DataFrame(
+            key=["stacked_blend", "stacked_blend_selection"],
+            value=[
+                "$(STACK_METHOD): non-negative combination of $(join(STACK_FEATURES, ", ")), " *
+                "one weight vector per band of (agreement-envelope band including no-product-wet) " *
+                "x (nearest training gauge at $(STACK_DISTANCE_EDGES) km)",
+                "weights fitted per fold on the inner selection split over the full training " *
+                "record, never on held-out cells; see stack_selection.csv. Scored on the shared " *
+                "mask without defining it",
+            ],
+        ))
+    end
     if !isempty(cfg.fused_anchor_variants)
         append!(scope, DataFrame(
             key=["fused_anchor", "fused_anchor_leakage"],
@@ -661,6 +674,107 @@ function _run_fold_blend!(
 end
 
 """
+`STACK_METHOD` for one fold: fit the banded non-negative stack on the inner selection split, then
+apply it to the fold's held-out stations.
+
+The inner design is each member re-predicted across the inner split over the full training record
+(`time_indices=nothing`), not `auto`'s tuning hours - the lagged features need every hour's
+neighbours, and the tuning sample's wet oversampling would skew the dry band's weights. `raw` is the
+anchor itself. Distances on the inner split are to the nearest *inner*-training station, so the
+distance bands mean the same thing there as on the fold.
+
+Skips, leaving the method NaN with a status row saying why, when there is no inner split or a
+member did not fit - the same reason `_run_fold_blend!` gives for not defaulting to the source.
+
+Mutates `fold_predictions`, `predictions`, `stack_selection_rows` and `run_status_rows`.
+"""
+function _run_fold_stack!(
+    cfg::InterpolationBenchmarkConfig, fold::Int, scheme, product, repeat_index::Int,
+    repeat_seed::Int, times, val_idx, y_obs, y_sat_val, y_obs_train, y_sat_train, train_lonlat,
+    selection_groups, joint_selection_contexts, fold_selected, fold_predictions, predictions,
+    agreement_train, agreement_val, val_distance, stack_selection_rows, run_status_rows,
+)
+    eligible = .!isnan.(y_obs[val_idx, :]) .& .!isnan.(y_sat_val)
+    status_row(status, message, coverage) = _benchmark_status_row(
+        nothing, nothing, nothing, false;
+        scheme, product, fold, repeat=repeat_index, seed=repeat_seed,
+        mode="", method=STACK_METHOD, output_method=STACK_METHOD,
+        status, error=message, prediction_coverage=coverage,
+    )
+    function skip(status::String, message::String)
+        fold_predictions[STACK_METHOD] = fill(NaN, length(val_idx), size(y_obs, 2))
+        push!(run_status_rows, status_row(status, message, 0.0))
+        return nothing
+    end
+
+    (_dem_enabled(cfg) || selection_groups === nothing) &&
+        return skip("skipped", "fold has no inner selection split to fit the stack on")
+    for (mode, method) in STACK_MEMBER_RUNS
+        output_method = _output_method(mode, method)
+        haskey(fold_selected, output_method) && haskey(fold_predictions, output_method) ||
+            return skip("skipped", "$output_method did not fit on this fold")
+    end
+
+    inner = Dict{String,Matrix{Float64}}()
+    for (mode, method) in STACK_MEMBER_RUNS
+        output_method = _output_method(mode, method)
+        inner[output_method] = try
+            inner_selection_prediction(
+                fold_selected[output_method], method, mode, train_lonlat,
+                y_obs_train, y_sat_train, selection_groups;
+                joint_contexts=joint_selection_contexts,
+            )
+        catch e
+            return skip("failed",
+                "$output_method inner prediction failed: $(sprint(showerror, e))")
+        end
+    end
+
+    distance_train = haversine_distance_matrix(train_lonlat, train_lonlat)
+    inner_distance = fill(NaN, size(train_lonlat, 1))
+    for group in selection_groups
+        inner_train = setdiff(axes(train_lonlat, 1), group)
+        isempty(inner_train) && continue
+        inner_distance[group] = vec(minimum(distance_train[inner_train, group]; dims=1))
+    end
+
+    n_bands = stack_band_count()
+    inner_features = stack_feature_matrices(
+        inner["mgwr"], inner["adw"], y_sat_train, inner["tps"], times,
+    )
+    choice = select_stack_weights(
+        y_obs_train, inner_features, stack_band_matrix(agreement_train, inner_distance), n_bands,
+    )
+    choice === nothing &&
+        return skip("failed", "no inner-split cell was scorable for every stack member")
+
+    stacked = stacked_prediction(
+        stack_feature_matrices(
+            fold_predictions["mgwr"], fold_predictions["adw"], y_sat_val,
+            fold_predictions["tps"], times,
+        ),
+        stack_band_matrix(agreement_val, val_distance), choice.weights,
+    )
+    fold_predictions[STACK_METHOD] = stacked
+    predictions[STACK_METHOD][val_idx, :] = stacked
+    for band in 1:n_bands
+        push!(stack_selection_rows, merge(
+            (; scheme, product, fold, repeat=repeat_index, seed=repeat_seed,
+                method=STACK_METHOD, band, n_cell=choice.used[band],
+                fell_back=choice.fell_back[band]),
+            NamedTuple{Tuple(Symbol.("w_" .* STACK_FEATURES))}(Tuple(choice.weights[:, band])),
+            (; inner_RMSE=choice.inner_RMSE, source_RMSE=choice.source_RMSE),
+        ))
+    end
+    coverage = _prediction_coverage(eligible, stacked)
+    push!(run_status_rows, status_row(
+        coverage >= cfg.min_tuning_coverage ? "success" : "partial",
+        coverage >= cfg.min_tuning_coverage ? "" : "prediction coverage below minimum",
+        coverage))
+    return nothing
+end
+
+"""
 Everything one cross-validation fold does: split the stations, build the fold's DEM/joint/hurdle
 contexts, tune and predict each `BENCHMARK_RUNS` method, run `auto` and the blends, and append the
 fold's metric, scan and status rows.
@@ -680,6 +794,7 @@ function _run_benchmark_fold!(
     dem_store, joint_store, joint_scaling_tables, joint_qc_tables,
     all_metric_rows, all_scan_rows, run_status_rows, auto_selection_rows,
     blend_selection_rows, hurdle_rows, selection_fallback_cells,
+    stack_agreement=nothing, stack_selection_rows=NamedTuple[],
 )
 
     train_ids, val_ids, train_idx, val_idx = _fold_station_indices(folds, id_map, cfg.k, fold)
@@ -874,7 +989,16 @@ function _run_benchmark_fold!(
             blend_selection_rows, run_status_rows,
         )
     end
-    fold_mask = _common_method_mask(Matrix{Float64}(y_obs[val_idx, :]), fold_predictions)
+    if cfg.stacked_blend
+        _run_fold_stack!(
+            cfg, fold, scheme, product, repeat_index, repeat_seed, data.times, val_idx, y_obs,
+            y_sat_val, y_obs_train, y_sat_train, train_lonlat, selection_groups,
+            joint_selection_contexts, fold_selected, fold_predictions, predictions,
+            stack_agreement[train_idx, :], stack_agreement[val_idx, :],
+            nearest_train_distance[val_idx], stack_selection_rows, run_status_rows,
+        )
+    end
+    fold_mask =_common_method_mask(Matrix{Float64}(y_obs[val_idx, :]), fold_predictions)
     if any(fold_mask)
         for method in benchmark_methods(cfg)
             append_stratified_metrics!(
@@ -985,6 +1109,15 @@ function run_interpolation_benchmark(cfg::InterpolationBenchmarkConfig)
             )
         end
     end
+    # The stack's agreement bands come from the same source products, so they too are built once.
+    stack_agreement = if cfg.stacked_blend
+        stack_sources = [Matrix{Float64}(product_data[name].Y_sat) for name in source_products]
+        blend_band_matrix(
+            :agreement_envelope, first(stack_sources), stack_sources, cfg.mger.rain_threshold,
+        )
+    else
+        nothing
+    end
     joint_store = _empty_joint_store()
     joint_scaling_tables = DataFrame[]
     joint_qc_tables = DataFrame[]
@@ -996,6 +1129,7 @@ function run_interpolation_benchmark(cfg::InterpolationBenchmarkConfig)
     run_status_rows = NamedTuple[]
     auto_selection_rows = NamedTuple[]
     blend_selection_rows = NamedTuple[]
+    stack_selection_rows = NamedTuple[]
     fused_anchor_rows = NamedTuple[]
     fused_grouped_rows = NamedTuple[]
     hurdle_rows = NamedTuple[]
@@ -1096,6 +1230,7 @@ function run_interpolation_benchmark(cfg::InterpolationBenchmarkConfig)
                         dem_store, joint_store, joint_scaling_tables, joint_qc_tables,
                         all_metric_rows, all_scan_rows, run_status_rows, auto_selection_rows,
                         blend_selection_rows, hurdle_rows, selection_fallback_cells,
+                        stack_agreement, stack_selection_rows,
                     )
                 end
 
@@ -1142,6 +1277,10 @@ function run_interpolation_benchmark(cfg::InterpolationBenchmarkConfig)
     isempty(fused_grouped_rows) ||
         CSV.write(joinpath(cfg.mger.outdir, "fused_anchor_grouped_coefficients.csv"),
             DataFrame(fused_grouped_rows))
+    # One row per fold x stack band: the band's inner-split cell count, whether it took the pooled
+    # fit, and its weight on every `STACK_FEATURES` member.
+    isempty(stack_selection_rows) ||
+        CSV.write(joinpath(cfg.mger.outdir, "stack_selection.csv"), DataFrame(stack_selection_rows))
 
     return _write_benchmark_outputs(
         cfg, products, seeds, nested_joint, joint_inputs,

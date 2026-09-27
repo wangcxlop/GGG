@@ -258,6 +258,65 @@ end
     end
 end
 
+@testset "Stacked blend" begin
+    @testset "hour shifts respect grid gaps and skip NaN" begin
+        times = [DateTime(2022, 6, 1, h) for h in (0, 1, 2, 5)]
+        matrix = [1.0 2.0 NaN 4.0]
+        @test stack_hour_shift(matrix, times, -1) == [1.0 1.0 2.0 4.0]
+        # t+1 of hour 1 is NaN, so it keeps its own value; hour 2's next column is 3 h away.
+        @test isequal(stack_hour_shift(matrix, times, 1), [2.0 2.0 NaN 4.0])
+    end
+
+    @testset "bands cross agreement (with band 0) and distance" begin
+        agreement = [0 9; 3 0; 1 1]
+        band = stack_band_matrix(agreement, [5.0, 20.0, 75.0])
+        @test band == [1 10; 14 11; 22 22]
+        @test maximum(band) <= stack_band_count()
+    end
+
+    n_station, n_time = 30, 40
+    rng_values(a, b) = [mod(a * s + b * t, 7) / 3 for s in 1:n_station, t in 1:n_time]
+    features = [rng_values(3, 1), rng_values(1, 2), rng_values(2, 5), rng_values(5, 3)]
+    band = [s <= 15 ? 1 : 2 for s in 1:n_station, _ in 1:n_time]
+    truth = [0.5 0.0; 0.3 0.6; 0.0 0.2; 0.2 0.1]
+    y_obs = [sum(truth[j, band[i]] * features[j][i] for j in 1:4) for i in CartesianIndices(band)]
+
+    @testset "recovers non-negative weights per band" begin
+        choice = select_stack_weights(y_obs, features, band, 2; min_cells=10)
+        @test choice.weights ≈ truth atol = 1e-8
+        @test !any(choice.fell_back)
+        @test choice.inner_RMSE < 1e-6
+        @test stacked_prediction(features, band, choice.weights) ≈ y_obs
+    end
+
+    @testset "a harmful member is held at zero, not made negative" begin
+        target = features[1] .- 0.5 .* features[2]
+        choice = select_stack_weights(target, features, band, 2; min_cells=10)
+        @test all(>=(0), choice.weights)
+        @test all(>(0), choice.weights[1, :])
+        # Unconstrained least squares would put -0.5 on it.
+        @test all(<(0.5), choice.weights[2, :])
+    end
+
+    @testset "a sparse band takes the pooled fit" begin
+        choice = select_stack_weights(y_obs, features, band, 3; min_cells=10)
+        @test choice.fell_back == [false, false, true]
+        @test choice.used[3] == 0
+    end
+
+    @testset "a missing member leaves the source prediction" begin
+        patchy = [copy(f) for f in features]
+        patchy[2][1, 1] = NaN
+        patchy[1][2, 1] = NaN
+        weights = fill(0.25, 4, 2)
+        out = stacked_prediction(patchy, band, weights)
+        @test out[1, 1] == patchy[1][1, 1]
+        @test isnan(out[2, 1])
+        @test out[3, 1] ≈ 0.25 * sum(f[3, 1] for f in patchy)
+        @test select_stack_weights(fill(NaN, n_station, n_time), features, band, 2) === nothing
+    end
+end
+
 @testset "Fused anchor products run end to end" begin
     mktempdir() do temp_dir
         n_station, k, seed = 24, 3, 5

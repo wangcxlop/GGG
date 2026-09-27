@@ -1728,6 +1728,57 @@ end
         @test occursin("inner selection split",
             only(blend_scope.value[blend_scope.key .== "satellite_wet_blend_selection"]))
 
+        # The stacked blend, on the same fixture: reported, fitted per fold on the inner split,
+        # and leaving every pre-existing method's numbers exactly as they were.
+        outdir_stack = joinpath(temp_dir, "benchmark_stack")
+        cfg_stack = InterpolationBenchmarkConfig(
+            mger=MGERConfig(
+                station_meta_path=station_path, obs_hourly_wide_path=obs_path,
+                sat_paths=sat_paths, outdir=outdir_stack, kernels=[GAUSSIAN],
+                bw_adaptive=[8.0, 16.0], bw_fixed_km=[20.0, 100.0],
+                expected_common_time_count=length(times),
+            ),
+            k=3, seed=11, cv_schemes=[:balanced_spatial],
+            idw_powers=[2.0], neighbor_candidates=Union{Nothing,Int}[8],
+            tps_smooth_candidates=[0.01], min_tuning_coverage=0.8, bootstrap_reps=0,
+            tuning_geometry=:inner_spatial, stacked_blend=true,
+        )
+        stacked = run_interpolation_benchmark(cfg_stack)
+        @test Set(stacked.metrics.method) == Set(vcat(BENCHMARK_METHODS, [STACK_METHOD]))
+        @test isfile(joinpath(outdir_stack, "balanced_spatial", "fy4b", "oof_$(STACK_METHOD).csv"))
+        stack_after = filter(:method => in(Set(BENCHMARK_METHODS)), stacked.metrics)
+        @test nrow(before) == nrow(stack_after)
+        stack_lookup = Dict(rowkey(row) => (row.n, row.RMSE) for row in eachrow(stack_after))
+        @test all(eachrow(before)) do row
+            haskey(stack_lookup, rowkey(row)) &&
+                isequal(stack_lookup[rowkey(row)], (row.n, row.RMSE))
+        end
+        # A fold whose members all fitted has one weights row per band, every weight non-negative
+        # and, being a least-squares fit on the inner split, no worse there than mgwr alone.
+        stack_rows = filter(row -> row.method == STACK_METHOD, stacked.status)
+        fitted_folds = count(==("success"), stack_rows.status) +
+            count(==("partial"), stack_rows.status)
+        if fitted_folds > 0
+            selection = CSV.read(joinpath(outdir_stack, "stack_selection.csv"), DataFrame)
+            @test nrow(selection) == fitted_folds * stack_band_count()
+            weights = Matrix(selection[:, Symbol.("w_" .* STACK_FEATURES)])
+            @test all(>=(0), weights)
+            # A band that fitted on its own can always reproduce mgwr alone, so a fold where every
+            # non-empty band did is no worse than mgwr there. A sparse band takes the pooled fit,
+            # which carries no such guarantee within that band.
+            for fold_rows in groupby(selection, :fold)
+                any(row -> row.fell_back && row.n_cell > 0, eachrow(fold_rows)) && continue
+                @test fold_rows.inner_RMSE[1] <= fold_rows.source_RMSE[1] + 1e-9
+            end
+        end
+        stack_scope = CSV.read(joinpath(outdir_stack, "benchmark_scope.csv"), DataFrame)
+        @test "stacked_blend" in stack_scope.key
+        @test_throws ArgumentError InterpolationBenchmarkConfig(
+            mger=cfg_stack.mger, stacked_blend=true,
+            dem=DEMTerrainExperiment.DEMExperimentConfig(outdir=outdir_stack),
+            terrain_path=station_path,
+        ) |> config -> _validate_benchmark_config(config, n_station)
+
         # The legacy DEM path has no inner split to choose a weight on, and must refuse rather
         # than silently reporting an unblended method under a blended name.
         @test_throws ArgumentError InterpolationBenchmarkConfig(
