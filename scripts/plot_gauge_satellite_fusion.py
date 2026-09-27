@@ -5,6 +5,10 @@ to `output/gauge_satellite_fusion/figures/`, then copies the figures and a set o
 into `Interim_results/` so the Typst report compiles from that folder alone:
 
     py -3.13 scripts/plot_gauge_satellite_fusion.py
+    py -3.13 scripts/plot_gauge_satellite_fusion.py --gpm-gsmap
+
+`--gpm-gsmap` keeps only the GPM, GSMaP and OLS-merged anchors (FY4B's OLS weight is ~0.03, while it is a
+third of the equal-weight merge), writes to `figures_gpm_gsmap/`, and copies nothing into `Interim_results/`.
 
 Colour carries one job per figure. Anchors (FY4B, GPM, GSMaP and the two merges) sit on axes, never on
 colour, so the five of them never compete for categorical slots. Where colour marks how much the gauges
@@ -31,9 +35,11 @@ from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm
 from matplotlib.lines import Line2D
 
 ROOT = Path(__file__).resolve().parents[1]
-RUN_DIR = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "output" / "gauge_satellite_fusion"
-FIG_DIR = RUN_DIR / "figures"
-REPORT_DIR = Path(sys.argv[2]) if len(sys.argv) > 2 else ROOT / "Interim_results"
+GPM_GSMAP_ONLY = "--gpm-gsmap" in sys.argv[1:]
+ARGS = [arg for arg in sys.argv[1:] if arg != "--gpm-gsmap"]
+RUN_DIR = Path(ARGS[0]) if len(ARGS) > 0 else ROOT / "output" / "gauge_satellite_fusion"
+FIG_DIR = RUN_DIR / ("figures_gpm_gsmap" if GPM_GSMAP_ONLY else "figures")
+REPORT_DIR = Path(ARGS[1]) if len(ARGS) > 1 else ROOT / "Interim_results"
 
 SURFACE = "#fcfcfb"
 INK = "#0b0b0b"
@@ -47,7 +53,7 @@ DIVERGING = LinearSegmentedColormap.from_list(
     "better_worse", ["#b52f2f", "#e34948", "#ef8d8c", "#f0efec", "#86b6ef", "#3987e5", "#1c5cab"])
 
 SCHEME = "balanced_spatial"
-ANCHORS = ["FY4B", "GPM", "GSMaP", "MERGED_MEAN", "MERGED_OLS"]
+ANCHORS = ["GPM", "GSMaP", "MERGED_OLS"] if GPM_GSMAP_ONLY else ["FY4B", "GPM", "GSMaP", "MERGED_MEAN", "MERGED_OLS"]
 ANCHOR_LABELS = {"FY4B": "FY4B", "GPM": "GPM", "GSMaP": "GSMaP", "MERGED_MEAN": "Merged\n(equal)",
                  "MERGED_OLS": "Merged\n(OLS)"}
 FUSION_METHODS = ["residual_gwr", "mixed_gwr", "mgwr", "blend_residual_gwr", "blend_mixed_gwr", "blend_mgwr",
@@ -383,7 +389,7 @@ def fig5_products(anchor_metrics: list[dict], comparison: list[dict], coefficien
     ax = fig.add_axes([0.1, 0.16, 0.47, 0.3])
     clean_axis(ax, "x")
     ax.axvline(0, color=INK, linestyle=(0, (3, 2)), linewidth=0.9, zorder=1)
-    others = ["FY4B", "GSMaP", "MERGED_MEAN", "MERGED_OLS"]
+    others = [anchor for anchor in ANCHORS if anchor != "GPM"]
     methods = [("raw", MUTED, True), ("auto", ORDINAL_BLUES[1], False), ("blend_agrenv_mgwr", ORDINAL_BLUES[3], False)]
     for row_index, anchor in enumerate(others):
         for offset, (method, color, hollow) in zip((-0.22, 0.0, 0.22), methods):
@@ -407,6 +413,8 @@ def fig5_products(anchor_metrics: list[dict], comparison: list[dict], coefficien
     clean_axis(ax)
     ols = one(coefficients, scheme=SCHEME, product="MERGED_OLS")
     names = [("intercept", "Intercept"), ("beta_fy4b", "FY4B"), ("beta_gpm", "GPM"), ("beta_gsmap", "GSMaP")]
+    if GPM_GSMAP_ONLY:
+        names = [name for name in names if name[0] != "beta_fy4b"]
     if ols is not None:
         for index, (key, _) in enumerate(names):
             ax.vlines(index, ols[f"{key}_min"], ols[f"{key}_max"], color=ORDINAL_BLUES[3], linewidth=6, alpha=0.35,
@@ -419,7 +427,8 @@ def fig5_products(anchor_metrics: list[dict], comparison: list[dict], coefficien
     ax.set_xticklabels([label for _, label in names], fontsize=6)
     ax.set_title("OLS merge weights: mean (dot) and range over the 5 folds (band)", loc="left", pad=3)
     ax.set_ylabel("Weight (intercept in mm/h)", fontsize=6)
-    fig.suptitle("Which satellite product, or should all three be merged?", x=0.02, ha="left", fontsize=9, y=0.985)
+    question = "should GPM and GSMaP be merged?" if GPM_GSMAP_ONLY else "should all three be merged?"
+    fig.suptitle(f"Which satellite product, or {question}", x=0.02, ha="left", fontsize=9, y=0.985)
     save(fig, "fusion_fig5_products")
 
 
@@ -632,6 +641,8 @@ def main() -> None:
     fig4_where(stratified, detection)
     fig5_products(anchor_metrics, comparison, coefficients)
     fig6_robustness(summary, stratified)
+    if GPM_GSMAP_ONLY:
+        return
 
     (REPORT_DIR / "figures").mkdir(parents=True, exist_ok=True)
     for path in sorted(FIG_DIR.glob("fusion_fig*.png")):

@@ -5,6 +5,10 @@ of `scripts/prepare_station_landform.jl`) and writes PNG (300 dpi) and PDF figur
 `output/satellite_temporal_evaluation/figures/`:
 
     py -3.13 scripts/plot_satellite_temporal_evaluation.py
+    py -3.13 scripts/plot_satellite_temporal_evaluation.py --gpm-gsmap
+
+`--gpm-gsmap` draws only the `gpm_gsmap_full` sample, and only the figures that carry no FY4B series, into
+`figures_gpm_gsmap/`; it adds the intensity-class figure split by landform region.
 
 Two samples run through every figure: `all_products` (the hours FY4B covers, so all three products on
 identical cells) and `gpm_gsmap_full` (GPM and GSMaP over the whole 2022-2024 record). Regions with fewer
@@ -18,6 +22,7 @@ ordered classes, and a blue/red diverging ramp with a grey centre for signed err
 from __future__ import annotations
 
 import csv
+import sys
 from pathlib import Path
 
 import matplotlib as mpl
@@ -31,7 +36,8 @@ from matplotlib.patches import Patch
 
 ROOT = Path(__file__).resolve().parents[1]
 RUN_DIR = ROOT / "output" / "satellite_temporal_evaluation"
-FIG_DIR = RUN_DIR / "figures"
+GPM_GSMAP_ONLY = "--gpm-gsmap" in sys.argv[1:]
+FIG_DIR = RUN_DIR / ("figures_gpm_gsmap" if GPM_GSMAP_ONLY else "figures")
 
 SURFACE = "#fcfcfb"
 INK = "#0b0b0b"
@@ -41,6 +47,7 @@ GRID = "#e1e0d9"
 AXIS = "#c3c2b7"
 PRODUCT_COLORS = {"FY4B": "#2a78d6", "GPM": "#eb6834", "GSMaP": "#1baf7a"}
 SAMPLE_PRODUCTS = {"all_products": ["FY4B", "GPM", "GSMaP"], "gpm_gsmap_full": ["GPM", "GSMaP"]}
+SAMPLES = ["gpm_gsmap_full"] if GPM_GSMAP_ONLY else list(SAMPLE_PRODUCTS)
 SAMPLE_TITLES = {
     "all_products": "All three products · hours FY4B covers",
     "gpm_gsmap_full": "GPM and GSMaP · full 2022–2024 record",
@@ -55,7 +62,7 @@ REGION_MARKERS = {"relief_lt500": "o", "relief_500_1000": "s", "relief_ge1000": 
 # Ordinal blue ramp (validated --ordinal): lightest step still clears 2:1 on the surface.
 ORDINAL_BLUES = ["#86b6ef", "#5598e7", "#256abf", "#104281"]
 SEQUENTIAL_BLUES = ["#f0efec", "#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"]
-CAVEAT = ("Gauges are 0.5 mm tipping buckets: gauge 'light' hours are 0.5–1.5 mm and satellite 0.1–0.5 mm "
+CAVEAT = ("Gauge data are quantised to 0.5 mm: gauge 'light' hours are 0.5–1.5 mm and satellite 0.1–0.5 mm "
           "cannot be verified.\nHollow markers: fewer than 100 hours or 30 events. Winter gauge timing may include "
           "delayed snowmelt tips (the DJF gauge diurnal cycle peaks at midday).")
 
@@ -222,19 +229,21 @@ INTENSITY_PANELS = [
 ]
 
 
-def fig2_intensity(metrics: list[dict], sample: str) -> None:
+def fig2_intensity(metrics: list[dict], sample: str, by: str = "season") -> None:
     products = SAMPLE_PRODUCTS[sample]
-    fig, axes = plt.subplots(len(INTENSITY_PANELS), len(SEASONS), figsize=(10.0, 7.6), sharey="row")
+    # One column per season (all gauges) or per landform region (all seasons).
+    strata = [(s, "all") for s in SEASONS] if by == "season" else [("all", g) for g in ["all"] + REGIONS]
+    fig, axes = plt.subplots(len(INTENSITY_PANELS), len(strata), figsize=(10.0, 7.6), sharey="row")
     fig.subplots_adjust(left=0.07, right=0.975, top=0.84, bottom=0.11, wspace=0.08, hspace=0.42)
     x = np.arange(len(CLASSES))
     offsets = np.linspace(-0.22, 0.22, len(products))
-    for j, season in enumerate(SEASONS):
+    for j, (season, region) in enumerate(strata):
         for i, (key, title, ideal, with_ci) in enumerate(INTENSITY_PANELS):
             ax = axes[i, j]
             clean_axis(ax)
             ax.axhline(ideal, color=AXIS, linewidth=0.9, zorder=1)
             for offset, product in zip(offsets, products):
-                rows = [one(metrics, sample=sample, product=product, season=season, region="all", gauge_class=c) for c in CLASSES]
+                rows = [one(metrics, sample=sample, product=product, season=season, region=region, gauge_class=c) for c in CLASSES]
                 values = [r[key] if r and r["n"] > 0 else np.nan for r in rows]
                 lo = [r[f"{key}_lo"] if r and with_ci and r["n"] > 0 else np.nan for r in rows] if with_ci else None
                 hi = [r[f"{key}_hi"] if r and with_ci and r["n"] > 0 else np.nan for r in rows] if with_ci else None
@@ -244,16 +253,18 @@ def fig2_intensity(metrics: list[dict], sample: str) -> None:
             ax.set_xlim(-0.6, len(CLASSES) - 0.4)
             ax.set_xticklabels(CLASS_LABELS if i == len(INTENSITY_PANELS) - 1 else [], fontsize=5.6)
             if i == 0:
-                ax.set_title("All seasons" if season == "all" else season, pad=4)
+                ax.set_title(REGION_LABELS[region] if by == "region" else
+                             ("All seasons" if season == "all" else season), pad=4)
             if j == 0:
                 ax.set_ylabel(title, fontsize=6.5)
-    axes[-1, len(SEASONS) // 2].set_xlabel("Gauge hourly intensity class (mm/h)")
+    axes[-1, len(strata) // 2].set_xlabel("Gauge hourly intensity class (mm/h)")
     product_legend(fig, products, loc="upper right", bbox_to_anchor=(0.99, 0.975))
     fig.suptitle(f"Hourly performance by gauge intensity class — {SAMPLE_TITLES[sample]}", x=0.07, ha="left", fontsize=9, y=0.975)
-    fig.text(0.07, 0.935, "Gauge-wet hours only (no-rain hours excluded), all gauges. Whiskers: 95% day-block bootstrap. "
+    fig.text(0.07, 0.935, "Gauge-wet hours only (no-rain hours excluded), " +
+             ("all gauges" if by == "season" else "all seasons, gauges grouped by local relief") + ". Whiskers: 95% day-block bootstrap. "
              "Grey line: perfect score.", ha="left", fontsize=6.3, color=INK_SECONDARY)
     fig.text(0.07, 0.918, CAVEAT, ha="left", va="top", fontsize=6.0, color=MUTED, linespacing=1.4)
-    save(fig, f"fig2_intensity_classes_{sample}")
+    save(fig, f"fig2_intensity_classes_{sample}" if by == "season" else f"fig2_intensity_classes_region_{sample}")
 
 
 # --------------------------------------------------------------------------------------------------
@@ -376,10 +387,13 @@ def fig5_events(summary: list[dict]) -> None:
     labels = ["All"] + [label.split("\n")[0] for label in CLASS_LABELS]
     for row in summary:
         row["lag_balance"] = row["lag_late_share"] - row["lag_early_share"]
-    fig, axes = plt.subplots(2, len(EVENT_PANELS), figsize=(12.0, 5.2))
-    fig.subplots_adjust(left=0.08, right=0.99, top=0.8, bottom=0.13, wspace=0.3, hspace=0.45)
+    # Header and footer keep their height in inches, so a one-sample figure only loses a row.
+    height = 1.72 + 1.74 * len(SAMPLES)
+    y = lambda inches_from_top: 1 - inches_from_top / height
+    fig, axes = plt.subplots(len(SAMPLES), len(EVENT_PANELS), figsize=(12.0, height), squeeze=False)
+    fig.subplots_adjust(left=0.08, right=0.99, top=y(1.04), bottom=0.68 / height, wspace=0.3, hspace=0.45)
     x = np.arange(len(classes))
-    for i, sample in enumerate(SAMPLE_PRODUCTS):
+    for i, sample in enumerate(SAMPLES):
         products = SAMPLE_PRODUCTS[sample]
         offsets = np.linspace(-0.22, 0.22, len(products))
         for j, (key, title, ideal, with_ci) in enumerate(EVENT_PANELS):
@@ -397,18 +411,18 @@ def fig5_events(summary: list[dict]) -> None:
                     lo = hi = None
                 dots(ax, x + offset, values, PRODUCT_COLORS[product], lo, hi, [r["low_sample"] for r in rows])
             ax.set_xticks(x)
-            ax.set_xticklabels(labels if i == 1 else [], rotation=35, ha="right", fontsize=5.8)
+            ax.set_xticklabels(labels if i == len(SAMPLES) - 1 else [], rotation=35, ha="right", fontsize=5.8)
             if i == 0:
                 ax.set_title(title, loc="left", pad=4)
         axes[i, 0].text(-0.45, 0.5, SAMPLE_TITLES[sample].replace(" · ", "\n"), transform=axes[i, 0].transAxes,
                         rotation=90, ha="center", va="center", fontsize=6.5)
-    fig.text(0.55, 0.035, "Event class = the gauge's peak hourly intensity", ha="center", fontsize=6.5, color=INK_SECONDARY)
-    product_legend(fig, ["FY4B", "GPM", "GSMaP"], loc="upper right", bbox_to_anchor=(0.99, 0.975))
-    fig.suptitle("Station rain events: detection, timing and volume", x=0.08, ha="left", fontsize=9, y=0.975)
-    fig.text(0.08, 0.93, "Events end after 3 dry hours; scored over the event ± 3 h. Whiskers: 95% day-block bootstrap. "
+    fig.text(0.55, 0.18 / height, "Event class = the gauge's peak hourly intensity", ha="center", fontsize=6.5, color=INK_SECONDARY)
+    product_legend(fig, SAMPLE_PRODUCTS[SAMPLES[0]], loc="upper right", bbox_to_anchor=(0.99, y(0.13)))
+    fig.suptitle("Station rain events: detection, timing and volume", x=0.08, ha="left", fontsize=9, y=y(0.13))
+    fig.text(0.08, y(0.364), "Events end after 3 dry hours; scored over the event ± 3 h. Whiskers: 95% day-block bootstrap. "
              "Timing panels over detected events: median difference of rain-weighted mean hours, and the balance of best "
              "lags within ± 3 h.", ha="left", fontsize=6.3, color=INK_SECONDARY)
-    fig.text(0.08, 0.895, "Peak hours are hourly and tipping-bucket ties are common, so the peak-hour median is 0 h almost "
+    fig.text(0.08, y(0.546), "Peak hours are hourly and 0.5 mm ties are common, so the peak-hour median is 0 h almost "
              "everywhere; the rain-centre error resolves sub-hour shifts. Hollow: fewer than 30 events.",
              ha="left", fontsize=6.0, color=MUTED)
     save(fig, "fig5_event_timing")
@@ -639,6 +653,14 @@ def main() -> None:
     regional = read_rows(RUN_DIR / "regional_series_metrics.csv")
 
     fig1_landform()
+    if GPM_GSMAP_ONLY:
+        fig2_intensity(metrics, "gpm_gsmap_full")
+        fig2_intensity(metrics, "gpm_gsmap_full", by="region")
+        fig5_events(events)
+        fig6_diurnal(diurnal, diurnal_scores, "gpm_gsmap_full", "season")
+        fig6_diurnal(diurnal, diurnal_scores, "gpm_gsmap_full", "region")
+        fig8_scorecard(metrics, events, diurnal_scores, station_summary, "gpm_gsmap_full")
+        return
     for sample in SAMPLE_PRODUCTS:
         fig2_intensity(metrics, sample)
     fig3_confusion(confusion)
