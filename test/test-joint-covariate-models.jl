@@ -86,6 +86,42 @@ end
     @test count(isfinite, mgwr_prediction) >= 4length(fixture.target)
 end
 
+@testset "precomputed local weights leave the joint models unchanged" begin
+    fixture = joint_model_fixture()
+    context = fixture.context
+    DEM = JCM.DEMTerrainExperiment
+    bisquare = DEM._bisquare_kernel
+    residuals = fixture.Yobs[fixture.train, :] .- fixture.Ysat[fixture.train, :]
+    design = JCM._design_at(context, "mgwr", 2; target=false)
+    target_design = JCM._design_at(context, "mgwr", 2; target=true)
+    train_distances = DEM._haversine_matrix(context.train_lonlat, context.train_lonlat)
+    target_distances = DEM._haversine_matrix(context.train_lonlat, context.target_lonlat)
+    bandwidths = [12.0, 20.0]
+    response = reshape(residuals[:, 2], :, 1)
+    arguments = (design.local_groups, design.global_design, response, context.train_lonlat,
+        target_design.local_groups, target_design.global_design, context.target_lonlat,
+        bandwidths, bisquare, context.config)
+    plain = JCM._multiscale_predict_damped(arguments...; train_distances, target_distances)
+    reused = JCM._multiscale_predict_damped(arguments...; train_distances, target_distances,
+        train_weights=[DEM._local_weight_matrix(train_distances, bw, bisquare) for bw in bandwidths],
+        target_weights=[DEM._local_weight_matrix(target_distances, bw, bisquare) for bw in bandwidths])
+    @test isequal(plain, reused)
+    @test all(isfinite, first(plain))
+
+    # An hour that drops a station takes the fallback path inside the same call, and must not
+    # disturb the hours that use the shared precomputed weights.
+    gappy = copy(residuals)
+    gappy[3, 4] = NaN
+    for method in ("residual_gwr", "mixed_gwr", "mgwr"), leave_one_out in (false, true)
+        bws = method == "mgwr" ? [12.0, 20.0] : [15.0]
+        full = JCM.dynamic_covariate_predict(context, residuals, method, bws, bisquare; leave_one_out)
+        gap = JCM.dynamic_covariate_predict(context, gappy, method, bws, bisquare; leave_one_out)
+        untouched = setdiff(axes(residuals, 2), 4)
+        @test isequal(full[1][:, untouched], gap[1][:, untouched])
+        @test isequal(full[2][untouched], gap[2][untouched])
+    end
+end
+
 """Rebuild the fixture's context under a different MGWR spatial grouping."""
 function regrouped_context(fixture, grouping::Symbol)
     cfg = JCM.JointCovariateBenchmarkConfig(

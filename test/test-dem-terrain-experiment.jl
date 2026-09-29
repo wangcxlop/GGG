@@ -363,3 +363,58 @@ end
         exclude_self=true,
     )
 end
+
+@testset "precomputed local weights reproduce the hat exactly" begin
+    rng = MersenneTwister(2027)
+    n, m = 30, 9
+    lonlat = hcat(109.0 .+ 4 .* rand(rng, n), 30.0 .+ 4 .* rand(rng, n))
+    target_lonlat = hcat(109.0 .+ 4 .* rand(rng, m), 30.0 .+ 4 .* rand(rng, m))
+    train_distances = DEMTerrainExperiment._haversine_matrix(lonlat, lonlat)
+    target_distances = DEMTerrainExperiment._haversine_matrix(lonlat, target_lonlat)
+    Xtrain = hcat(ones(n), randn(rng, n, 2))
+    Xtarget = hcat(ones(m), randn(rng, m, 2))
+    gaussian(d, bw) = exp(-0.5 * (d / bw)^2)
+    for kernel in (DEMTerrainExperiment._bisquare_kernel, gaussian),
+            (adaptive, bw) in ((true, 12.0), (false, 150.0))
+        for exclude_self in (false, true)
+            weights = DEMTerrainExperiment._local_weight_matrix(
+                train_distances, bw, kernel; adaptive, exclude_self,
+            )
+            @test isequal(
+                DEMTerrainExperiment._local_hat(
+                    Xtrain, Xtrain, train_distances, bw, kernel; adaptive, exclude_self, weights,
+                ),
+                DEMTerrainExperiment._local_hat(
+                    Xtrain, Xtrain, train_distances, bw, kernel; adaptive, exclude_self,
+                ),
+            )
+        end
+        weights = DEMTerrainExperiment._local_weight_matrix(target_distances, bw, kernel; adaptive)
+        @test isequal(
+            DEMTerrainExperiment._local_hat(
+                Xtrain, Xtarget, target_distances, bw, kernel; adaptive, weights,
+            ),
+            DEMTerrainExperiment._local_hat(Xtrain, Xtarget, target_distances, bw, kernel; adaptive),
+        )
+    end
+    @test_throws DimensionMismatch DEMTerrainExperiment._local_hat(
+        Xtrain, Xtarget, target_distances, 12.0, DEMTerrainExperiment._bisquare_kernel;
+        weights=zeros(n, n),
+    )
+
+    # `mixed_gwr_predict` uses the weights only on a column where every training row is valid;
+    # the column with a missing row must fall back and still match.
+    bisquare = DEMTerrainExperiment._bisquare_kernel
+    Y = randn(rng, n, 3)
+    Y[4, 2] = NaN
+    Xglobal = randn(rng, n, 1)
+    Xglobal_target = randn(rng, m, 1)
+    arguments = (Xtrain, Xglobal, Y, lonlat, Xtarget, Xglobal_target, target_lonlat, 12.0, bisquare)
+    plain = DEMTerrainExperiment.mixed_gwr_predict(arguments...;
+        train_distances, target_distances)
+    reused = DEMTerrainExperiment.mixed_gwr_predict(arguments...;
+        train_distances, target_distances,
+        train_weights=DEMTerrainExperiment._local_weight_matrix(train_distances, 12.0, bisquare),
+        target_weights=DEMTerrainExperiment._local_weight_matrix(target_distances, 12.0, bisquare))
+    @test isequal(plain, reused)
+end
