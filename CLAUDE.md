@@ -229,8 +229,9 @@ which git matches at any depth, so files there would be silently untracked.
    `run_multikernel_spatial_kfold_pipeline`).
 
 `InterpolationBenchmark.jl` is a thin loader: it pulls in the modules the benchmark needs and then
-includes ten concern-specific fragments, in this order — `Config`, `Folds`, `DEM`, `Joint`,
-`Predictors`, `Hurdle`, `Tuning`, `Metrics`, `Bootstrap`, `Run`. They are plain top-level
+includes twelve concern-specific fragments, in this order — `Config`, `Folds`, `DEM`, `Joint`,
+`Predictors`, `Hurdle`, `Tuning`, `Metrics`, `Bootstrap`, `Outputs` (status rows, output writing,
+git provenance), `Fold` (one fold's `auto`/blend/stack runs), `Run`. They are plain top-level
 fragments sharing one namespace, not modules, so a name defined in a later file may be called from
 an earlier one; include order only has to put shared consts and structs first.
 `InterpolationBenchmarkHurdle.jl` holds the deliberately-disabled `hurdle_gwr` model, which is
@@ -300,12 +301,28 @@ primitive goes in `core/` and needs an `include("core/...")` line in `src/MixedG
 else is its own standalone module under `sources/`, `selection/`, `models/` or `benchmark/`
 following convention (2) above, and needs no registration at all — the loader finds it by name.
 
-Two modules are themselves split, both by `include`ing fragments into the module rather than by
-making sub-modules, so every name stays exactly where callers reach it today:
-`benchmark/diagnostics/` holds one file per diagnostic, keeping the `D<n>` labels the sections
-carried as banner comments, and `models/dem/` holds the terrain/GWR library with
-`run_dem_experiment`, the study orchestrator that writes ~15 fixed-name CSVs, alone in
-`experiment.jl`.
+Several large files are themselves split, all by `include`ing fragments into the module (or, for
+`MGERPipeline.jl`, into `Main`) rather than by making sub-modules, so every name stays exactly
+where callers reach it today. The fragments in these directories are not modules and must never
+be loaded on their own:
+
+- `benchmark/diagnostics/` (`BenchmarkDiagnostics`): one file per diagnostic, keeping the `D<n>`
+  labels the sections carried as banner comments.
+- `models/dem/` (`DEMTerrainExperiment`): the terrain/GWR library, with `run_dem_experiment`, the
+  study orchestrator that writes ~15 fixed-name CSVs, alone in `experiment.jl`.
+- `benchmark/grid_support/` (`GridSupportDiagnostics`): one file per banner section, from cell
+  indexing to extraction sensitivity.
+- `benchmark/satellite_temporal/` (`SatelliteTemporalEvaluation`): intensity scores, rain events,
+  diurnal cycle, correlation and regional series. Shared consts and private helpers stay in the
+  parent.
+- `selection/era5/` (`ERA5VariableSelection`): the dynamic-panel screen, the panel
+  spatial-variability test, and `run_era5_variable_selection`.
+- `mger/pipeline/` (`MGERPipeline.jl`, included via `joinpath(@__DIR__, ...)`): I/O, residual
+  prediction and parameter scan, writers, station splits, runners. `MGERConfig` stays in the
+  parent because it is `load_pipeline`'s sentinel.
+
+Fragment basenames must stay distinct from every module name, because `locate_src_file` walks all
+of `src/` and refuses a name that matches twice.
 
 ### Calling convention
 
