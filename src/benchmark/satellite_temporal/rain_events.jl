@@ -59,8 +59,8 @@ Scores of one satellite series against one gauge event, over the event's scoring
 
 `obs` and `sat` are the window (finite), and `start`/`stop` the event's first and last wet hour inside it.
 Timing errors are satellite minus gauge in hours (positive = satellite late):
-- `peak_error_h`: first satellite maximum minus first gauge maximum (tipping-bucket ties resolve to the
-  earliest hour)
+- `peak_error_h`: first satellite maximum minus first gauge maximum (ties, common in the 0.5 mm-quantised
+  gauge record, resolve to the earliest hour)
 - `centroid_error_h`: difference of the rain-weighted mean hours - robust where peaks are flat
 - `onset_error_h` / `end_error_h` / `duration_sat_h`: first and last satellite hour `>= wet`, censored by
   the window (an onset cannot be earlier than the window start); `_res` repeats them at `resolution`
