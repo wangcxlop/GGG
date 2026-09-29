@@ -28,8 +28,8 @@ Conventions, shared with `SatelliteTemporalEvaluation`:
 
 - Matrices are `[station, time]`, `NaN` for missing, every estimate aligned to the gauges.
 - `mask` names the cells a sample scores; a cell outside it is ignored everywhere.
-- A gauge-dry cell is `gauge < WET_MM` (0.1 mm/h). The gauges are 0.5 mm tipping buckets, so that is a
-  0.0 reading, and a satellite value between 0.1 and 0.5 mm/h may be rain the bucket had not yet tipped.
+- A gauge-dry cell is `gauge < WET_MM` (0.1 mm/h). The gauge record is quantised to 0.5 mm, so that is a
+  0.0 reading, and a satellite value between 0.1 and 0.5 mm/h may be rain below that resolution.
 - A stratifier is an integer label per cell - a matrix, or a function `(i, j) -> label` for labels that
   only depend on the station or the hour. Labels run 1..L, and 0 leaves a cell out.
 - `day[j]` is column `j`'s met-day number (positive integers); intervals resample whole days.

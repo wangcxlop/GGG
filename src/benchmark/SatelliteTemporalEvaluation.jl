@@ -23,8 +23,8 @@ Conventions every function relies on:
   finite, so every product in a sample is scored on identical cells.
 - Hourly classes (`INTENSITY_BOUNDS`) are lower-bound inclusive: no rain < 0.1, light [0.1, 2),
   moderate [2, 4), heavy [4, 8), rainstorm [8, 20), severe rainstorm >= 20 mm/h.
-- The gauges are 0.5 mm tipping buckets: their "light" hours are 0.5, 1.0 or 1.5 mm and they cannot
-  see 0.1-0.5 mm. Where a satellite threshold matters, a `_res` variant repeats the calculation at the
+- The gauge record is quantised to 0.5 mm: its "light" hours are 0.5, 1.0 or 1.5 mm and it cannot
+  show 0.1-0.5 mm. Where a satellite threshold matters, a `_res` variant repeats the calculation at the
   gauge resolution `GAUGE_RESOLUTION_MM`.
 - Seasons are meteorological (MAM, JJA, SON, DJF) by the month of the 08-08 BJT day (`met_day`);
   day-block bootstraps resample those days. Every stratum is also reported as `all`.
