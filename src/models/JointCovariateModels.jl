@@ -512,9 +512,15 @@ function _multiscale_predict_damped(
         X, X, train_d, bandwidth, kernel; adaptive, ridge=cfg.ridge, exclude_self,
         weights=train_weights === nothing ? nothing : train_weights[group],
     ) for (group, (X, bandwidth)) in enumerate(zip(local_train, bandwidths))]
-    global_hat = DEMTerrainExperiment._global_projection(global_train; ridge=cfg.ridge)
+    # With no global columns the projection is an n x n zero matrix, and multiplying by it every
+    # sweep was a whole wasted gemv per sweep. BLAS writes that product as +0.0 (it zeroes the
+    # output for `beta = 0` and then adds signed-zero terms), so a component held at `zeros`
+    # is the same value, and a non-finite iterate still leaves the reals through the local sum.
+    has_global = !isempty(global_train)
+    global_hat = has_global ?
+        DEMTerrainExperiment._global_projection(global_train; ridge=cfg.ridge) : nothing
     local_components = [zeros(length(y)) for _ in local_train]
-    global_component = global_hat * y
+    global_component = has_global ? global_hat * y : zeros(length(y))
     previous = fill(NaN, length(y))
     converged = false
     relaxation = cfg.relaxation
@@ -547,10 +553,12 @@ function _multiscale_predict_damped(
         for component in local_components
             component_sum .+= component
         end
-        partial .= y .- component_sum
-        mul!(global_update, global_hat, partial)
-        global_component .= relaxation .* global_update .+
-            (1 - relaxation) .* global_component
+        if has_global
+            partial .= y .- component_sum
+            mul!(global_update, global_hat, partial)
+            global_component .= relaxation .* global_update .+
+                (1 - relaxation) .* global_component
+        end
         fitted .= component_sum .+ global_component
         # A diverging sweep makes `change` NaN, which fails the tolerance test silently and then
         # burns the whole iteration budget. Bail as soon as the iterate leaves the reals, the way

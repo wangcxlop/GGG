@@ -144,12 +144,19 @@ function _global_projection(X::Matrix{Float64}; ridge::Float64=1e-8)
     return X * ((X' * X + ridge * I) \ X')
 end
 
+# `global_hat = nothing` stands for a model with no global columns, whose projection is an n x n
+# zero matrix: the component is held at `zeros` instead of multiplied out. BLAS writes that product
+# as +0.0, so the values are the same and the zero matrix and its gemvs are gone.
+_apply_global(global_hat::Matrix{Float64}, v::Vector{Float64}) = global_hat * v
+_apply_global(::Nothing, v::Vector{Float64}) = zeros(Float64, length(v))
+
 function _backfit_components(
-    y::Vector{Float64}, local_hats::Vector{Matrix{Float64}}, global_hat::Matrix{Float64};
+    y::Vector{Float64}, local_hats::Vector{Matrix{Float64}},
+    global_hat::Union{Nothing,Matrix{Float64}};
     tolerance::Float64=1e-5, max_iterations::Int=200,
 )
     local_components = [zeros(Float64, length(y)) for _ in local_hats]
-    global_component = global_hat * y
+    global_component = _apply_global(global_hat, y)
     previous = Inf
     for iteration in 1:max_iterations
         for j in eachindex(local_hats)
@@ -160,7 +167,7 @@ function _backfit_components(
             local_components[j] = local_hats[j] * partial
         end
         local_sum = isempty(local_components) ? zeros(Float64, length(y)) : reduce(+, local_components)
-        global_component = global_hat * (y - local_sum)
+        global_component = _apply_global(global_hat, y - local_sum)
         fitted = local_sum + global_component
         rss = sum(abs2, y - fitted)
         change = isfinite(previous) ? abs(previous - rss) / max(previous, eps()) : Inf

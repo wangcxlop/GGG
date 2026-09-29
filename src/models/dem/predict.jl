@@ -79,7 +79,9 @@ function mixed_gwr_predict(
                 adaptive, ridge, exclude_self, unsupported,
                 weights=all_rows ? target_weights : nothing,
             )
-            global_hat = _global_projection(global_train_valid; ridge)
+            # `nothing` without global columns; see `_apply_global`.
+            global_hat = isempty(global_train_valid) ? nothing :
+                _global_projection(global_train_valid; ridge)
             (; local_train_valid, global_train_valid, global_target_valid,
                 target_indices, local_hat, target_hat, global_hat)
         end
