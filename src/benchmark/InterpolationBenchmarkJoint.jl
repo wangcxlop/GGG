@@ -177,6 +177,13 @@ for kernel in cfg.mger.kernels
         converged = false
         final_iteration = 0
         last_selected_index = 0
+        # The descent re-scores bandwidth vectors it has already scored: each group step's
+        # candidate equal to the current bandwidth is the vector the previous step just picked,
+        # and the confirming sweep repeats the one before it - 40% of the joint MGWR trials on
+        # the 2026-09 full run. The score is a deterministic function of the vector (for this
+        # kernel and family), so the repeat reuses it; every trial still gets its own scan row.
+        # Only a score that returned is kept, so a throwing one is retried and throws as before.
+        scores = Dict{Vector{Float64},NamedTuple}()
         try
             for iteration in 1:cfg.mgwr_max_tuning_iterations
                 previous = copy(bandwidths)
@@ -189,14 +196,15 @@ for kernel in cfg.mger.kernels
                             scheme, product, fold, mode, method, iteration,
                             group=group_names[group_index], kernel, adaptive, bw=bandwidth,
                         ) do
+                            haskey(scores, trial) && return scores[trial]
                             metrics = _joint_candidate_metrics(
                                 joint_context, residuals, y_obs, y_sat, joint_method,
                                 trial, kernel_fn,
                                 times, time_weights, selection_entries, shrink_candidates;
                                 adaptive,
                             )
-                            (; shrink=metrics.shrink, n=metrics.n, coverage=metrics.coverage,
-                                RMSE=metrics.RMSE, MAE=metrics.MAE,
+                            scores[trial] = (; shrink=metrics.shrink, n=metrics.n,
+                                coverage=metrics.coverage, RMSE=metrics.RMSE, MAE=metrics.MAE,
                                 status=metrics.coverage >= cfg.min_tuning_coverage ? "success" : "failed",
                                 error=metrics.coverage >= cfg.min_tuning_coverage ? "" :
                                     "LOOCV coverage below minimum")
