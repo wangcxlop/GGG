@@ -49,6 +49,8 @@ MUTED = "#898781"
 GRID = "#e1e0d9"
 AXIS = "#c3c2b7"
 PRODUCT_COLORS = {"FY4B": "#2a78d6", "GPM": "#eb6834", "GSMaP": "#1baf7a"}
+# Shapes double-code the products so the metric summary reads without colour.
+PRODUCT_MARKERS = {"FY4B": "s", "GPM": "o", "GSMaP": "^"}
 EVENT_MARKERS = ["o", "s", "^", "D", "v", "P"]
 
 
@@ -461,15 +463,17 @@ def fig5_metric_summary(events, metrics) -> None:
     for ax, (key, title, ideal) in zip(axes.flat, METRIC_PANELS):
         ax.grid(axis="y", color=GRID, linewidth=0.5, zorder=0)
         ax.axhline(ideal, color=AXIS, linewidth=1.4, zorder=1.8)  # above the gridlines (1.5)
-        ax.axvline(n_widespread - 0.5, color=GRID, linewidth=0.8, zorder=0)
+        # Dashed and darker than the gridlines, so it reads as the widespread | localized boundary.
+        ax.axvline(n_widespread - 0.5, color=MUTED, linewidth=0.8, linestyle=(0, (3, 2)), zorder=1)
         values = {p: [metrics[(event["day"], p, WINDOW)][key] for event in events] for p in PRODUCTS}
         # Thin line joining each event's products, drawn under the points.
         for i in x:
             ax.plot([i + offsets[p] for p in PRODUCTS], [values[p][i] for p in PRODUCTS],
                     color=MUTED, alpha=0.4, linewidth=0.6, zorder=2)
         for product in PRODUCTS:
-            ax.scatter(x + offsets[product], values[product], s=26, color=PRODUCT_COLORS[product],
-                       edgecolors=SURFACE, linewidths=0.8, zorder=3)
+            marker = PRODUCT_MARKERS[product]
+            ax.scatter(x + offsets[product], values[product], s=34 if marker == "^" else 26, marker=marker,
+                       color=PRODUCT_COLORS[product], edgecolors=SURFACE, linewidths=0.8, zorder=3)
         ax.set_title(title, loc="left", fontsize=7.5, pad=6)
         ax.set_xticks(x)
         ax.set_xticklabels(tick_labels, fontsize=6)
@@ -483,8 +487,8 @@ def fig5_metric_summary(events, metrics) -> None:
                                   ("Localized", n_widespread, len(events) - 1)):
             ax.text((first + last) / 2, 1.16, text, transform=ax.get_xaxis_transform(),
                     ha="center", va="bottom", fontsize=6.8, color=INK_SECONDARY)
-    handles = [Line2D([], [], linestyle="none", marker="o", markersize=5.5, markerfacecolor=PRODUCT_COLORS[p],
-                      markeredgecolor=SURFACE, label=p) for p in PRODUCTS]
+    handles = [Line2D([], [], linestyle="none", marker=PRODUCT_MARKERS[p], markersize=6.5 if PRODUCT_MARKERS[p] == "^" else 5.5,
+                      markerfacecolor=PRODUCT_COLORS[p], markeredgecolor=SURFACE, label=p) for p in PRODUCTS]
     fig.legend(handles=handles, loc="upper right", ncol=len(PRODUCTS), frameon=False, fontsize=7, bbox_to_anchor=(0.99, 0.975))
     fig.suptitle("Event-scale spatial metrics by product", x=0.07, ha="left", fontsize=9, y=0.965)
     fig.text(0.07, 0.915, "Gauge-pixel pairs over each event's common hours. The solid grey line marks "

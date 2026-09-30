@@ -25,6 +25,8 @@
 #set heading(numbering: "1.1")
 #show heading: set text(font: ("Segoe UI", "Arial"), weight: "semibold")
 #show heading.where(level: 1): it => { v(0.6em); it; v(0.25em) }
+// Captions carry their planned paper numbers ("Draft Fig. 3"), so Typst adds none of its own.
+#set figure(numbering: none)
 #show figure.caption: set text(size: 9pt)
 #show figure.where(kind: table): set figure.caption(position: top)
 #show table.cell: set text(size: 8.5pt)
