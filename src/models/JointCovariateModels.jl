@@ -491,6 +491,8 @@ function _multiscale_predict_damped(
     adaptive::Bool=true, exclude_self::Bool=false, unsupported::Symbol=:zero,
     train_distances::Union{Nothing,Matrix{Float64}}=nothing,
     target_distances::Union{Nothing,Matrix{Float64}}=nothing,
+    train_weights::Union{Nothing,Vector{Matrix{Float64}}}=nothing,
+    target_weights::Union{Nothing,Vector{Matrix{Float64}}}=nothing,
 )
     length(local_train) == length(local_target) == length(bandwidths) ||
         throw(DimensionMismatch(
@@ -503,12 +505,22 @@ function _multiscale_predict_damped(
     # `mixed_gwr_predict`: the distances of `train_lonlat`/`target_lonlat` exactly as passed.
     train_d::Matrix{Float64} = train_distances === nothing ?
         DEMTerrainExperiment._haversine_matrix(train_lonlat, train_lonlat) : train_distances
+    # `train_weights`/`target_weights`, when given, hold one `_local_weight_matrix` per group of
+    # `train_d` (with this call's `exclude_self`) and `target_d` (without it) at that group's
+    # bandwidth, so the hats below read the weights instead of recomputing them.
     train_hats = [DEMTerrainExperiment._local_hat(
         X, X, train_d, bandwidth, kernel; adaptive, ridge=cfg.ridge, exclude_self,
-    ) for (X, bandwidth) in zip(local_train, bandwidths)]
-    global_hat = DEMTerrainExperiment._global_projection(global_train; ridge=cfg.ridge)
+        weights=train_weights === nothing ? nothing : train_weights[group],
+    ) for (group, (X, bandwidth)) in enumerate(zip(local_train, bandwidths))]
+    # With no global columns the projection is an n x n zero matrix, and multiplying by it every
+    # sweep was a whole wasted gemv per sweep. BLAS writes that product as +0.0 (it zeroes the
+    # output for `beta = 0` and then adds signed-zero terms), so a component held at `zeros`
+    # is the same value, and a non-finite iterate still leaves the reals through the local sum.
+    has_global = !isempty(global_train)
+    global_hat = has_global ?
+        DEMTerrainExperiment._global_projection(global_train; ridge=cfg.ridge) : nothing
     local_components = [zeros(length(y)) for _ in local_train]
-    global_component = global_hat * y
+    global_component = has_global ? global_hat * y : zeros(length(y))
     previous = fill(NaN, length(y))
     converged = false
     relaxation = cfg.relaxation
@@ -541,10 +553,12 @@ function _multiscale_predict_damped(
         for component in local_components
             component_sum .+= component
         end
-        partial .= y .- component_sum
-        mul!(global_update, global_hat, partial)
-        global_component .= relaxation .* global_update .+
-            (1 - relaxation) .* global_component
+        if has_global
+            partial .= y .- component_sum
+            mul!(global_update, global_hat, partial)
+            global_component .= relaxation .* global_update .+
+                (1 - relaxation) .* global_component
+        end
         fitted .= component_sum .+ global_component
         # A diverging sweep makes `change` NaN, which fails the tolerance test silently and then
         # burns the whole iteration budget. Bail as soon as the iterate leaves the reals, the way
@@ -589,6 +603,7 @@ function _multiscale_predict_damped(
         target_hat = DEMTerrainExperiment._local_hat(
             local_train[group], local_target[group], target_d,
             bandwidths[group], kernel; adaptive, ridge=cfg.ridge, unsupported,
+            weights=target_weights === nothing ? nothing : target_weights[group],
         )
         prediction .+= target_hat * partial
     end
@@ -624,6 +639,21 @@ function dynamic_covariate_predict(
         DEMTerrainExperiment._haversine_matrix(context.train_lonlat, context.train_lonlat)
     full_target_distances = leave_one_out ? full_train_distances :
         DEMTerrainExperiment._haversine_matrix(context.train_lonlat, context.target_lonlat)
+    # The local kernel weights depend on the distances, bandwidth, kernel and `exclude_self`
+    # alone. On an hour where every training station is valid those are the same for every hour,
+    # every MGWR group sharing a bandwidth, and every hat - yet the per-target k-th-neighbour
+    # search was a third of each hat's cost. Built once here, keyed (distances, exclude_self,
+    # bandwidth), and read-only inside the loop; hours that drop a station compute their own.
+    ntrain = size(context.train_lonlat, 1)
+    all_valid_bandwidths = unique(adaptive ? min.(bandwidths, ntrain - 1) : bandwidths)
+    weight_kinds = leave_one_out ? ((:train, false), (:train, true)) :
+        ((:train, false), (:target, false))
+    full_weights = Dict(
+        (kind, exclude, bw) => DEMTerrainExperiment._local_weight_matrix(
+            kind === :train ? full_train_distances : full_target_distances, bw, kernel;
+            adaptive, exclude_self=exclude,
+        ) for (kind, exclude) in weight_kinds for bw in all_valid_bandwidths
+    )
     # `:greedy`, not the default chunked schedule. Hour cost here spans orders of magnitude - a
     # dry or underdetermined hour falls straight through the `count(valid) > min_required` guard
     # below, while a wet one runs hundreds of back-fitting sweeps - and precipitation is strongly
@@ -668,6 +698,11 @@ function dynamic_covariate_predict(
         # Clamping to the valid station count only makes sense for an adaptive neighbor count; a
         # fixed-km bandwidth must be applied as given.
         adjusted = adaptive ? min.(bandwidths, count(valid) - 1) : bandwidths
+        # `nothing` on an hour that dropped a station: the precomputed weights describe the
+        # full station set, and the hats then compute their own as they always have.
+        hat_weights(kind, exclude, bw) = all_valid ? full_weights[(kind, exclude, bw)] : nothing
+        group_weights(kind, exclude) = all_valid ?
+            [full_weights[(kind, exclude, bw)] for bw in adjusted] : nothing
         response = reshape(y[valid], :, 1)
         values_matrix, ok_vector = if leave_one_out && !isempty(global_train)
             # The held station is excluded analytically from the global coefficient;
@@ -684,6 +719,7 @@ function dynamic_covariate_predict(
                     train_lonlat, adjusted, kernel, context.config;
                     adaptive, exclude_self=true, unsupported,
                     train_distances, target_distances=train_distances,
+                    train_weights=group_weights(:train, true),
                 )
                 local_prediction .+= global_loo
                 local_prediction, ok
@@ -696,6 +732,8 @@ function dynamic_covariate_predict(
                     max_iterations=context.config.max_iterations,
                     exclude_self=true, unsupported,
                     train_distances, target_distances=train_distances,
+                    train_weights=hat_weights(:train, false, only(adjusted)),
+                    target_weights=hat_weights(:train, true, only(adjusted)),
                 )
                 local_prediction .+= global_loo
                 local_prediction, ok
@@ -706,6 +744,9 @@ function dynamic_covariate_predict(
                 local_target, global_target, target_lonlat, adjusted, kernel, context.config;
                 adaptive, exclude_self=leave_one_out, unsupported,
                 train_distances, target_distances,
+                train_weights=group_weights(:train, leave_one_out),
+                # The self-excluding branch returns before it builds a target hat.
+                target_weights=leave_one_out ? nothing : group_weights(:target, false),
             )
         else
             mixed_gwr_predict(
@@ -715,6 +756,9 @@ function dynamic_covariate_predict(
                 max_iterations=context.config.max_iterations,
                 exclude_self=leave_one_out, unsupported,
                 train_distances, target_distances,
+                train_weights=hat_weights(:train, false, only(adjusted)),
+                target_weights=leave_one_out ? hat_weights(:train, true, only(adjusted)) :
+                    hat_weights(:target, false, only(adjusted)),
             )
         end
         values = vec(values_matrix)

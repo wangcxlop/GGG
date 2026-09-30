@@ -12,6 +12,11 @@ returned for the subset. `nothing` (the default) computes them here, as before.
 `unsupported` is forwarded to the *target* hat only, never to the back-fit hat - see
 [`_local_hat`](@ref) for why that distinction matters. `:missing` is what lets a target the local
 fit could not support surface as a `NaN` prediction instead of a silent zero correction.
+
+`train_weights`/`target_weights` are the [`_local_weight_matrix`](@ref) of `train_distances` and
+`target_distances` at `bandwidth` (the train one without `exclude_self`, the target one with the
+caller's `exclude_self`). They describe the full station set, so they are used only for a column
+in which every training row is valid; any other column computes its weights as before.
 """
 function mixed_gwr_predict(
     Xlocal_train::Matrix{Float64}, Xglobal_train::Matrix{Float64}, Ytrain::Matrix{Float64},
@@ -22,6 +27,8 @@ function mixed_gwr_predict(
     exclude_self::Bool=false, unsupported::Symbol=:zero,
     train_distances::Union{Nothing,Matrix{Float64}}=nothing,
     target_distances::Union{Nothing,Matrix{Float64}}=nothing,
+    train_weights::Union{Nothing,Matrix{Float64}}=nothing,
+    target_weights::Union{Nothing,Matrix{Float64}}=nothing,
 )
     if exclude_self
         size(train_lonlat) == size(target_lonlat) ||
@@ -60,17 +67,21 @@ function mixed_gwr_predict(
             target_distances_valid = target_distances === nothing ?
                 _haversine_matrix(lonlat_valid, target_lonlat_valid) :
                 _distance_subset(target_distances, indices, target_indices)
+            all_rows = length(indices) == size(Ytrain, 1)
             local_hat = _local_hat(
                 local_train_valid, local_train_valid,
                 train_distances_valid, adjusted_bandwidth, kernel;
-                adaptive, ridge,
+                adaptive, ridge, weights=all_rows ? train_weights : nothing,
             )
             target_hat = _local_hat(
                 local_train_valid, local_target_valid,
                 target_distances_valid, adjusted_bandwidth, kernel;
                 adaptive, ridge, exclude_self, unsupported,
+                weights=all_rows ? target_weights : nothing,
             )
-            global_hat = _global_projection(global_train_valid; ridge)
+            # `nothing` without global columns; see `_apply_global`.
+            global_hat = isempty(global_train_valid) ? nothing :
+                _global_projection(global_train_valid; ridge)
             (; local_train_valid, global_train_valid, global_target_valid,
                 target_indices, local_hat, target_hat, global_hat)
         end
