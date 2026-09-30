@@ -120,9 +120,9 @@ and by landform region, with day-block bootstrap intervals.
 )
 
 *Key findings.*
-- Underestimation grows with intensity for both products. GPM relative bias runs from −11% (light)
-  to −38% (4–8), −68% (8–20) and −85% (≥ 20 mm h⁻¹). GSMaP runs from +16% to +8%, −17%, −59% and −80%.
-  At ≥ 8 mm h⁻¹, 83–99% of hours fall into a lower class.
+- Underestimation grows with intensity for both products, in every season. Pooled over the year, GPM
+  relative bias runs from −11% (light) to −38% (4–8), −68% (8–20) and −85% (≥ 20 mm h⁻¹). GSMaP runs
+  from +16% to +8%, −17%, −59% and −80%. At ≥ 8 mm h⁻¹, at most 13% of hours land in the right class.
 - Detection is not the problem (Fig. 5, rain events separated by at least 3 dry hours). Rain events peaking at 2–4 mm h⁻¹ or more are detected 88–96% of the time, and
   rain-centre timing errors stay within ±0.5 h. The error is in peak *magnitude*.
 - Winter (DJF) is where both fail: bias about −80% and only 14–18% of wet hours detected. Summer
