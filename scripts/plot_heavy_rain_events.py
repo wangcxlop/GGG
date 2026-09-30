@@ -466,7 +466,7 @@ def fig5_metric_summary(events, metrics) -> None:
         # Thin line joining each event's products, drawn under the points.
         for i in x:
             ax.plot([i + offsets[p] for p in PRODUCTS], [values[p][i] for p in PRODUCTS],
-                    color=MUTED, linewidth=0.6, zorder=2)
+                    color=MUTED, alpha=0.4, linewidth=0.6, zorder=2)
         for product in PRODUCTS:
             ax.scatter(x + offsets[product], values[product], s=26, color=PRODUCT_COLORS[product],
                        edgecolors=SURFACE, linewidths=0.8, zorder=3)
