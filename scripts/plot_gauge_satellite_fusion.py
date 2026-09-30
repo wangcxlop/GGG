@@ -33,6 +33,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm
 from matplotlib.lines import Line2D
+from matplotlib.patches import Patch, Rectangle
 
 ROOT = Path(__file__).resolve().parents[1]
 GPM_GSMAP_ONLY = "--gpm-gsmap" in sys.argv[1:]
@@ -58,6 +59,9 @@ ANCHOR_LABELS = {"FY4B": "FY4B", "GPM": "GPM", "GSMaP": "GSMaP", "MERGED_MEAN": 
                  "MERGED_OLS": "Merged\n(OLS)"}
 FUSION_METHODS = ["residual_gwr", "mixed_gwr", "mgwr", "blend_residual_gwr", "blend_mixed_gwr", "blend_mgwr",
                   "blend_agrenv_residual_gwr", "blend_agrenv_mixed_gwr", "blend_agrenv_mgwr"]
+FUSION_GROUPS = [("Direct correction", ["residual_gwr", "mixed_gwr", "mgwr"]),
+                 ("ADW blend", ["blend_residual_gwr", "blend_mixed_gwr", "blend_mgwr"]),
+                 ("Agreement blend", ["blend_agrenv_residual_gwr", "blend_agrenv_mixed_gwr", "blend_agrenv_mgwr"])]
 METHOD_LABELS = {
     "raw": "Raw satellite", "adw": "ADW (gauges only)", "idw": "IDW", "tps": "TPS", "gwr": "GWR (gauges only)",
     "auto": "GWR family, chosen in-fold", "residual_gwr": "Residual GWR", "mixed_gwr": "Mixed GWR", "mgwr": "MGWR",
@@ -261,43 +265,66 @@ def fig2_interpolators(ranking: list[dict], summary: list[dict]) -> None:
 
 
 def fig3_heatmap(fusion: list[dict]) -> None:
-    fig, axes = plt.subplots(1, 2, figsize=(9.6, 4.0))
-    fig.subplots_adjust(left=0.17, right=0.93, top=0.8, bottom=0.12, wspace=0.08)
+    fig = plt.figure(figsize=(9.6, 4.6))
     norm = TwoSlopeNorm(vmin=-16, vcenter=0, vmax=16)
-    for ax, (stratum, label) in zip(axes, [("overall", "All hours"), ("heavy", "Heavy hours (≥ 8 mm/h)")]):
-        grid = np.full((len(FUSION_METHODS), len(ANCHORS)), np.nan)
-        for i, method in enumerate(FUSION_METHODS):
+    # Row positions: three rows per group, with a gap above each group that holds its heading.
+    gap = 1.0
+    rows = []   # (y, method, group heading or None)
+    for g, (heading, methods) in enumerate(FUSION_GROUPS):
+        for k, method in enumerate(methods):
+            rows.append((gap + g * (len(methods) + gap) + k, method, heading if k == 0 else None))
+    panels = [("overall", "(a) All hours"), ("heavy", "(b) Heavy hours (≥ 8 mm h⁻¹)")]
+    for index, (stratum, label) in enumerate(panels):
+        ax = fig.add_axes([0.15 + index * 0.37, 0.12, 0.32, 0.6])
+        for y, method, heading in rows:
             for j, anchor in enumerate(ANCHORS):
                 row = one(fusion, stratum=stratum, product=anchor, method=method)
                 if row is None:
                     continue
-                grid[i, j] = pct(row["relative_improvement"])
+                change = pct(row["relative_improvement"])
                 significant = row["pvalue_holm_family"] < 0.05 and np.sign(row["relative_ci_low"]) == np.sign(
                     row["relative_ci_high"])
-                text = f"{grid[i, j]:+.1f}" + ("*" if significant else "")
-                shade = abs(grid[i, j]) > 9
-                ax.text(j, i, text, ha="center", va="center", fontsize=6,
-                        color=SURFACE if shade else INK, fontweight="bold" if significant else "normal")
-        image = ax.imshow(np.clip(grid, -16, 16), cmap=DIVERGING, norm=norm, aspect="auto")
+                # Significance is the rule, so the exceptions are marked: a hollow cell has no evidence of a
+                # difference from ADW and carries no colour.
+                if significant:
+                    ax.add_patch(Rectangle((j - 0.48, y - 0.45), 0.96, 0.9, facecolor=DIVERGING(norm(np.clip(change, -16, 16))),
+                                           edgecolor="none"))
+                    color = SURFACE if abs(change) > 9 else INK
+                else:
+                    ax.add_patch(Rectangle((j - 0.46, y - 0.43), 0.92, 0.86, facecolor=SURFACE, edgecolor=MUTED,
+                                           linewidth=0.6))
+                    color = MUTED
+                ax.text(j, y, f"{change:+.1f}", ha="center", va="center", fontsize=6, color=color)
+            if heading is not None and index == 0:
+                ax.text(-0.52, y - 0.95, heading, ha="right", va="center", fontsize=6.6, fontweight="semibold",
+                        color=INK, transform=ax.transData)
+        ax.set_xlim(-0.5, len(ANCHORS) - 0.5)
+        ax.set_ylim(rows[-1][0] + 0.5, 0.0)
+        ax.xaxis.tick_top()
         ax.set_xticks(range(len(ANCHORS)))
-        ax.set_xticklabels([ANCHOR_LABELS[a] for a in ANCHORS], fontsize=6)
-        ax.set_yticks(range(len(FUSION_METHODS)))
-        ax.set_yticklabels([METHOD_LABELS[m] for m in FUSION_METHODS] if ax is axes[0] else [], fontsize=6)
+        ax.set_xticklabels([ANCHOR_LABELS[a].replace("\n", " ") for a in ANCHORS], fontsize=6.4, color=INK)
+        ax.set_yticks([y for y, _, _ in rows])
+        base = {m: METHOD_LABELS[m] for m in ("residual_gwr", "mixed_gwr", "mgwr")}
+        ax.set_yticklabels([base[m.removeprefix("blend_agrenv_").removeprefix("blend_")] for _, m, _ in rows]
+                           if index == 0 else [], fontsize=6)
         ax.tick_params(length=0, pad=2)
         for spine in ax.spines.values():
             spine.set_visible(False)
-        ax.set_xticks(np.arange(-0.5, len(ANCHORS)), minor=True)
-        ax.set_yticks(np.arange(-0.5, len(FUSION_METHODS)), minor=True)
-        ax.grid(which="minor", color=SURFACE, linewidth=2)
-        ax.tick_params(which="minor", length=0)
-        ax.set_title(label, loc="left", pad=4)
-    bar = fig.colorbar(image, ax=axes, fraction=0.02, pad=0.015)
+        # A heading and a rule over each panel, so the two read as separate comparisons.
+        box = ax.get_position()
+        fig.text(box.x0, box.y1 + 0.065, label, ha="left", va="bottom", fontsize=8.5, fontweight="semibold")
+        fig.add_artist(Line2D([box.x0, box.x1], [box.y1 + 0.055] * 2, color=AXIS, linewidth=0.8))
+    bar = fig.colorbar(mpl.cm.ScalarMappable(norm=norm, cmap=DIVERGING), cax=fig.add_axes([0.9, 0.12, 0.012, 0.6]))
     bar.set_label("RMSE improvement vs ADW (%)", fontsize=6)
     bar.ax.tick_params(labelsize=6, length=2)
     bar.outline.set_visible(False)
+    handles = [Patch(facecolor=ORDINAL_BLUES[0], edgecolor="none", label="Significant"),
+               Patch(facecolor=SURFACE, edgecolor=MUTED, linewidth=0.6, label="Not significant")]
+    fig.legend(handles=handles, frameon=False, fontsize=6.4, ncol=2, loc="lower center", bbox_to_anchor=(0.52, 0.02),
+               handlelength=1.4)
     title(fig, "Which fusion method, on which anchor, beats gauge-only ADW",
           "Relative RMSE improvement over ADW at held-out gauges (blue better, red worse; colour clipped at ±16%). "
-          "* and bold: 95% bootstrap interval excludes 0 and Holm-adjusted p < 0.05 across every cell of the panel.",
+          "Hollow cells: 95% bootstrap interval includes 0 or Holm-adjusted p ≥ 0.05 across every cell of the panel.",
           top=0.97)
     save(fig, "fusion_fig3_methods_by_anchor")
 
