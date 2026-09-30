@@ -85,8 +85,11 @@ satellite 24 h total is compared with the gauge total, using spatial correlation
 KGE and CSI at 50 mm.
 
 #figure(
-  image("figures/fig02_event_maps.png", width: 72%),
-  caption: [Draft Fig. 2. Daily totals at the gauge locations for the six events.],
+  image("figures/fig02_event_maps.png", width: 100%),
+  caption: [Draft Fig. 2. The six heavy-rain events (columns). Top row: gauge 24 h totals (08–08 BJT).
+  Lower rows: satellite minus gauge at each gauge, from the pixel sampled there; red means the satellite is
+  drier, blue wetter, grey within ±10 mm. MB is the mean bias (mean of satellite − gauge over the
+  event's gauges).],
 )
 
 #figure(
@@ -97,8 +100,8 @@ KGE and CSI at 50 mm.
 *Key findings.*
 - Both products place heavy rain about equally well. Mean spatial r over the six events is 0.55
   for both GPM and GSMaP, and 0.6–0.8 on four events. Both fail on 2022-06-26 (r ≤ 0.12).
-- Amounts differ sharply. GPM is nearly unbiased (mean bias −2.0 mm, RMSE 20.5 mm). GSMaP
-  overestimates (bias +18.9 mm, RMSE 39.9 mm), up to +73 mm on 2023-08-26. KGE: 0.39 vs −0.13.
+- Amounts differ sharply. GPM is nearly unbiased (MB −2.0 mm, RMSE 20.5 mm). GSMaP
+  overestimates (MB +18.9 mm, RMSE 39.9 mm), up to +73 mm on 2023-08-26. KGE: 0.39 vs −0.13.
 - Localized storms are underestimated by both products: CSI at 50 mm is 0 except for GPM on
   2024-07-30. The 0.1° pixel smooths out small intense cores.
 

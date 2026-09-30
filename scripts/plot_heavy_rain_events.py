@@ -73,6 +73,16 @@ ERROR_CMAP.set_under("#681114")
 ERROR_CMAP.set_over("#0d366b")
 ERROR_NORM = BoundaryNorm(ERROR_BOUNDS, ERROR_CMAP.N)
 
+# Overview figure only: the gauge row sits above blue/red error rows, so its rain classes use a
+# multi-hue ramp (yellow to purple) that no error class can be mistaken for.
+OVERVIEW_RAIN_CMAP = ListedColormap(["#e8cf6a", "#a9d67e", "#3fa58c", "#2f6aa8", "#4b2a7b"])
+OVERVIEW_RAIN_NORM = BoundaryNorm(RAIN_BOUNDS, OVERVIEW_RAIN_CMAP.N)
+# Same error ramp, but the within-10-mm centre is a light grey that stays visible on the background.
+OVERVIEW_ERROR_CMAP = ListedColormap([c if c != "#f0efec" else "#c9c7c0" for c in ERROR_CMAP.colors])
+OVERVIEW_ERROR_CMAP.set_under("#681114")
+OVERVIEW_ERROR_CMAP.set_over("#0d366b")
+OVERVIEW_ERROR_NORM = BoundaryNorm(ERROR_BOUNDS, OVERVIEW_ERROR_CMAP.N)
+
 mpl.rcParams.update({
     "font.family": "sans-serif",
     "font.sans-serif": ["Segoe UI", "Arial", "DejaVu Sans"],
@@ -172,9 +182,9 @@ def signed(value: float) -> str:
     return f"{round(value):+d}"
 
 
-def annotate(ax: plt.Axes, text: str) -> None:
+def annotate(ax: plt.Axes, text: str, size: float = 5.6) -> None:
     """Metric box in the lower-right corner, which the gauge network leaves empty."""
-    ax.text(0.97, 0.03, text, transform=ax.transAxes, ha="right", va="bottom", fontsize=5.6,
+    ax.text(0.97, 0.03, text, transform=ax.transAxes, ha="right", va="bottom", fontsize=size,
             color=INK, linespacing=1.15,
             bbox={"boxstyle": "round,pad=0.25", "facecolor": SURFACE, "edgecolor": "none", "alpha": 0.85})
 
@@ -231,6 +241,72 @@ def fig1_point_maps(events, stations, metrics, bounds) -> None:
     horizontal_colorbar(fig, [0.30, 0.035, 0.52, 0.011], RAIN_CMAP, RAIN_NORM, RAIN_BOUNDS,
                         "Accumulated precipitation (mm), CMA daily rain classes")
     save(fig, "fig1_event_point_maps")
+
+
+def fig0_event_overview(events, stations, metrics, bounds) -> None:
+    """Compact overview: gauge totals on top, one satellite-minus-gauge row per product, events as columns."""
+    widespread = [e for e in events if e["type"] == "widespread"]
+    localized = [e for e in events if e["type"] == "localized"]
+    rows = ["Gauge"] + PRODUCTS
+    gap = 0.22
+    ratios = [1.0] * len(widespread) + [gap] + [1.0] * len(localized)
+    fig = plt.figure(figsize=(6.7, 1.02 * len(rows) + 1.25))
+    grid = fig.add_gridspec(len(rows), len(ratios), width_ratios=ratios, left=0.105, right=0.995,
+                            top=1 - 0.52 / fig.get_figheight(), bottom=0.80 / fig.get_figheight(),
+                            wspace=0.05, hspace=0.06)
+    columns = [(e, j) for j, e in enumerate(widespread)] + \
+              [(e, len(widespread) + 1 + j) for j, e in enumerate(localized)]
+    top_axes = {}
+    for i, source in enumerate(rows):
+        for k, (event, col) in enumerate(columns):
+            ax = fig.add_subplot(grid[i, col])
+            if i == 0:
+                top_axes[col] = ax
+            style_map(ax, bounds, show_x=i == len(rows) - 1, show_y=k == 0)
+            ax.tick_params(labelsize=6)
+            if source == "Gauge":
+                gauge = stations[(event["day"], "GPM")]
+                points(ax, gauge["lon"], gauge["lat"], gauge["obs_mm"], OVERVIEW_RAIN_CMAP, OVERVIEW_RAIN_NORM,
+                       size=5.0)
+                annotate(ax, f"max\n{gauge['obs_mm'].max():.0f} mm", size=6.2)
+                ax.set_title(f"{event['day']}\n{event['n_heavy']} gauges > 50 mm", fontsize=6.8,
+                             pad=3, linespacing=1.2)
+            else:
+                data = stations[(event["day"], source)]
+                m = metrics[(event["day"], source, WINDOW)]
+                points(ax, data["lon"], data["lat"], data["diff_mm"], OVERVIEW_ERROR_CMAP, OVERVIEW_ERROR_NORM,
+                       size=5.0)
+                annotate(ax, f"MB\n{signed(m['Bias'])} mm", size=6.2)
+            if k == 0:
+                label = "Gauge total" if source == "Gauge" else f"{source} − gauge"
+                ax.text(-0.36, 0.5, label, transform=ax.transAxes, rotation=90, ha="center", va="center",
+                        fontsize=7.5, color=INK)
+    # Group labels over the widespread and localized blocks.
+    height = fig.get_figheight()
+    fig.canvas.draw()  # apply the equal-area aspect so positions below are the drawn boxes
+    for group, cols in (("Widespread events", [c for e, c in columns if e["type"] == "widespread"]),
+                        ("Localized events", [c for e, c in columns if e["type"] == "localized"])):
+        if not cols:
+            continue
+        left = top_axes[cols[0]].get_position().x0
+        right = top_axes[cols[-1]].get_position().x1
+        y = top_axes[cols[0]].get_position().y1 + 0.30 / height
+        fig.text((left + right) / 2, y + 0.04 / height, group, ha="center", va="bottom",
+                 fontsize=7.5, weight="semibold", color=INK)
+        fig.add_artist(Line2D([left + 0.005, right - 0.005], [y, y], transform=fig.transFigure,
+                              color=AXIS, linewidth=0.8))
+    error = horizontal_colorbar(fig, [0.12, 0.36 / height, 0.42, 0.08 / height], OVERVIEW_ERROR_CMAP,
+                                OVERVIEW_ERROR_NORM, ERROR_BOUNDS, "Satellite − gauge (mm)", extend="both")
+    rain = horizontal_colorbar(fig, [0.62, 0.36 / height, 0.34, 0.08 / height], OVERVIEW_RAIN_CMAP, OVERVIEW_RAIN_NORM,
+                               RAIN_BOUNDS, "Gauge 24 h total (mm), CMA daily rain classes")
+    for bar in (rain, error):
+        bar.ax.tick_params(labelsize=6)
+        bar.set_label(bar.ax.get_xlabel(), fontsize=6.8, color=INK_SECONDARY)
+    error.ax.text(0.0, 1.35, "← satellite drier", transform=error.ax.transAxes, ha="left", fontsize=6.2,
+                  color=INK_SECONDARY)
+    error.ax.text(1.0, 1.35, "satellite wetter →", transform=error.ax.transAxes, ha="right", fontsize=6.2,
+                  color=INK_SECONDARY)
+    save(fig, "fig0_event_overview")
 
 
 def fig2_error_maps(events, stations, metrics, bounds) -> None:
@@ -369,7 +445,7 @@ METRIC_PANELS = [
     ("KGE", "KGE", 1.0),
     ("CSI_50", "CSI at 50 mm", 1.0),
     ("RMSE", "RMSE (mm)", 0.0),
-    ("RB_pct", "Relative bias (%)", 0.0),
+    ("Bias", "MB, mean bias (mm)", 0.0),
     ("cv_ratio", "Spatial CV ratio (satellite / gauge)", 1.0),
     ("centroid_shift_km", "Rain-centre shift (km)", 0.0),
 ]
@@ -475,6 +551,7 @@ def main() -> None:
     metrics = load_metrics()
     bounds = load_bounds()
     print(f"Drawing {len(events)} events from {RUN_DIR}")
+    fig0_event_overview(events, stations, metrics, bounds)
     fig1_point_maps(events, stations, metrics, bounds)
     fig2_error_maps(events, stations, metrics, bounds)
     fig3_idw_maps(events, stations, bounds)
