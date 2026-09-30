@@ -39,10 +39,9 @@ function load_common_data(outdir::AbstractString; smoke::Bool=false)
         station_meta_path=joinpath(STUDY_DATA, "station_meta.csv"),
         obs_hourly_wide_path=joinpath(STUDY_DATA, "hubei_obs_hourly_2022_2025_JunSep.csv"),
         sat_paths=Dict(
+            # Same file as run_interpolation_benchmark.jl in both modes; the window clips smoke.
             "FY4B" => joinpath(
-                STUDY_DATA,
-                smoke ? "hubei_fy4b_hourly_202206_strict_navcorrected.csv" :
-                    "hubei_fy4b_hourly_2022_2024_full_strict_navcorrected.csv",
+                STUDY_DATA, "hubei_fy4b_hourly_2022_2024_full_strict_navcorrected.csv",
             ),
             "GPM" => joinpath(
                 STUDY_DATA,

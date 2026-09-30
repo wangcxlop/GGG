@@ -116,10 +116,9 @@ function benchmark_config(
         station_meta_path=joinpath(STUDY_DATA, "station_meta.csv"),
         obs_hourly_wide_path=joinpath(STUDY_DATA, "hubei_obs_hourly_2022_2025_JunSep.csv"),
         sat_paths=Dict(
+            # Smoke reads the full-year file too; `analysis_start`/`analysis_end` clip it to June.
             "FY4B" => joinpath(
-                STUDY_DATA,
-                smoke ? "hubei_fy4b_hourly_202206_strict_navcorrected.csv" :
-                    "hubei_fy4b_hourly_2022_2024_full_strict_navcorrected.csv",
+                STUDY_DATA, "hubei_fy4b_hourly_2022_2024_full_strict_navcorrected.csv",
             ),
             "GPM" => joinpath(
                 STUDY_DATA,

@@ -31,9 +31,10 @@ function main()
         joinpath(STUDY_DATA, "hubei_obs_hourly_2022_2025_JunSep.csv"),
         joinpath(STUDY_DATA, "hubei_gpm_hourly_2022_2025_JunSep_aligned.csv"),
         joinpath(STUDY_DATA, "hubei_gsmap_hourly_2022_2025_JunSep_aligned.csv"),
-        joinpath(STUDY_DATA, "hubei_fy4b_hourly_202206_strict_navcorrected.csv"),
         joinpath(STUDY_DATA, "hubei_fy4b_hourly_2022_2025_JunSep_strict_navcorrected.csv"),
     )
+    # The smoke FY4B input is the full-year file, which carries all 318 raw stations; the
+    # 237-station intersection is asserted through input_audit.csv below instead.
         assert_station_columns(path, study_ids)
     end
 
@@ -46,10 +47,6 @@ function main()
         11_712, 237,
     )
     assert_wide(
-        joinpath(STUDY_DATA, "hubei_fy4b_hourly_202206_strict_navcorrected.csv"),
-        671, 237,
-    )
-    assert_wide(
         joinpath(STUDY_DATA, "hubei_fy4b_hourly_2022_2025_JunSep_strict_navcorrected.csv"),
         10_772, 237,
     )
@@ -59,7 +56,9 @@ function main()
             joinpath(ROOT, "output", "input_audit", "$(product)_duplicate_station_times.csv"),
             DataFrame,
         )
-        @assert nrow(duplicate_qc) == 11_712
+        # Jun-Sep 2022-2024 (3 x 2_928 h), as rebuilt 2026-09-02; the wide files above also
+        # carry 2025, hence their 11_712.
+        @assert nrow(duplicate_qc) == 8_784
         @assert all(duplicate_qc.source_rows .== 2)
         @assert all(duplicate_qc.unique_value_count .== 1)
     end

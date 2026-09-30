@@ -14,7 +14,6 @@ function main()
         station_meta_path=joinpath(ROOT, "data", "hubei_station_meta.csv"),
         wide_sources=Dict(
             "observation" => joinpath(ROOT, "data", "hubei_obs_hourly_2022_2025_JunSep.csv"),
-            "FY4B_smoke" => joinpath(PROCESSED, "hubei_fy4b_hourly_202206_strict_navcorrected.csv"),
             "FY4B_full" => joinpath(PROCESSED, "hubei_fy4b_hourly_2022_2025_JunSep_strict_navcorrected.csv"),
             "GPM" => joinpath(PROCESSED, "hubei_gpm_hourly_2022_2025_JunSep_aligned.csv"),
             "GSMaP" => joinpath(PROCESSED, "hubei_gsmap_hourly_2022_2025_JunSep_aligned.csv"),

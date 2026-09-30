@@ -12,7 +12,7 @@ const STUDY_DATA = joinpath(ROOT, "data", "processed", "study_area")
 function main()
     smoke = "--smoke-202206" in ARGS
     fy4b_name = smoke ?
-        "hubei_fy4b_hourly_202206_strict_navcorrected.csv" :
+        "hubei_fy4b_hourly_2022_2024_full_strict_navcorrected.csv" :
         "hubei_fy4b_hourly_2022_2025_JunSep_strict_navcorrected.csv"
     result = audit_mger_inputs(
         station_meta_path=joinpath(STUDY_DATA, "station_meta.csv"),
