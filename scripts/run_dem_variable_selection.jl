@@ -24,7 +24,7 @@ function experiment_inputs(mode::Symbol)
         sat_paths=Dict(
             "FY4B" => joinpath(
                 STUDY_DATA,
-                smoke ? "hubei_fy4b_hourly_202206_strict_navcorrected.csv" :
+                smoke ? "hubei_fy4b_hourly_2022_2024_full_strict_navcorrected.csv" :
                     "hubei_fy4b_hourly_2022_2025_JunSep_strict_navcorrected.csv",
             ),
             "GPM" => joinpath(STUDY_DATA, "hubei_gpm_hourly_2022_2025_JunSep_aligned.csv"),
