@@ -143,7 +143,9 @@ satellite reports rain.
 #figure(
   image("figures/fig06b_fusion_methods.png", width: 100%),
   caption: [Draft Fig. 6. RMSE improvement of each fusion method over gauge-only ADW, per anchor, for
-  all hours and heavy hours. The paper version adds a panel comparing the gauge-only interpolators.],
+  all hours and heavy hours. Rows are grouped by how the satellite enters: direct correction, blend with
+  ADW, agreement blend. Hollow cells are not significant. The paper version adds a panel comparing the
+  gauge-only interpolators.],
 )
 
 #figure(
