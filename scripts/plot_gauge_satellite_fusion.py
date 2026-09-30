@@ -157,12 +157,12 @@ def title(fig: plt.Figure, heading: str, subheading: str, top: float = 0.975) ->
              color=INK_SECONDARY)
 
 
-def ladder_legend(fig: plt.Figure, raw: bool = True, **kwargs) -> None:
+def ladder_legend(fig: plt.Figure, raw: bool = True, adw_width: float = 0.9, **kwargs) -> None:
     handles = []
     if raw:
         handles.append(Line2D([], [], linestyle="none", marker="o", markersize=5, markerfacecolor=SURFACE,
                               markeredgecolor=MUTED, label=METHOD_LABELS["raw"]))
-    handles.append(Line2D([], [], color=INK, linestyle=(0, (3, 2)), linewidth=0.9, label=METHOD_LABELS["adw"]))
+    handles.append(Line2D([], [], color=INK, linestyle=(0, (3, 2)), linewidth=adw_width, label=METHOD_LABELS["adw"]))
     handles += [Line2D([], [], linestyle="none", marker="o", markersize=5, markerfacecolor=color,
                        markeredgecolor=SURFACE, label=METHOD_LABELS[method]) for method, color in LADDER]
     fig.legend(handles=handles, frameon=False, fontsize=6.6, ncol=len(handles), **kwargs)
@@ -336,12 +336,12 @@ def fig3_heatmap(fusion: list[dict]) -> None:
 def fig4_where(stratified: list[dict], detection: list[dict]) -> None:
     fig, axes = plt.subplots(3, len(ANCHORS), figsize=(10.0, 7.0), sharey="row")
     fig.subplots_adjust(left=0.07, right=0.99, top=0.84, bottom=0.09, wspace=0.08, hspace=0.72)
-    offsets = {"raw": -0.24, "auto": 0.0, "blend_agrenv_mgwr": 0.24}
+    offsets = {"auto": -0.12, "blend_agrenv_mgwr": 0.12}
     for column, anchor in enumerate(ANCHORS):
         for row_index, (group, levels) in enumerate([("rain_intensity", INTENSITY), ("nearest_train_km", DISTANCE)]):
             ax = axes[row_index, column]
             clean_axis(ax)
-            ax.axhline(0, color=INK, linestyle=(0, (3, 2)), linewidth=0.9, zorder=1)
+            ax.axhline(0, color=INK, linestyle=(0, (3, 2)), linewidth=1.15, zorder=2)
             x = np.arange(len(levels))
             for method, color in LADDER:
                 values = [pct(value(stratified, "RMSE_improvement_vs_adw", product=anchor, method=method, group=group,
@@ -352,23 +352,16 @@ def fig4_where(stratified: list[dict], detection: list[dict]) -> None:
             if column == 0:
                 ax.set_ylabel("RMSE change vs ADW (%)", fontsize=6)
             if row_index == 0:
-                ax.set_title(ANCHOR_LABELS[anchor].replace("\n", " "), loc="left", pad=3)
+                ax.set_title(ANCHOR_LABELS[anchor].replace("\n", " "), loc="center", pad=4, fontsize=9.5,
+                             fontweight="bold")
         ax = axes[2, column]
         clean_axis(ax)
-        ax.axhline(0, color=INK, linestyle=(0, (3, 2)), linewidth=0.9, zorder=1)
+        ax.axhline(0, color=INK, linestyle=(0, (3, 2)), linewidth=1.15, zorder=2)
         x = np.arange(len(THRESHOLDS))
-        for method, color in [("raw", None)] + LADDER:
+        for method, color in LADDER:
             rows = [one(detection, product=anchor, method=method, threshold=t, metric="CSI") for t in THRESHOLDS]
             centre = [row["delta"] if row else np.nan for row in rows]
-            lo = [row["ci_low"] if row else np.nan for row in rows]
-            hi = [row["ci_high"] if row else np.nan for row in rows]
-            if method == "raw":
-                ax.vlines(x + offsets[method], lo, hi, color=MUTED, linewidth=1.0, zorder=2)
-                ax.scatter(x + offsets[method], centre, s=20, facecolors=SURFACE, edgecolors=MUTED, linewidths=1.0,
-                           zorder=3)
-            else:
-                ax.vlines(x + offsets[method], lo, hi, color=color, linewidth=1.0, zorder=2)
-                ax.scatter(x + offsets[method], centre, s=22, color=color, edgecolors=SURFACE, linewidths=0.8, zorder=3)
+            ax.scatter(x + offsets[method], centre, s=22, color=color, edgecolors=SURFACE, linewidths=0.8, zorder=3)
         ax.set_xticks(x)
         ax.set_xticklabels([f"≥ {t:g}" for t in THRESHOLDS], fontsize=5.8)
         ax.set_xlabel("Event threshold (mm/h)", fontsize=6)
@@ -376,7 +369,7 @@ def fig4_where(stratified: list[dict], detection: list[dict]) -> None:
             ax.set_ylabel("CSI change vs ADW", fontsize=6)
     sections = ["RMSE change vs ADW by gauge rain intensity (mm/h)",
                 "RMSE change vs ADW by distance from the held-out gauge to the nearest training gauge",
-                "CSI change vs ADW, with 95% day-block bootstrap intervals"]
+                "CSI change vs ADW by event threshold (mm/h)"]
     for row_index, text in enumerate(sections):
         top = axes[row_index, 0].get_position().y1
         # Row 0 carries the anchor names as panel titles, so its section label sits above them.
@@ -384,7 +377,7 @@ def fig4_where(stratified: list[dict], detection: list[dict]) -> None:
                  fontweight="semibold")
     fig.suptitle("Where the satellite adds to the gauges: heavy rain, detection, and distance from the network",
                  x=0.02, ha="left", fontsize=9, y=0.985)
-    ladder_legend(fig, loc="upper right", bbox_to_anchor=(0.99, 0.955))
+    ladder_legend(fig, raw=False, adw_width=1.15, loc="upper right", bbox_to_anchor=(0.99, 0.955))
     save(fig, "fusion_fig4_where_it_helps")
 
 
