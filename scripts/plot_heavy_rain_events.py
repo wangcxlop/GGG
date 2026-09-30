@@ -439,49 +439,55 @@ def fig4_scatter(events, stations, metrics) -> None:
     save(fig, "fig4_event_scatter")
 
 
+# Top row: where and how variable the rain is; bottom row: how much, and the heavy-rain hits.
+# Spearman rho (tracks r) and KGE (a composite of r, bias and variability) are left out as redundant.
 METRIC_PANELS = [
     ("r", "Spatial correlation r", 1.0),
-    ("rho", "Spearman ρ", 1.0),
-    ("KGE", "KGE", 1.0),
-    ("CSI_50", "CSI at 50 mm", 1.0),
-    ("RMSE", "RMSE (mm)", 0.0),
-    ("Bias", "MB, mean bias (mm)", 0.0),
     ("cv_ratio", "Spatial CV ratio (satellite / gauge)", 1.0),
     ("centroid_shift_km", "Rain-centre shift (km)", 0.0),
+    ("Bias", "MB, mean bias (mm)", 0.0),
+    ("RMSE", "RMSE (mm)", 0.0),
+    ("CSI_50", "CSI at 50 mm", 1.0),
 ]
 
 
 def fig5_metric_summary(events, metrics) -> None:
-    fig, axes = plt.subplots(2, 4, figsize=(10.0, 5.4))
-    fig.subplots_adjust(left=0.055, right=0.99, top=0.84, bottom=0.14, wspace=0.28, hspace=0.42)
+    fig, axes = plt.subplots(2, 3, figsize=(7.8, 5.4))
+    fig.subplots_adjust(left=0.07, right=0.99, top=0.80, bottom=0.12, wspace=0.26, hspace=0.42)
     x = np.arange(len(events))
     offsets = {p: 0.2 * (k - (len(PRODUCTS) - 1) / 2) for k, p in enumerate(PRODUCTS)}
     n_widespread = sum(event["type"] == "widespread" for event in events)
     tick_labels = [f"{event['day'][5:]}\n{event['day'][:4]}" for event in events]
     for ax, (key, title, ideal) in zip(axes.flat, METRIC_PANELS):
         ax.grid(axis="y", color=GRID, linewidth=0.5, zorder=0)
-        ax.axhline(ideal, color=AXIS, linewidth=0.9, zorder=1)
+        ax.axhline(ideal, color=AXIS, linewidth=1.4, zorder=1.8)  # above the gridlines (1.5)
         ax.axvline(n_widespread - 0.5, color=GRID, linewidth=0.8, zorder=0)
+        values = {p: [metrics[(event["day"], p, WINDOW)][key] for event in events] for p in PRODUCTS}
+        # Thin line joining each event's products, drawn under the points.
+        for i in x:
+            ax.plot([i + offsets[p] for p in PRODUCTS], [values[p][i] for p in PRODUCTS],
+                    color=MUTED, linewidth=0.6, zorder=2)
         for product in PRODUCTS:
-            values = [metrics[(event["day"], product, WINDOW)][key] for event in events]
-            ax.scatter(x + offsets[product], values, s=26, color=PRODUCT_COLORS[product],
+            ax.scatter(x + offsets[product], values[product], s=26, color=PRODUCT_COLORS[product],
                        edgecolors=SURFACE, linewidths=0.8, zorder=3)
-        ax.set_title(title, loc="left", fontsize=7.5, pad=13)
+        ax.set_title(title, loc="left", fontsize=7.5, pad=6)
         ax.set_xticks(x)
         ax.set_xticklabels(tick_labels, fontsize=6)
         ax.set_xlim(-0.6, len(events) - 0.4)
         ax.tick_params(length=2, pad=1.5, labelsize=6)
         for spine in ("top", "right"):
             ax.spines[spine].set_visible(False)
-        ax.text((n_widespread - 1) / 2, 1.0, "widespread", transform=ax.get_xaxis_transform(),
-                ha="center", va="bottom", fontsize=5.8, color=MUTED)
-        ax.text(n_widespread + (len(events) - n_widespread - 1) / 2, 1.0, "localized",
-                transform=ax.get_xaxis_transform(), ha="center", va="bottom", fontsize=5.8, color=MUTED)
+    # Event-group labels once, above the top row of panels.
+    for ax in axes[0]:
+        for text, first, last in (("Widespread", 0, n_widespread - 1),
+                                  ("Localized", n_widespread, len(events) - 1)):
+            ax.text((first + last) / 2, 1.16, text, transform=ax.get_xaxis_transform(),
+                    ha="center", va="bottom", fontsize=6.8, color=INK_SECONDARY)
     handles = [Line2D([], [], linestyle="none", marker="o", markersize=5.5, markerfacecolor=PRODUCT_COLORS[p],
                       markeredgecolor=SURFACE, label=p) for p in PRODUCTS]
     fig.legend(handles=handles, loc="upper right", ncol=len(PRODUCTS), frameon=False, fontsize=7, bbox_to_anchor=(0.99, 0.975))
-    fig.suptitle("Event-scale spatial metrics by product", x=0.055, ha="left", fontsize=9, y=0.965)
-    fig.text(0.055, 0.915, "Gauge-pixel pairs over each event's common hours. The solid grey line marks "
+    fig.suptitle("Event-scale spatial metrics by product", x=0.07, ha="left", fontsize=9, y=0.965)
+    fig.text(0.07, 0.915, "Gauge-pixel pairs over each event's common hours. The solid grey line marks "
              "the perfect score.", ha="left", fontsize=6.5, color=INK_SECONDARY)
     save(fig, "fig5_metric_summary")
 

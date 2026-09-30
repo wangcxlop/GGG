@@ -81,8 +81,8 @@ alone). Fig. 1 will be a map with relief, gauges, a location inset and river bas
 
 *Design.* Heavy-rain days are 08–08 days on which more than three gauges exceed 50 mm. Of 56 such
 days, six are selected, one per rain system: four widespread and two localized. At each gauge, the
-satellite 24 h total is compared with the gauge total, using spatial correlation, RMSE, bias,
-KGE and CSI at 50 mm.
+satellite 24 h total is compared with the gauge total, using spatial correlation, spatial CV ratio,
+rain-centre shift, mean bias, RMSE and CSI at 50 mm.
 
 #figure(
   image("figures/fig02_event_maps.png", width: 100%),
@@ -101,7 +101,7 @@ KGE and CSI at 50 mm.
 - Both products place heavy rain about equally well. Mean spatial r over the six events is 0.55
   for both GPM and GSMaP, and 0.6–0.8 on four events. Both fail on 2022-06-26 (r ≤ 0.12).
 - Amounts differ sharply. GPM is nearly unbiased (MB −2.0 mm, RMSE 20.5 mm). GSMaP
-  overestimates (MB +18.9 mm, RMSE 39.9 mm), up to +73 mm on 2023-08-26. KGE: 0.39 vs −0.13.
+  overestimates (MB +18.9 mm, RMSE 39.9 mm), up to +73 mm on 2023-08-26.
 - Localized storms are underestimated by both products: CSI at 50 mm is 0 except for GPM on
   2024-07-30. The 0.1° pixel smooths out small intense cores.
 
