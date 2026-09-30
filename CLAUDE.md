@@ -137,7 +137,8 @@ threaded LU accumulates in a different order. Pinning BLAS to one thread was mea
 run's BLAS thread count is therefore part of what makes published numbers reproducible.
 
 The same class of drift showed up again, independent of BLAS, when the full-mode invariance gate
-(`scripts/verify_perf_invariance.jl`) was run against the hour-fit perf pass (commit `b822d78`):
+(`scripts/verify_perf_invariance.jl`, since removed; restore it with
+`git show 999b332:scripts/verify_perf_invariance.jl`) was run against the hour-fit perf pass (commit `b822d78`):
 `paired_comparisons.csv`'s `ci_high` column moved in its last one or two digits for most rows,
 while `ci_low`, `delta_RMSE`, `relative_improvement`, and every other output file (105 of 106)
 stayed byte-identical. `_daily_bootstrap_delta`/`paired_bootstrap_rows`
