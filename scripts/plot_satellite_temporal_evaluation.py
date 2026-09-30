@@ -46,6 +46,8 @@ MUTED = "#898781"
 GRID = "#e1e0d9"
 AXIS = "#c3c2b7"
 PRODUCT_COLORS = {"FY4B": "#2a78d6", "GPM": "#eb6834", "GSMaP": "#1baf7a"}
+# Shapes double-code the products, as in plot_heavy_rain_events.py, so the figures read without colour.
+PRODUCT_MARKERS = {"FY4B": "s", "GPM": "o", "GSMaP": "^"}
 SAMPLE_PRODUCTS = {"all_products": ["FY4B", "GPM", "GSMaP"], "gpm_gsmap_full": ["GPM", "GSMaP"]}
 SAMPLES = ["gpm_gsmap_full"] if GPM_GSMAP_ONLY else list(SAMPLE_PRODUCTS)
 SAMPLE_TITLES = {
@@ -138,21 +140,23 @@ def clean_axis(ax: plt.Axes, grid_axis: str = "y") -> None:
 
 
 def product_legend(fig: plt.Figure, products: list[str], extra: list | None = None, **kwargs) -> None:
-    handles = [Line2D([], [], linestyle="none", marker="o", markersize=5.5, markerfacecolor=PRODUCT_COLORS[p],
-                      markeredgecolor=SURFACE, label=p) for p in products]
+    handles = [Line2D([], [], linestyle="none", marker=PRODUCT_MARKERS[p], markersize=6.5 if PRODUCT_MARKERS[p] == "^" else 5.5,
+                      markerfacecolor=PRODUCT_COLORS[p], markeredgecolor=SURFACE, label=p) for p in products]
     handles += extra or []
     fig.legend(handles=handles, frameon=False, fontsize=6.8, ncol=len(handles), **kwargs)
 
 
-def dots(ax, x, values, color, lo=None, hi=None, hollow=None, size=22):
+def dots(ax, x, values, color, lo=None, hi=None, hollow=None, size=22, marker="o"):
     """One product's values as dots with optional interval whiskers; `hollow` marks low-sample points."""
+    if marker == "^":
+        size *= 1.3   # a triangle reads smaller than a circle of the same area
     x = np.asarray(x, dtype=float)
     values = np.asarray(values, dtype=float)
     hollow = np.zeros(len(values), dtype=bool) if hollow is None else np.asarray(hollow, dtype=bool)
     if lo is not None:
         ax.vlines(x, lo, hi, color=color, linewidth=1.0, alpha=0.7, zorder=2)
-    ax.scatter(x[~hollow], values[~hollow], s=size, color=color, edgecolors=SURFACE, linewidths=0.8, zorder=3)
-    ax.scatter(x[hollow], values[hollow], s=size, facecolors=SURFACE, edgecolors=color, linewidths=1.0, zorder=3)
+    ax.scatter(x[~hollow], values[~hollow], s=size, marker=marker, color=color, edgecolors=SURFACE, linewidths=0.8, zorder=3)
+    ax.scatter(x[hollow], values[hollow], s=size, marker=marker, facecolors=SURFACE, edgecolors=color, linewidths=1.0, zorder=3)
 
 
 # --------------------------------------------------------------------------------------------------
@@ -225,30 +229,30 @@ INTENSITY_PANELS = [
     ("RB_pct", "Relative bias (%)", 0.0, True),
     ("POD_rain", "Detected as rain (sat ≥ 0.1)", 1.0, False),
     ("class_hit", "Same intensity class", 1.0, True),
-    ("under_class", "Satellite in a lower class", 0.0, False),
 ]
 
 
 def fig2_intensity(metrics: list[dict], sample: str, by: str = "season") -> None:
     products = SAMPLE_PRODUCTS[sample]
     # One column per season (all gauges) or per landform region (all seasons).
-    strata = [(s, "all") for s in SEASONS] if by == "season" else [("all", g) for g in ["all"] + REGIONS]
-    fig, axes = plt.subplots(len(INTENSITY_PANELS), len(strata), figsize=(10.0, 7.6), sharey="row")
-    fig.subplots_adjust(left=0.07, right=0.975, top=0.84, bottom=0.11, wspace=0.08, hspace=0.42)
+    # The season split shows the four seasons only; the pooled year stays in the CSV.
+    strata = [(s, "all") for s in SEASONS if s != "all"] if by == "season" else [("all", g) for g in ["all"] + REGIONS]
+    fig, axes = plt.subplots(len(INTENSITY_PANELS), len(strata), figsize=(8.6, 6.0), sharey="row")
+    fig.subplots_adjust(left=0.085, right=0.975, top=0.81, bottom=0.12, wspace=0.08, hspace=0.30)
     x = np.arange(len(CLASSES))
     offsets = np.linspace(-0.22, 0.22, len(products))
     for j, (season, region) in enumerate(strata):
         for i, (key, title, ideal, with_ci) in enumerate(INTENSITY_PANELS):
             ax = axes[i, j]
             clean_axis(ax)
-            ax.axhline(ideal, color=AXIS, linewidth=0.9, zorder=1)
+            ax.axhline(ideal, color=AXIS, linewidth=1.4, zorder=1.8)  # above the gridlines (1.5)
             for offset, product in zip(offsets, products):
                 rows = [one(metrics, sample=sample, product=product, season=season, region=region, gauge_class=c) for c in CLASSES]
                 values = [r[key] if r and r["n"] > 0 else np.nan for r in rows]
                 lo = [r[f"{key}_lo"] if r and with_ci and r["n"] > 0 else np.nan for r in rows] if with_ci else None
                 hi = [r[f"{key}_hi"] if r and with_ci and r["n"] > 0 else np.nan for r in rows] if with_ci else None
                 hollow = [bool(r["low_sample"]) if r else True for r in rows]
-                dots(ax, x + offset, values, PRODUCT_COLORS[product], lo, hi, hollow)
+                dots(ax, x + offset, values, PRODUCT_COLORS[product], lo, hi, hollow, marker=PRODUCT_MARKERS[product])
             ax.set_xticks(x)
             ax.set_xlim(-0.6, len(CLASSES) - 0.4)
             ax.set_xticklabels(CLASS_LABELS if i == len(INTENSITY_PANELS) - 1 else [], fontsize=5.6)
@@ -257,13 +261,15 @@ def fig2_intensity(metrics: list[dict], sample: str, by: str = "season") -> None
                              ("All seasons" if season == "all" else season), pad=4)
             if j == 0:
                 ax.set_ylabel(title, fontsize=6.5)
-    axes[-1, len(strata) // 2].set_xlabel("Gauge hourly intensity class (mm/h)")
+    # Centred under the whole grid, which works for an even number of columns too.
+    left, right = axes[-1, 0].get_position().x0, axes[-1, -1].get_position().x1
+    fig.text((left + right) / 2, 0.055, "Gauge hourly intensity class (mm/h)", ha="center", color=INK_SECONDARY)
     product_legend(fig, products, loc="upper right", bbox_to_anchor=(0.99, 0.975))
-    fig.suptitle(f"Hourly performance by gauge intensity class — {SAMPLE_TITLES[sample]}", x=0.07, ha="left", fontsize=9, y=0.975)
-    fig.text(0.07, 0.935, "Gauge-wet hours only (no-rain hours excluded), " +
+    fig.suptitle(f"Hourly performance by gauge intensity class — {SAMPLE_TITLES[sample]}", x=0.085, ha="left", fontsize=9, y=0.975)
+    fig.text(0.085, 0.925, "Gauge-wet hours only (no-rain hours excluded), " +
              ("all gauges" if by == "season" else "all seasons, gauges grouped by local relief") + ". Whiskers: 95% day-block bootstrap. "
              "Grey line: perfect score.", ha="left", fontsize=6.3, color=INK_SECONDARY)
-    fig.text(0.07, 0.918, CAVEAT, ha="left", va="top", fontsize=6.0, color=MUTED, linespacing=1.4)
+    fig.text(0.085, 0.905, CAVEAT, ha="left", va="top", fontsize=6.0, color=MUTED, linespacing=1.4)
     save(fig, f"fig2_intensity_classes_{sample}" if by == "season" else f"fig2_intensity_classes_region_{sample}")
 
 
@@ -409,7 +415,8 @@ def fig5_events(summary: list[dict]) -> None:
                     hi = [r[f"{key}_hi"] for r in rows]
                 else:
                     lo = hi = None
-                dots(ax, x + offset, values, PRODUCT_COLORS[product], lo, hi, [r["low_sample"] for r in rows])
+                dots(ax, x + offset, values, PRODUCT_COLORS[product], lo, hi, [r["low_sample"] for r in rows],
+                     marker=PRODUCT_MARKERS[product])
             ax.set_xticks(x)
             ax.set_xticklabels(labels if i == len(SAMPLES) - 1 else [], rotation=35, ha="right", fontsize=5.8)
             if i == 0:
@@ -568,7 +575,8 @@ def fig8_scorecard(metrics, events, diurnal_summary, station_summary, sample: st
             for offset, product in zip(offsets, products):
                 pairs = [getter(product, season, region) for season in SEASONS]
                 values = [np.nan if v is None else v for v, _ in pairs]
-                dots(ax, x + offset, values, PRODUCT_COLORS[product], hollow=[low for _, low in pairs])
+                dots(ax, x + offset, values, PRODUCT_COLORS[product], hollow=[low for _, low in pairs],
+                     marker=PRODUCT_MARKERS[product])
             ax.set_xticks(x)
             ax.set_xticklabels(["All", "MAM", "JJA", "SON", "DJF"] if i == len(panels) - 1 else [], fontsize=6)
             if i == 0:
@@ -619,7 +627,8 @@ def fig9_regional_series(regional: list[dict]) -> None:
                               ("all_products", "GSMaP"): 0.29}[(sample, product)]
                     values = [(one(regional, sample=sample, product=product, region=region, season="all", timescale_h=t) or {}).get(key, np.nan)
                               for t in timescales]
-                    dots(ax, x + offset, values, PRODUCT_COLORS[product], hollow=[hollow] * len(values))
+                    dots(ax, x + offset, values, PRODUCT_COLORS[product], hollow=[hollow] * len(values),
+                         marker=PRODUCT_MARKERS[product])
             ax.set_xticks(x)
             ax.set_xlim(-0.5, len(timescales) - 0.5)
             ax.set_xticklabels(["1 h", "3 h", "24 h"] if i == len(SERIES_PANELS) - 1 else [])
