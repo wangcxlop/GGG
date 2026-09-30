@@ -31,10 +31,9 @@ function main()
         joinpath(STUDY_DATA, "hubei_obs_hourly_2022_2025_JunSep.csv"),
         joinpath(STUDY_DATA, "hubei_gpm_hourly_2022_2025_JunSep_aligned.csv"),
         joinpath(STUDY_DATA, "hubei_gsmap_hourly_2022_2025_JunSep_aligned.csv"),
+        joinpath(STUDY_DATA, "hubei_fy4b_hourly_2022_2024_full_strict_navcorrected.csv"),
         joinpath(STUDY_DATA, "hubei_fy4b_hourly_2022_2025_JunSep_strict_navcorrected.csv"),
     )
-    # The smoke FY4B input is the full-year file, which carries all 318 raw stations; the
-    # 237-station intersection is asserted through input_audit.csv below instead.
         assert_station_columns(path, study_ids)
     end
 
