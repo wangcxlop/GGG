@@ -227,7 +227,7 @@ def fig1_landform() -> None:
 
 INTENSITY_PANELS = [
     ("RB_pct", "Relative bias (%)", 0.0, True),
-    ("POD_rain", "Detected as rain (sat ≥ 0.1)", 1.0, False),
+    ("POD_rain", "Detected as rain (sat ≥ 0.1)", 1.0, True),
     ("class_hit", "Same intensity class", 1.0, True),
 ]
 
