@@ -29,7 +29,7 @@ using Main.TraditionalInterpolation: haversine_distance_matrix, idw_predict
 
 export met_day, align_to_reference, daily_totals, screen_heavy_rain_days, tag_rain_processes!
 export event_hours, select_representative_events, event_station_totals, spatial_metrics
-export idw_surface
+export idw_surface, phase_spatial_metrics, small_scale_variance_share
 
 """
 The meteorological day an hour-ending label belongs to.
@@ -373,6 +373,60 @@ function spatial_metrics(
         sd_ratio, cv_ratio, KGE=kge,
     )
     return merge(head, NamedTuple{Tuple(event_names)}(Tuple(event_values)), (; centroid_shift_km, peak_shift_km))
+end
+
+"""
+Spatial agreement per phase of an event and over the whole window, one row per phase x product.
+
+`hour_idx` is split into `n_phases` consecutive, equal-length phases (`phase = "all"` is the
+whole window). Each row holds the phase's `obs_share` of the gauge rain, `spatial_metrics`'s `r`
+and `Bias`, and the correlation of the gauge and product totals with longitude and latitude
+(`obs_r_lon`, `obs_r_lat`, `est_r_lon`, `est_r_lat`).
+
+A day can score near zero overall while every phase scores well: when successive rain systems
+have opposite gradients, they cancel in the gauge total, and a product whose amplitude errors
+differ by phase is then left with a gradient the gauges do not have.
+"""
+function phase_spatial_metrics(
+    Y_obs::AbstractMatrix{<:Real}, products::AbstractDict{<:AbstractString,<:AbstractMatrix},
+    lonlat::AbstractMatrix{<:Real}, hour_idx::AbstractVector{<:Integer}; n_phases::Int=3,
+)
+    length(hour_idx) % n_phases == 0 ||
+        throw(ArgumentError("$(length(hour_idx)) hours do not split into $n_phases equal phases"))
+    len = length(hour_idx) ÷ n_phases
+    windows = vcat([string(k) => hour_idx[(k - 1) * len + 1:k * len] for k in 1:n_phases], ["all" => hour_idx])
+    whole = event_station_totals(Y_obs, products, hour_idx)
+    gradient(values, axis) = (k = findall(isfinite, values); cor(values[k], lonlat[k, axis]))
+    rows = NamedTuple[]
+    for (phase, idx) in windows
+        totals = event_station_totals(Y_obs, products, idx)
+        obs_share = sum(totals.obs[whole.keep]) / sum(whole.obs[whole.keep])
+        for product in sort(collect(keys(totals.sat)))
+            est = totals.sat[product]
+            scores = spatial_metrics(totals.obs, est, lonlat)
+            push!(rows, (;
+                phase, first_hour=first(idx), hours=length(idx), product, obs_share, scores.r, scores.Bias,
+                obs_r_lon=gradient(totals.obs, 1), obs_r_lat=gradient(totals.obs, 2),
+                est_r_lon=gradient(est, 1), est_r_lat=gradient(est, 2),
+            ))
+        end
+    end
+    return DataFrame(rows)
+end
+
+"""
+How much of a field's spatial variance sits below `max_km`: the mean semivariance
+`(v_i - v_k)^2 / 2` over station pairs closer than `max_km`, divided by the variance of `values`.
+Near 0 is a smooth field; near 1 means stations a few km apart differ as much as any two
+stations, which no 0.1 deg product can reproduce.
+"""
+function small_scale_variance_share(lonlat::AbstractMatrix{<:Real}, values::AbstractVector{<:Real}; max_km::Real=10.0)
+    k = findall(isfinite, values)
+    v = Float64.(values[k])
+    D = haversine_distance_matrix(lonlat[k, :], lonlat[k, :])
+    semivariances = [(v[a] - v[b])^2 / 2 for a in eachindex(v) for b in a+1:length(v) if D[a, b] < max_km]
+    isempty(semivariances) && return NaN
+    return mean(semivariances) / var(v)
 end
 
 """

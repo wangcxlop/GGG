@@ -176,3 +176,30 @@ end
     with_gap = HRE.idw_surface(lonlat, [10.0, 20.0, NaN]; bounds=(110.0, 111.0, 32.0, 33.0), step_deg=0.5)
     @test with_gap.value ≈ surface.value
 end
+
+@testset "phase_spatial_metrics: phases with opposite gradients cancel in the day total" begin
+    n = 60
+    lat = collect(range(31.0, 33.0; length=n))
+    lonlat = hcat(fill(110.0, n), lat)
+    noise1, noise2 = 2.0 .* sin.(2.3 .* (1:n)), 2.0 .* cos.(1.7 .* (1:n))   # small-scale structure
+    north, south = 10 .* (lat .- 31), 10 .* (33 .- lat)
+    Y_obs = hcat(north .+ noise1, south .+ noise2)            # day total = 20 + noise: no gradient
+    sat = hcat(2.0 .* north, 0.5 .* south)                     # right pattern, wrong amplitude per phase
+    table = HRE.phase_spatial_metrics(Y_obs, Dict("SAT" => sat), lonlat, [1, 2]; n_phases=2)
+    @test table.phase == ["1", "2", "all"]
+    @test all(table.r[1:2] .> 0.9)
+    @test abs(table.r[3]) < 0.3
+    @test isapprox(table.obs_share[1:2], [0.5, 0.5]; atol=0.02) && table.obs_share[3] == 1.0
+    @test table.obs_r_lat[1] > 0.9 && table.obs_r_lat[2] < -0.9
+    @test table.est_r_lat[3] ≈ 1.0                             # the product keeps a gradient the gauges lack
+    @test_throws ArgumentError HRE.phase_spatial_metrics(Y_obs, Dict("SAT" => sat), lonlat, [1, 2]; n_phases=3)
+end
+
+@testset "small_scale_variance_share separates a smooth field from a noisy one" begin
+    lonlat = hcat(fill(110.0, 40), collect(range(31.0, 33.0; length=40)))   # ~5.7 km spacing
+    smooth = HRE.small_scale_variance_share(lonlat, lonlat[:, 2]; max_km=10.0)
+    noisy = HRE.small_scale_variance_share(lonlat, [isodd(i) ? 1.0 : 0.0 for i in 1:40]; max_km=10.0)
+    @test smooth < 0.01
+    @test noisy > 1.0
+    @test isnan(HRE.small_scale_variance_share(lonlat, lonlat[:, 2]; max_km=1.0))
+end

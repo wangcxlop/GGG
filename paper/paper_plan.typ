@@ -101,11 +101,19 @@ rain-centre shift, mean bias, RMSE and CSI at 50 mm.
 
 *Key findings.*
 - Both products place heavy rain about equally well. Mean spatial r over the six events is 0.55
-  for both GPM and GSMaP, and 0.6–0.8 on four events. Both fail on 2022-06-26 (r ≤ 0.12).
+  for both GPM and GSMaP, and 0.6–0.8 on four events. Both fail on 2022-06-26 (r ≤ 0.12), although
+  each 8 h phase of that day scores r = 0.43–0.88. The rain moved from north to south during the day,
+  so the gauge total is nearly flat, and much of its variation is at scales below 10 km. Both
+  products overestimate the northern convection and underestimate the southern rain that followed.
+  Their daily totals keep a north–south gradient the gauges do not show.
 - Amounts differ sharply. GPM is nearly unbiased (MB −2.0 mm, RMSE 20.5 mm). GSMaP
   overestimates (MB +18.9 mm, RMSE 39.9 mm), up to +73 mm on 2023-08-26.
-- Localized storms are underestimated by both products: CSI at 50 mm is 0 except for GPM on
-  2024-07-30. The 0.1° pixel smooths out small intense cores.
+- Both products miss the cores of the localized storms (CSI at 50 mm is 0 except GPM on
+  2024-07-30). Pixel averaging explains only 16–43% of the core deficit. The cores fell as short
+  bursts (median peak 25–27 mm h⁻¹, up to 87% of a gauge's total in three hours), which both
+  products spread over more hours at about a fifth of the peak rate. On 2023-09-10 no IMERG cell
+  within 50 km exceeds 34 mm. GPM's partial success on 2024-07-30 comes from its monthly gauge
+  calibration (×1.7 over the uncalibrated estimate).
 
 = Q2 — Temporal evolution of rainfall
 

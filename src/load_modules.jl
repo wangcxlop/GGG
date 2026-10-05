@@ -35,7 +35,7 @@ function standalone_module_dependencies(name::AbstractString)
     name in ("AppEEARSNDVI", "ERA5LandStations", "FY4BPreprocessing", "MGERDataPrep",
              "MOD13A2NDVIProcessing", "StudyArea", "TerrainFeatures") &&
         return ["TableIO"]
-    name == "HeavyRainEvents" && return ["TraditionalInterpolation"]
+    name in ("HeavyRainEvents", "HeavyCoreDiagnostics") && return ["TraditionalInterpolation"]
     name == "LandformClassification" && return ["TerrainFeatures"]
     name == "SatelliteTemporalEvaluation" && return ["HeavyRainEvents"]
     name == "NoRainEvaluation" && return ["TraditionalInterpolation", "SatelliteTemporalEvaluation"]
