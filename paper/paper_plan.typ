@@ -45,7 +45,9 @@
 ]
 
 #note[
-  *Scope.* This plan covers two satellite products, GPM IMERG and GSMaP. FY4B is left out of the paper.
+  *Scope.* This plan covers two satellite products, GPM IMERG and GSMaP. FY4B is left out of the paper:
+  on FY4B's own hours it scores worst even when no product is gauge-calibrated (hourly r 0.23 vs
+  0.37–0.43, areal-mean r 0.43 vs 0.66–0.83, wet-hour detection 0.34 vs 0.64–0.66).
   It answers the three questions set for the study and the two methodological questions, in eight
   figures. Five of them are shown below as working drafts built from finished analyses; the other
   three are summarised in the text. Final styling, panel letters and captions come later.
@@ -61,7 +63,10 @@ Two methodological answers follow: which interpolation and fusion methods are be
 product (or a merge of both) should be the anchor.
 
 *Data.* 237 hourly gauges in the Shiyan study area (data quantised to 0.5 mm), and GPM IMERG and
-GSMaP hourly at 0.1°, sampled at the gauge pixels, for 2022–2024. Days run 08–08 Beijing time. Local
+GSMaP hourly at 0.1°, sampled at the gauge pixels, for 2022–2024. The versions are not equally
+gauge-adjusted: GPM is IMERG V07 Final, which is calibrated monthly to GPCC gauge totals, while GSMaP
+is v8 operational `hourlyPrecipRate`, which has no gauge correction. FY4B AGRI L2 QPE is also
+uncorrected. Days run 08–08 Beijing time. Local
 relief from the Copernicus GLO-30 DEM defines the landform regions.
 
 *Figures.* Eight are planned. Five are shown below as drafts (Figs. 2, 3, 4, 6, 7); the other three
@@ -207,7 +212,9 @@ anchor and the merge weights.
   reports rain. MGWR alone is best for heavy hours only.
 - *M2, best product.* GPM. It has the lower raw error (RMSE 0.96 vs 1.22 mm h⁻¹), near-zero event bias
   and a better areal-mean timeline. GSMaP's large wet bias is largely removed by fusion, and once fused
-  the two anchors differ by only about 1%.
+  the two anchors differ by only about 1%. The lead does not come from IMERG's gauge calibration:
+  IMERG Uncal also beats GSMaP over all 2022–2024 hours (RMSE 0.75 vs 1.02 mm h⁻¹, r 0.44 vs 0.38),
+  and calibration moves IMERG's r and CSI only in the third decimal.
 - *Merging.* The OLS merge is a better raw field than either product (RMSE 0.888). After fusion it adds
   almost nothing over GPM (RMSE 0.844 for both). Merging is worth reporting, but it is not the main source of gain.
 
